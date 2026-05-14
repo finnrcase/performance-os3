@@ -144,6 +144,21 @@ type NutritionEntry = {
   sodium?: number | null;
   potassium?: number | null;
   source_label_file?: string;
+  quantity?: number | null;
+  unit?: string;
+  serving_description?: string;
+  sugar?: number | null;
+  source?: string;
+  source_id?: string | null;
+  source_url?: string;
+  confidence?: string;
+  assumptions?: string;
+  original_text?: string;
+  needs_review?: boolean;
+  reviewed_at?: string;
+  created_via?: string;
+  created_at?: string;
+  updated_at?: string;
 };
 
 type DailyNutritionSummary = {
@@ -1142,6 +1157,149 @@ function MacroDonut({ macro }: Readonly<{ macro: MacroProgress }>) {
   );
 }
 
+function formatFoodAmount(value: unknown, digits = 0) {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) return digits > 0 ? "0.0" : "0";
+  return digits > 0 ? numberValue.toFixed(digits).replace(/\.0$/, "") : `${Math.round(numberValue)}`;
+}
+
+function hasFoodDetail(value: unknown) {
+  return value !== null && value !== undefined && value !== "" && String(value) !== "NaN";
+}
+
+function foodMacroSummary(entry: Pick<NutritionEntry, "calories" | "protein" | "carbs" | "fat">) {
+  return `${formatFoodAmount(entry.calories)} kcal · P ${formatFoodAmount(entry.protein)}g · C ${formatFoodAmount(entry.carbs)}g · F ${formatFoodAmount(entry.fat)}g`;
+}
+
+function FoodLogList({ entries, emptyDescription }: Readonly<{ entries: NutritionEntry[]; emptyDescription: string }>) {
+  if (!entries.length) {
+    return (
+      <EmptyState
+        title="No food logged yet"
+        description={emptyDescription}
+        action="Use manual entry"
+        onAction={() => undefined}
+      />
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {entries.map((entry, index) => (
+        <div key={`${entry.date}-${entry.food_name}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
+                {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+              </div>
+              <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FoodEntryDetails({ entry }: Readonly<{ entry: NutritionEntry }>) {
+  const details = [
+    ["Serving", entry.serving_description],
+    ["Quantity", hasFoodDetail(entry.quantity) ? `${formatFoodAmount(entry.quantity, 1)} ${entry.unit ?? ""}`.trim() : ""],
+    ["Grams", hasFoodDetail(entry.grams_consumed) ? `${formatFoodAmount(entry.grams_consumed, 1)}g` : ""],
+    ["Serving size", hasFoodDetail(entry.serving_size_grams) ? `${formatFoodAmount(entry.serving_size_grams, 1)}g` : ""],
+    ["Fiber", hasFoodDetail(entry.fiber) ? `${formatFoodAmount(entry.fiber, 1)}g` : ""],
+    ["Sugar", hasFoodDetail(entry.sugar) ? `${formatFoodAmount(entry.sugar, 1)}g` : ""],
+    ["Sodium", hasFoodDetail(entry.sodium) ? `${formatFoodAmount(entry.sodium)}mg` : ""],
+    ["Potassium", hasFoodDetail(entry.potassium) ? `${formatFoodAmount(entry.potassium)}mg` : ""],
+    ["Source", entry.source],
+    ["Confidence", entry.confidence],
+    ["Source ID", entry.source_id],
+    ["Source URL", entry.source_url],
+    ["Original text", entry.original_text],
+    ["Assumptions", entry.assumptions],
+    ["Created via", entry.created_via],
+  ].filter(([, value]) => hasFoodDetail(value));
+
+  if (!details.length) {
+    return <p className="text-sm text-zinc-500">No extra details saved for this entry.</p>;
+  }
+
+  return (
+    <dl className="grid gap-3 text-sm sm:grid-cols-2">
+      {details.map(([label, value]) => (
+        <div key={label} className="min-w-0">
+          <dt className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">{label}</dt>
+          <dd className="mt-1 break-words text-zinc-300">{String(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+function FoodHistoryList({ logs, nutritionHistory }: Readonly<{ logs: NutritionEntry[]; nutritionHistory: DailyNutritionSummary[] }>) {
+  const summaryByDate = new Map(nutritionHistory.map((day) => [day.date, day]));
+  const groupedLogs = Array.from(
+    logs.reduce((groups, entry) => {
+      const entries = groups.get(entry.date) ?? [];
+      entries.push(entry);
+      groups.set(entry.date, entries);
+      return groups;
+    }, new Map<string, NutritionEntry[]>()),
+  ).sort(([dateA], [dateB]) => dateB.localeCompare(dateA));
+
+  if (!groupedLogs.length) {
+    return <EmptyState title="No food history yet" description="Daily history will appear after food entries are saved." action="Log food" onAction={() => undefined} />;
+  }
+
+  return (
+    <div className="space-y-3">
+      {groupedLogs.map(([date, entries]) => {
+        const summary = summaryByDate.get(date);
+        const totals = summary
+          ? { calories: summary.total_calories, protein: summary.total_protein, carbs: summary.total_carbs, fat: summary.total_fat }
+          : entries.reduce(
+              (dayTotals, entry) => ({
+                calories: dayTotals.calories + (Number(entry.calories) || 0),
+                protein: dayTotals.protein + (Number(entry.protein) || 0),
+                carbs: dayTotals.carbs + (Number(entry.carbs) || 0),
+                fat: dayTotals.fat + (Number(entry.fat) || 0),
+              }),
+              { calories: 0, protein: 0, carbs: 0, fat: 0 },
+            );
+
+        return (
+          <div key={date} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
+              <h3 className="font-semibold text-white">{date}</h3>
+              <p className="text-sm text-zinc-400">{foodMacroSummary(totals)}</p>
+            </div>
+            <div className="mt-3 space-y-2">
+              {entries.slice().reverse().map((entry, index) => (
+                <details key={`${date}-${entry.food_name}-${index}`} className="group rounded-lg border border-white/10 bg-zinc-950/45 p-3">
+                  <summary className="flex cursor-pointer list-none items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
+                        {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+                      </div>
+                      <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
+                    </div>
+                    <ChevronDown className="mt-1 h-4 w-4 shrink-0 text-zinc-500 transition group-open:rotate-180" />
+                  </summary>
+                  <div className="mt-3 border-t border-white/10 pt-3">
+                    <FoodEntryDetails entry={entry} />
+                  </div>
+                </details>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function EmptyState({
   title,
   description,
@@ -2129,6 +2287,7 @@ function FoodPage({
   const [templateRenameValue, setTemplateRenameValue] = useState("");
   const [pendingTemplateAction, setPendingTemplateAction] = useState<string | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
+  const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
     (totals, entry) => ({
       calories: totals.calories + (Number(entry.calories) || 0),
@@ -2310,10 +2469,11 @@ function FoodPage({
         <Card>
           <SectionHeader
             eyebrow="Today"
-            title={`Food logged for ${forms.nutrition.date}`}
+            title={`Food logged for ${selectedDateLabel}`}
             action={
-              <button onClick={() => setShowFoodHistory((value) => !value)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">
-                {showFoodHistory ? "Hide Food History" : "Food History"}
+              <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                {showFoodHistory ? "Hide Food History" : "View Food History"}
+                <ChevronDown className={cx("h-4 w-4 transition", showFoodHistory ? "rotate-180" : "")} />
               </button>
             }
           />
@@ -2324,12 +2484,12 @@ function FoodPage({
             <MetricCard title="Fat" value={`${Math.round(selectedDateTotals.fat)}g`} detail="selected day" icon={FatMoleculeIcon} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
           </div>
           <div className="mt-4">
-            {selectedDateEntries.length ? <DataTable rows={selectedDateEntries.slice().reverse()} /> : <EmptyState title="No food logged yet" description="Manual entries for this date will appear here immediately after saving." action="Use manual entry" onAction={() => undefined} />}
+            <FoodLogList entries={selectedDateEntries.slice().reverse()} emptyDescription="Manual entries for this date will appear here immediately after saving." />
           </div>
         </Card>
         {showFoodHistory ? (
           <Card>
-            <SectionHeader eyebrow="History" title="Daily nutrition summary" />
+            <SectionHeader eyebrow="History" title="Food history" />
             {nutritionHistory.length ? (
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-4">
@@ -2363,10 +2523,10 @@ function FoodPage({
                     </AreaChart>
                   </ResponsiveContainer>
                 </ChartFrame>
-                <DataTable rows={nutritionHistory.slice().reverse()} />
+                <FoodHistoryList logs={logs} nutritionHistory={nutritionHistory} />
               </div>
             ) : (
-              <EmptyState title="No daily nutrition summaries yet" description="Daily totals are built automatically after food is logged." action="Log food" onAction={() => undefined} />
+              <FoodHistoryList logs={logs} nutritionHistory={nutritionHistory} />
             )}
           </Card>
         ) : null}
@@ -2495,8 +2655,8 @@ function FoodPage({
           ) : null}
         </Card>
         <Card>
-          <SectionHeader eyebrow="Log" title="Saved food entries" />
-          {logs.length ? <DataTable rows={logs.slice(-8).reverse()} /> : <EmptyState title="No food logged yet" description="Manual food entries will appear here after saving." action="Log food" onAction={() => undefined} />}
+          <SectionHeader eyebrow="Log" title="Recent saved foods" />
+          <FoodLogList entries={logs.slice(-5).reverse()} emptyDescription="Manual food entries will appear here after saving." />
         </Card>
         <Card>
           <SectionHeader eyebrow="Shortcuts" title="Food shortcuts & meal templates" />
