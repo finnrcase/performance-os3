@@ -20,6 +20,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from src.paths import PROJECT_ROOT, processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
@@ -94,9 +95,7 @@ def _empty_cache() -> pd.DataFrame:
 
 def load_verified_food_cache() -> pd.DataFrame:
     """Load verified food cache from local CSV."""
-    if not VERIFIED_CACHE_PATH.exists():
-        return _empty_cache()
-    cache_df = pd.read_csv(VERIFIED_CACHE_PATH)
+    cache_df = load_dataframe("verified_food_cache", VERIFIED_CACHE_PATH, VERIFIED_CACHE_COLUMNS)
     for column in VERIFIED_CACHE_COLUMNS:
         if column not in cache_df.columns:
             cache_df[column] = ""
@@ -110,8 +109,7 @@ def load_verified_food_cache() -> pd.DataFrame:
 
 def save_verified_food_cache(cache_df: pd.DataFrame) -> None:
     """Persist verified food cache locally."""
-    VERIFIED_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    cache_df.reindex(columns=VERIFIED_CACHE_COLUMNS).to_csv(VERIFIED_CACHE_PATH, index=False)
+    save_dataframe("verified_food_cache", VERIFIED_CACHE_PATH, cache_df, VERIFIED_CACHE_COLUMNS)
 
 
 def _cache_lookup(food_name: str, brand: str | None = None) -> dict | None:

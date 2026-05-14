@@ -9,6 +9,7 @@ import pandas as pd
 
 from src.analytics.training_workload import analyze_training_workload
 from src.paths import processed_data_path
+from src.storage import load_document, save_document
 
 USER_GOALS_PATH = processed_data_path("user_goals.json")
 
@@ -112,23 +113,13 @@ def _coerce_goal_data(data: dict | None) -> dict:
 
 def load_user_goals() -> dict:
     """Load local user goals, returning defaults if no file exists yet."""
-    if not USER_GOALS_PATH.exists():
-        return DEFAULT_USER_GOALS.copy()
-
-    try:
-        with USER_GOALS_PATH.open("r", encoding="utf-8") as file:
-            return _coerce_goal_data(json.load(file))
-    except (json.JSONDecodeError, OSError):
-        return DEFAULT_USER_GOALS.copy()
+    return _coerce_goal_data(load_document("user_goals", USER_GOALS_PATH, DEFAULT_USER_GOALS))
 
 
 def save_user_goals(goals: dict) -> dict:
     """Save local user goals and return the normalized saved shape."""
-    USER_GOALS_PATH.parent.mkdir(parents=True, exist_ok=True)
     normalized_goals = _coerce_goal_data(goals)
-    with USER_GOALS_PATH.open("w", encoding="utf-8") as file:
-        json.dump(normalized_goals, file, indent=2)
-    return normalized_goals
+    return save_document("user_goals", USER_GOALS_PATH, normalized_goals)
 
 
 def calculate_goal_feasibility(user_goals: dict) -> dict:

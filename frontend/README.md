@@ -103,6 +103,23 @@ Only use `NEXT_PUBLIC_API_URL` when you want direct browser-to-backend calls.
 Do not add backend secrets such as `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, or
 `HEVY_API_KEY` to Vercel. Those belong on the FastAPI backend host.
 
+The FastAPI backend must have its own production env vars, including:
+
+```bash
+DATABASE_URL=postgres://...
+OPENAI_API_KEY=...
+HEVY_API_KEY=...
+STRAVA_CLIENT_ID=...
+STRAVA_CLIENT_SECRET=...
+STRAVA_REDIRECT_URI=https://your-performance-os-api.example.com/api/integrations/strava/callback
+CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
+FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
+```
+
+Use `python scripts/export_local_data.py` locally, then run
+`DATABASE_URL=postgres://... python scripts/import_production_data.py` from the
+repo root to seed production with your local history.
+
 Build settings:
 
 ```text

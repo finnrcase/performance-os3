@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 from src.paths import processed_data_path
+from src.storage import load_document, save_document
 
 SETTINGS_PATH = processed_data_path("user_settings.json")
 
@@ -43,13 +44,7 @@ def default_settings() -> dict:
 def load_settings() -> dict:
     """Load local settings from data/processed/user_settings.json."""
     settings = default_settings()
-    if not SETTINGS_PATH.exists():
-        return settings
-
-    try:
-        saved = json.loads(SETTINGS_PATH.read_text())
-    except json.JSONDecodeError:
-        return settings
+    saved = load_document("user_settings", SETTINGS_PATH, settings)
 
     saved_integrations = saved.get("integrations", {})
     settings["integrations"].update(
@@ -69,7 +64,6 @@ def load_settings() -> dict:
 
 def save_settings(settings: dict) -> None:
     """Persist local settings. The file is ignored by git."""
-    SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     normalized = default_settings()
     normalized["integrations"].update(
         {
@@ -83,7 +77,7 @@ def save_settings(settings: dict) -> None:
         key: tokens.get(key, default)
         for key, default in STRAVA_TOKEN_FIELDS.items()
     }
-    SETTINGS_PATH.write_text(json.dumps(normalized, indent=2))
+    save_document("user_settings", SETTINGS_PATH, normalized)
 
 
 def mask_secret(value: str) -> str:

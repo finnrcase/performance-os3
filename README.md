@@ -140,10 +140,12 @@ uvicorn backend.main:app --host 0.0.0.0 --port $PORT
 Set backend environment variables as needed:
 
 ```bash
+DATABASE_URL=postgres://...
 OPENAI_API_KEY=...
 USDA_FDC_API_KEY=...
 STRAVA_CLIENT_ID=...
 STRAVA_CLIENT_SECRET=...
+STRAVA_REDIRECT_URI=https://your-backend-url.example.com/api/integrations/strava/callback
 STRAVA_ACCESS_TOKEN=...
 HEVY_API_KEY=...
 HEVY_WEBHOOK_SECRET=...
@@ -151,25 +153,34 @@ WITHINGS_CLIENT_ID=...
 WITHINGS_CLIENT_SECRET=...
 CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
 FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
-PERFORMANCE_OS_DATA_DIR=/data
 ```
 
 Railway can use `railway.json`. Render can use `render.yaml`. A `Procfile` is also included for platforms that support it.
 
-### Storage And Database Note
+### Production Database
 
-The current backend uses CSV and JSON files instead of a SQL database. For
-production, attach persistent storage and set `PERFORMANCE_OS_DATA_DIR` to the
-mounted path. Examples:
+Local development uses gitignored CSV/JSON files under `data/`. Production must
+set `DATABASE_URL` to a hosted Postgres database such as Neon, Supabase
+Postgres, or another managed Postgres provider. When `DATABASE_URL` is present,
+Performance OS stores food logs, meal templates, body metrics, recovery/sleep,
+training history, integration tokens, macro targets, and PR/settings documents
+in Postgres tables instead of local files.
+
+Initialize the schema:
 
 ```bash
-PERFORMANCE_OS_DATA_DIR=/data
+python scripts/init_database.py
 ```
 
-`DATABASE_URL` is documented in `.env.example` as a reserved future migration
-target, but the current code does not require it. Until a database adapter is
-added, durable hosted data depends on a Railway volume, Render disk, or another
-persistent filesystem.
+Move local history into production:
+
+```bash
+python scripts/export_local_data.py
+DATABASE_URL=postgres://... python scripts/import_production_data.py outputs/performance-os-local-export.json
+```
+
+The Vercel/serverless filesystem is not durable. Do not use local JSON, CSV,
+browser storage, or mock data for important production records.
 
 ### Route And API Notes
 

@@ -12,6 +12,7 @@ import numpy as np
 from pathlib import Path
 
 from src.paths import processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 BODY_METRICS_COLUMNS = [
     "date",
@@ -31,10 +32,7 @@ def _empty_body_metrics() -> pd.DataFrame:
 
 def load_body_metrics() -> pd.DataFrame:
     """Load body metrics from local CSV."""
-    if not BODY_METRICS_PATH.exists():
-        return _empty_body_metrics()
-
-    metrics_df = pd.read_csv(BODY_METRICS_PATH)
+    metrics_df = load_dataframe("body_metrics", BODY_METRICS_PATH, BODY_METRICS_COLUMNS)
 
     for column in BODY_METRICS_COLUMNS:
         if column not in metrics_df.columns:
@@ -53,9 +51,7 @@ def load_body_metrics() -> pd.DataFrame:
 
 def save_body_metrics(df) -> None:
     """Save body metrics to local CSV."""
-    BODY_METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    metrics_df = df.reindex(columns=BODY_METRICS_COLUMNS)
-    metrics_df.to_csv(BODY_METRICS_PATH, index=False)
+    save_dataframe("body_metrics", BODY_METRICS_PATH, df, BODY_METRICS_COLUMNS)
 
 
 def add_body_metric_entry(

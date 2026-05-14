@@ -14,6 +14,7 @@ from pathlib import Path
 from datetime import datetime
 
 from src.paths import processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 RECOVERY_COLUMNS = [
     "date",
@@ -57,10 +58,7 @@ def _empty_recovery_log() -> pd.DataFrame:
 
 def load_recovery_log() -> pd.DataFrame:
     """Load recovery check-ins from local CSV."""
-    if not RECOVERY_LOG_PATH.exists():
-        return _empty_recovery_log()
-
-    recovery_df = pd.read_csv(RECOVERY_LOG_PATH)
+    recovery_df = load_dataframe("recovery_log", RECOVERY_LOG_PATH, RECOVERY_COLUMNS)
 
     for column in RECOVERY_COLUMNS:
         if column not in recovery_df.columns:
@@ -89,9 +87,7 @@ def load_recovery_log() -> pd.DataFrame:
 
 def save_recovery_log(df) -> None:
     """Save recovery check-ins to local CSV."""
-    RECOVERY_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    recovery_df = df.reindex(columns=RECOVERY_COLUMNS)
-    recovery_df.to_csv(RECOVERY_LOG_PATH, index=False)
+    save_dataframe("recovery_log", RECOVERY_LOG_PATH, df, RECOVERY_COLUMNS)
 
 
 def _empty_sleep_entries() -> pd.DataFrame:
@@ -137,13 +133,8 @@ def _sleep_entries_from_recovery_log() -> pd.DataFrame:
 
 def load_sleep_entries() -> pd.DataFrame:
     """Load future Fitbit/Google Fit sleep entries, with manual recovery fallback."""
-    if SLEEP_ENTRIES_PATH.exists():
-        sleep_df = pd.read_csv(SLEEP_ENTRIES_PATH)
-        for column in SLEEP_ENTRY_COLUMNS:
-            if column not in sleep_df.columns:
-                sleep_df[column] = np.nan
-        sleep_df = sleep_df[SLEEP_ENTRY_COLUMNS]
-    else:
+    sleep_df = load_dataframe("sleep_entries", SLEEP_ENTRIES_PATH, SLEEP_ENTRY_COLUMNS)
+    if sleep_df.empty:
         sleep_df = _sleep_entries_from_recovery_log()
 
     numeric_columns = [

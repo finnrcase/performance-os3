@@ -11,6 +11,7 @@ import pandas as pd
 from src.analytics.recovery_engine import analyze_recovery_signal
 from src.goals import calculate_goal_feasibility
 from src.paths import processed_data_path
+from src.storage import load_document, save_document
 
 
 NUTRITION_TARGETS_PATH = processed_data_path("nutrition_targets.json")
@@ -475,23 +476,13 @@ def calculate_macro_targets(
 
 def load_nutrition_targets() -> dict:
     """Load saved nutrition targets, returning an empty dict if missing."""
-    if not NUTRITION_TARGETS_PATH.exists():
-        return {}
-
-    try:
-        with NUTRITION_TARGETS_PATH.open("r", encoding="utf-8") as file:
-            return json.load(file)
-    except (json.JSONDecodeError, OSError):
-        return {}
+    return load_document("nutrition_targets", NUTRITION_TARGETS_PATH, {})
 
 
 def save_nutrition_targets(targets: dict) -> dict:
     """Persist nutrition targets locally."""
-    NUTRITION_TARGETS_PATH.parent.mkdir(parents=True, exist_ok=True)
     targets = {**targets, "updated_at": targets.get("updated_at") or datetime.now(timezone.utc).isoformat()}
-    with NUTRITION_TARGETS_PATH.open("w", encoding="utf-8") as file:
-        json.dump(targets, file, indent=2)
-    return targets
+    return save_document("nutrition_targets", NUTRITION_TARGETS_PATH, targets)
 
 
 def _weekly_rate_from_window(trend_df: pd.DataFrame, days: int) -> float | None:

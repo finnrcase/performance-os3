@@ -10,6 +10,7 @@ import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
 from src.paths import processed_data_path
+from src.storage import load_document, save_document
 
 
 PERSONAL_RECORDS_PATH = processed_data_path("personal_records.json")
@@ -36,12 +37,7 @@ def default_personal_records() -> dict:
 def load_personal_records() -> dict:
     """Load PRs from local JSON."""
     records = default_personal_records()
-    if not PERSONAL_RECORDS_PATH.exists():
-        return records
-    try:
-        saved = json.loads(PERSONAL_RECORDS_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return records
+    saved = load_document("personal_records", PERSONAL_RECORDS_PATH, records)
     records.update({key: saved.get(key, records[key]) for key in ["bench_press", "mile_time"]})
     saved_history = saved.get("history", {})
     records["history"]["bench_press"] = list(saved_history.get("bench_press", []))
@@ -56,12 +52,11 @@ def load_personal_records() -> dict:
 
 def save_personal_records(records: dict) -> None:
     """Save PRs to local JSON."""
-    PERSONAL_RECORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
     normalized = default_personal_records()
     normalized.update({key: records.get(key) for key in ["bench_press", "mile_time"]})
     normalized["history"]["bench_press"] = list(records.get("history", {}).get("bench_press", []))
     normalized["history"]["mile_time"] = list(records.get("history", {}).get("mile_time", []))
-    PERSONAL_RECORDS_PATH.write_text(json.dumps(normalized, indent=2), encoding="utf-8")
+    save_document("personal_records", PERSONAL_RECORDS_PATH, normalized)
 
 
 def _note_value(note: str, key: str) -> str:

@@ -21,6 +21,7 @@ import pandas as pd
 
 from src.config import load_settings
 from src.paths import PROJECT_ROOT, processed_data_path, raw_data_path
+from src.storage import load_document, save_document
 from src.training import TRAINING_COLUMNS, load_training_log, save_training_log
 
 
@@ -113,20 +114,13 @@ def verify_webhook_token(headers: dict) -> bool:
 
 
 def load_hevy_sync_state() -> dict:
-    if not HEVY_SYNC_STATE_PATH.exists():
-        return {"last_sync_at": "", "last_event_cursor": "", "last_error": "", "last_result": {}}
-    try:
-        return json.loads(HEVY_SYNC_STATE_PATH.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return {"last_sync_at": "", "last_event_cursor": "", "last_error": "Invalid sync state file.", "last_result": {}}
+    return load_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, {"last_sync_at": "", "last_event_cursor": "", "last_error": "", "last_result": {}})
 
 
 def save_hevy_sync_state(updates: dict) -> dict:
     state = load_hevy_sync_state()
     state.update(updates)
-    HEVY_SYNC_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    HEVY_SYNC_STATE_PATH.write_text(json.dumps(state, indent=2), encoding="utf-8")
-    return state
+    return save_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, state)
 
 
 def _parse_date(timestamp: str | None) -> str:

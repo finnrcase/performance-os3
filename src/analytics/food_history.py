@@ -12,6 +12,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.paths import processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 DAILY_NUTRITION_SUMMARY_PATH = processed_data_path("daily_nutrition_summary.csv")
 
@@ -150,19 +151,16 @@ def build_daily_nutrition_summary(nutrition_log_df: pd.DataFrame, targets: dict 
 
 def save_daily_nutrition_summary(summary_df: pd.DataFrame) -> None:
     """Persist daily nutrition summaries locally."""
-    DAILY_NUTRITION_SUMMARY_PATH.parent.mkdir(parents=True, exist_ok=True)
     summary_df = summary_df.copy() if summary_df is not None else _empty_summary()
     for column in SUMMARY_COLUMNS:
         if column not in summary_df.columns:
             summary_df[column] = pd.NA
-    summary_df[SUMMARY_COLUMNS].to_csv(DAILY_NUTRITION_SUMMARY_PATH, index=False)
+    save_dataframe("daily_nutrition_summary", DAILY_NUTRITION_SUMMARY_PATH, summary_df, SUMMARY_COLUMNS)
 
 
 def load_daily_nutrition_summary() -> pd.DataFrame:
     """Load persisted daily nutrition summary data."""
-    if not DAILY_NUTRITION_SUMMARY_PATH.exists():
-        return _empty_summary()
-    summary_df = pd.read_csv(DAILY_NUTRITION_SUMMARY_PATH)
+    summary_df = load_dataframe("daily_nutrition_summary", DAILY_NUTRITION_SUMMARY_PATH, SUMMARY_COLUMNS)
     for column in SUMMARY_COLUMNS:
         if column not in summary_df.columns:
             summary_df[column] = pd.NA

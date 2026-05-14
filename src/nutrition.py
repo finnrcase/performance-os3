@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from src.paths import processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 NUTRITION_COLUMNS = [
     "date",
@@ -203,10 +204,7 @@ def calculate_daily_totals(entries_df, date) -> dict:
 
 def load_nutrition_log() -> pd.DataFrame:
     """Load the local nutrition log, creating an empty frame if needed."""
-    if not NUTRITION_LOG_PATH.exists():
-        return _empty_nutrition_log()
-
-    entries_df = pd.read_csv(NUTRITION_LOG_PATH)
+    entries_df = load_dataframe("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS)
 
     for column in NUTRITION_COLUMNS:
         if column not in entries_df.columns:
@@ -269,9 +267,7 @@ def load_nutrition_log() -> pd.DataFrame:
 
 def save_nutrition_log(entries_df) -> None:
     """Save the nutrition log locally."""
-    NUTRITION_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    entries_df = entries_df.reindex(columns=NUTRITION_COLUMNS)
-    entries_df.to_csv(NUTRITION_LOG_PATH, index=False)
+    save_dataframe("nutrition_log", NUTRITION_LOG_PATH, entries_df, NUTRITION_COLUMNS)
 
 
 def _empty_frequent_foods() -> pd.DataFrame:
@@ -281,10 +277,7 @@ def _empty_frequent_foods() -> pd.DataFrame:
 
 def load_frequent_foods() -> pd.DataFrame:
     """Load saved frequent foods, creating an empty frame if needed."""
-    if not FREQUENT_FOODS_PATH.exists():
-        return _empty_frequent_foods()
-
-    foods_df = pd.read_csv(FREQUENT_FOODS_PATH)
+    foods_df = load_dataframe("frequent_foods", FREQUENT_FOODS_PATH, FREQUENT_FOOD_COLUMNS)
 
     for column in FREQUENT_FOOD_COLUMNS:
         if column not in foods_df.columns:
@@ -310,9 +303,7 @@ def load_frequent_foods() -> pd.DataFrame:
 
 def save_frequent_foods(df) -> None:
     """Save frequent foods locally."""
-    FREQUENT_FOODS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    foods_df = df.reindex(columns=FREQUENT_FOOD_COLUMNS)
-    foods_df.to_csv(FREQUENT_FOODS_PATH, index=False)
+    save_dataframe("frequent_foods", FREQUENT_FOODS_PATH, df, FREQUENT_FOOD_COLUMNS)
 
 
 def add_frequent_food(
@@ -387,10 +378,7 @@ def _empty_food_shortcuts() -> pd.DataFrame:
 
 def load_food_shortcuts() -> pd.DataFrame:
     """Load reusable food shortcuts, creating an empty frame if needed."""
-    if not FOOD_SHORTCUTS_PATH.exists():
-        return _empty_food_shortcuts()
-
-    shortcuts_df = pd.read_csv(FOOD_SHORTCUTS_PATH)
+    shortcuts_df = load_dataframe("food_shortcuts", FOOD_SHORTCUTS_PATH, FOOD_SHORTCUT_COLUMNS)
     for column in FOOD_SHORTCUT_COLUMNS:
         if column not in shortcuts_df.columns:
             shortcuts_df[column] = np.nan
@@ -420,9 +408,7 @@ def load_food_shortcuts() -> pd.DataFrame:
 
 def save_food_shortcuts(df) -> None:
     """Persist food shortcuts locally."""
-    FOOD_SHORTCUTS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    shortcuts_df = df.reindex(columns=FOOD_SHORTCUT_COLUMNS)
-    shortcuts_df.to_csv(FOOD_SHORTCUTS_PATH, index=False)
+    save_dataframe("food_shortcuts", FOOD_SHORTCUTS_PATH, df, FOOD_SHORTCUT_COLUMNS)
 
 
 def add_food_shortcut(
@@ -546,10 +532,7 @@ def log_food_shortcut(shortcut_id, date, meal_type="Snack") -> dict:
 
 def load_meal_templates() -> pd.DataFrame:
     """Load saved meal templates from local CSV."""
-    if not MEAL_TEMPLATES_PATH.exists():
-        return pd.DataFrame(columns=MEAL_TEMPLATE_COLUMNS)
-
-    templates_df = pd.read_csv(MEAL_TEMPLATES_PATH)
+    templates_df = load_dataframe("meal_templates", MEAL_TEMPLATES_PATH, MEAL_TEMPLATE_COLUMNS)
 
     for column in MEAL_TEMPLATE_COLUMNS:
         if column not in templates_df.columns:
@@ -568,9 +551,7 @@ def load_meal_templates() -> pd.DataFrame:
 
 def save_meal_templates(df) -> None:
     """Save meal templates locally."""
-    MEAL_TEMPLATES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    templates_df = df.reindex(columns=MEAL_TEMPLATE_COLUMNS)
-    templates_df.to_csv(MEAL_TEMPLATES_PATH, index=False)
+    save_dataframe("meal_templates", MEAL_TEMPLATES_PATH, df, MEAL_TEMPLATE_COLUMNS)
 
 
 def add_meal_template(

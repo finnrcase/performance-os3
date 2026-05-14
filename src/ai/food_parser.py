@@ -20,6 +20,7 @@ from openai import APIConnectionError, APIStatusError, AuthenticationError, Open
 from src.ai.nutrition_verifier import should_verify_food, verify_food_online
 from src.integrations.usda_client import search_food_macros
 from src.paths import PROJECT_ROOT, processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
@@ -58,10 +59,7 @@ def _empty_cache() -> pd.DataFrame:
 
 
 def _load_food_cache() -> pd.DataFrame:
-    if not FOOD_CACHE_PATH.exists():
-        return _empty_cache()
-
-    cache_df = pd.read_csv(FOOD_CACHE_PATH)
+    cache_df = load_dataframe("ai_food_cache", FOOD_CACHE_PATH, FOOD_CACHE_COLUMNS)
     for column in FOOD_CACHE_COLUMNS:
         if column not in cache_df.columns:
             cache_df[column] = ""
@@ -74,8 +72,7 @@ def _load_food_cache() -> pd.DataFrame:
 
 
 def _save_food_cache(cache_df: pd.DataFrame) -> None:
-    FOOD_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    cache_df.reindex(columns=FOOD_CACHE_COLUMNS).to_csv(FOOD_CACHE_PATH, index=False)
+    save_dataframe("ai_food_cache", FOOD_CACHE_PATH, cache_df, FOOD_CACHE_COLUMNS)
 
 
 def _read_settings_key() -> str:

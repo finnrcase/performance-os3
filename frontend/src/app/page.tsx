@@ -6,6 +6,7 @@ import {
   BarChart3,
   Check,
   ChevronDown,
+  Download,
   Dumbbell,
   Gauge,
   HeartPulse,
@@ -445,19 +446,52 @@ type LeanBulkDecision = {
   };
 };
 
+type AdaptiveDayTypeAdjustment = {
+  type: string;
+  reason: string;
+  calorie_delta: number;
+  carb_delta: number;
+  fat_delta: number;
+  confidence: string;
+  applied_delta?: { calories: number; protein: number; carbs: number; fat: number };
+  adjusted_targets?: { calories: number; protein: number; carbs: number; fat: number };
+};
+
 type AdaptiveNutritionRecommendation = {
+  recommendedCalories?: number;
+  recommendedProtein?: number;
+  recommendedCarbs?: number;
+  recommendedFat?: number;
   caloriesTarget: number;
   proteinTarget: number;
   carbsTarget: number;
   fatTarget: number;
   calorieAdjustment: number;
+  macroAdjustment?: { calories: number; protein: number; carbs: number; fat: number };
   macroChanges: { calories: number; protein: number; carbs: number; fat: number };
+  dayType?: string;
+  dayTypeAdjustment?: AdaptiveDayTypeAdjustment;
+  dayOfWeekAdjustment?: {
+    weekday: string;
+    calorie_delta: number;
+    carb_delta: number;
+    confidence: string;
+    reason: string;
+    comparable_weeks: number;
+  };
+  carbTimingRecommendation?: string;
   confidence: "low" | "medium" | "high" | string;
+  dataQualityScore?: number;
   reasoning: string[];
   warnings: string[];
+  detectedTrends?: string[];
+  missingDataWarnings?: string[];
+  nextReviewDate?: string;
   strategy: string;
   currentTarget: { calories: number; protein: number; carbs: number; fat: number };
   recommendedTargets: Targets;
+  baselineRecommendedTargets?: Targets;
+  dayTypeAdjustedTargets?: Targets;
   signals: {
     weight: {
       status: string;
@@ -467,11 +501,37 @@ type AdaptiveNutritionRecommendation = {
       confidence?: string;
       reason?: string;
     };
+    bodyComposition?: {
+      status: string;
+      lean_gain_quality: string;
+      latest_bodyweight?: number | null;
+      latest_body_fat_percent?: number | null;
+      latest_lean_mass?: number | null;
+      latest_fat_mass?: number | null;
+      weight_7_day_average?: number | null;
+      weight_14_day_average?: number | null;
+      weight_28_day_average?: number | null;
+      weight_gain_rate_lb_per_week?: number | null;
+      weight_gain_rate_pct_per_week?: number | null;
+      lean_mass_trend_7?: number | null;
+      lean_mass_trend_14?: number | null;
+      lean_mass_trend_28?: number | null;
+      fat_mass_trend_7?: number | null;
+      fat_mass_trend_14?: number | null;
+      fat_mass_trend_28?: number | null;
+      body_fat_percent_trend_14?: number | null;
+      body_fat_percent_trend_28?: number | null;
+      data_points?: number;
+      body_fat_data_points?: number;
+    };
     performance: NonNullable<LeanBulkDecision["details"]["performance_signal"]>;
     recovery: RecoverySignal;
     trainingLoad: { status: string; summary: string; hard_sets_per_week?: number; weekly_training_minutes?: number };
-    runningLoad: { status: string; summary: string; runs_per_week?: number; weekly_mileage?: number };
+    runningLoad: { status: string; summary: string; runs_per_week?: number; weekly_mileage?: number; interference_risk?: string };
     nutrition: { days: number; calories: number | null; protein: number | null; carbs: number | null; fat: number | null };
+    dataQuality?: { score: number; confidence: string; missingDataWarnings: string[] };
+    dayType?: AdaptiveDayTypeAdjustment;
+    historicalLearning?: { detectedTrends: string[] };
   };
 };
 
@@ -500,6 +560,78 @@ type WeeklyReport = {
   best_trend: string;
   watch: string;
   recommendation: string;
+};
+
+type OptimizationTargets = {
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+};
+
+type OptimizationData = {
+  day_type_macros: {
+    day_type: string;
+    confidence: string;
+    reason: string;
+    baseline_targets: OptimizationTargets;
+    adjusted_targets: OptimizationTargets;
+    delta: OptimizationTargets;
+    signals: string[];
+  };
+  plateau_detection: {
+    status: string;
+    summary: string;
+    top_alerts: Array<{
+      type: string;
+      name: string;
+      muscle_group: string;
+      signal: string;
+      severity: string;
+      duration_weeks: number;
+      message: string;
+      estimated_1rm_change_pct?: number | null;
+      volume_change_pct?: number | null;
+      reps_at_same_weight_delta?: number | null;
+    }>;
+    details: Array<{
+      type: string;
+      name: string;
+      muscle_group: string;
+      signal: string;
+      severity: string;
+      duration_weeks: number;
+      message: string;
+      estimated_1rm_change_pct?: number | null;
+      volume_change_pct?: number | null;
+      reps_at_same_weight_delta?: number | null;
+    }>;
+  };
+  macro_adherence: {
+    weekly_score: number | null;
+    status: string;
+    summary: string;
+    components: Record<string, number | null>;
+    daily: Array<{ date: string; score: number; calories?: number; protein?: number; carbs?: number; fat?: number }>;
+    correlations: Array<{ label: string; summary: string; correlation?: number; confidence: string }>;
+  };
+  personal_baseline: {
+    status: string;
+    confidence: string;
+    summary: string;
+    dashboard_insight: { title: string; summary: string; confidence: string; metric: string } | null;
+    insights: Array<{ title: string; summary: string; confidence: string; metric: string }>;
+  };
+};
+
+type SettingsHealthCard = {
+  id: string;
+  title: string;
+  status: "connected" | "syncing" | "warning" | "error" | string;
+  label: string;
+  detail: string;
+  last_synced_at?: string;
+  action?: string;
 };
 
 type HevyPreviewWorkout = {
@@ -602,6 +734,7 @@ type DashboardData = {
   prs: Pick<PersonalRecords, "bench_press" | "mile_time">;
   goals: Goals;
   targets: Targets;
+  base_targets?: Targets;
   nutrition_today: { calories: number; protein: number; carbs: number; fat: number };
   latest_bodyweight: number | null;
   bodyweight_trend: BodyMetricEntry[];
@@ -618,6 +751,7 @@ type DashboardData = {
   adaptive_recommendation: AdaptiveNutritionRecommendation;
   personal_learning: PersonalLearning;
   weekly_report: WeeklyReport;
+  optimization: OptimizationData;
   recommendation: { recommendation_summary: string; reasoning_explanation: string };
   counts: { nutrition: number; body_metrics: number; recovery: number; training: number };
 };
@@ -625,6 +759,7 @@ type DashboardData = {
 type SettingsData = {
   integrations: Record<string, string>;
   statuses: Record<string, string>;
+  health?: SettingsHealthCard[];
 };
 
 type FormState = {
@@ -1699,6 +1834,11 @@ function Dashboard({
   const personalLearning = data?.personal_learning;
   const weeklyReport = data?.weekly_report;
   const prs = data?.prs;
+  const optimization = data?.optimization;
+  const dashboardInsight = optimization?.personal_baseline.dashboard_insight;
+  const topPlateauAlerts = optimization?.plateau_detection.top_alerts ?? [];
+  const adaptiveRecommendation = data?.adaptive_recommendation;
+  const topAdaptiveWarning = adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
 
   return (
     <div className="grid gap-4 xl:grid-cols-5">
@@ -1814,31 +1954,52 @@ function Dashboard({
       </Card>
 
       <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Adaptive" title="Personal Learning" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Data</button>} />
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <p className="text-sm leading-6 text-zinc-400">{personalLearning?.summary ?? "Learning from your history. More weekly data is needed before pattern detection is useful."}</p>
-          <span className="inline-flex w-fit shrink-0 rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100">
-            {personalLearning?.confidence ?? "low"} confidence
-          </span>
-        </div>
-        {personalLearning?.insights?.length ? (
-          <div className="mt-4 grid gap-3 md:grid-cols-3">
-            {personalLearning.insights.slice(0, 3).map((insight) => (
-              <div key={insight.title} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-sm font-semibold text-white">{insight.title}</p>
-                <p className="mt-2 text-xs leading-5 text-zinc-400">{insight.explanation}</p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] capitalize text-zinc-300">{insight.confidence}</span>
-                  <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] text-zinc-300">{insight.window}</span>
-                </div>
+        <SectionHeader eyebrow="Adaptive" title="Optimization Signals" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Details</button>} />
+        {adaptiveRecommendation ? (
+          <button
+            type="button"
+            onClick={() => setActivePage("goals")}
+            className="mb-3 w-full rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-3 text-left transition hover:bg-emerald-300/[0.08]"
+          >
+            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Nutrition recommendation</p>
+                <p className="mt-1 text-sm font-semibold text-white">
+                  {adaptiveRecommendation.calorieAdjustment === 0 ? "Hold baseline targets" : `${adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}${adaptiveRecommendation.calorieAdjustment} kcal baseline adjustment`}
+                </p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">{adaptiveRecommendation.reasoning?.[0] ?? "Adaptive engine is learning from current data."}</p>
               </div>
-            ))}
+              <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
+                {adaptiveRecommendation.confidence} · {adaptiveRecommendation.dataQualityScore ?? 0}/100
+              </span>
+            </div>
+            {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
+          </button>
+        ) : null}
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Macro adherence</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{optimization?.macro_adherence.weekly_score !== null && optimization?.macro_adherence.weekly_score !== undefined ? `${Math.round(optimization.macro_adherence.weekly_score)}` : "--"}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{optimization?.macro_adherence.summary ?? "Log meals against targets to calculate adherence."}</p>
           </div>
-        ) : (
-          <div className="mt-4 rounded-lg border border-dashed border-white/10 bg-black/10 p-4 text-sm text-zinc-400">
-            Personal patterns will appear after enough overlapping nutrition, training, bodyweight, sleep, and recovery history is logged.
+          <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau watch</p>
+            {topPlateauAlerts.length ? (
+              <div className="mt-2 space-y-2">
+                {topPlateauAlerts.slice(0, 2).map((alert) => (
+                  <p key={`${alert.type}-${alert.name}-${alert.signal}`} className="text-sm leading-5 text-amber-50">{alert.message}</p>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm leading-5 text-zinc-400">{optimization?.plateau_detection.summary ?? "No conservative plateau flags yet."}</p>
+            )}
           </div>
-        )}
+          <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
+            <p className="mt-2 text-sm font-semibold text-white">{dashboardInsight?.title ?? personalLearning?.insights?.[0]?.title ?? "Learning"}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{dashboardInsight?.summary ?? personalLearning?.insights?.[0]?.explanation ?? "More overlapping data will unlock personal baseline ranges."}</p>
+          </div>
+        </div>
       </Card>
 
       <WeeklyPerformanceReportCard report={weeklyReport} onViewDetails={() => setActivePage("history")} />
@@ -1936,6 +2097,10 @@ function GoalsPage({
   const recoverySignal = leanBulkDecision?.details.recovery_signal ?? targets?.recovery_signal;
   const recoveryDrivers = recoverySignal?.drivers?.slice(0, 3) ?? [];
   const adaptiveReasons = adaptiveRecommendation?.reasoning?.slice(0, 4) ?? [];
+  const adaptiveTrends = adaptiveRecommendation?.detectedTrends?.slice(0, 4) ?? [];
+  const missingDataWarnings = adaptiveRecommendation?.missingDataWarnings?.slice(0, 3) ?? [];
+  const dayTypeAdjustment = adaptiveRecommendation?.dayTypeAdjustment;
+  const bodyComposition = adaptiveRecommendation?.signals.bodyComposition;
   return (
     <div className="space-y-6">
       <Card>
@@ -2013,9 +2178,46 @@ function GoalsPage({
                 </p>
               </div>
             </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.045] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-cyan-200/70">Day type</p>
+                <p className="mt-2 text-sm font-semibold text-white">{adaptiveRecommendation?.dayType ?? "Learning"}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">{dayTypeAdjustment?.reason ?? "Workout and run context will tune daily carbs."}</p>
+              </div>
+              <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-emerald-200/70">Data quality</p>
+                <p className="mt-2 text-sm font-semibold text-white">{adaptiveRecommendation?.dataQualityScore ?? 0}/100</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">Next review: {adaptiveRecommendation?.nextReviewDate ?? "after more logs"}</p>
+              </div>
+              <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.045] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-violet-200/70">Lean gain quality</p>
+                <p className="mt-2 text-sm font-semibold capitalize text-white">{bodyComposition?.lean_gain_quality ?? "unknown"}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">
+                  {bodyComposition?.latest_lean_mass ? `Lean ${bodyComposition.latest_lean_mass} lb` : "Body fat data improves this read."}
+                  {bodyComposition?.latest_fat_mass ? ` · Fat ${bodyComposition.latest_fat_mass} lb` : ""}
+                </p>
+              </div>
+            </div>
             <ul className="mt-4 space-y-2 text-sm text-zinc-300">
               {(adaptiveReasons.length ? adaptiveReasons : ["Need more data before making adaptive macro changes."]).map((reason) => <li key={reason}>{reason}</li>)}
             </ul>
+            {adaptiveRecommendation?.carbTimingRecommendation ? (
+              <p className="mt-3 rounded-lg border border-blue-300/15 bg-blue-300/[0.045] p-3 text-sm leading-6 text-blue-100">{adaptiveRecommendation.carbTimingRecommendation}</p>
+            ) : null}
+            {adaptiveTrends.length ? (
+              <div className="mt-3 rounded-lg border border-white/10 bg-black/10 p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">Detected trends</p>
+                <ul className="mt-2 space-y-1 text-xs leading-5 text-zinc-400">
+                  {adaptiveTrends.map((trend) => <li key={trend}>{trend}</li>)}
+                </ul>
+              </div>
+            ) : null}
+            {missingDataWarnings.length ? (
+              <div className="mt-3 rounded-lg border border-amber-300/20 bg-amber-300/10 p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.12em] text-amber-200/80">Data gaps</p>
+                <p className="mt-1 text-xs leading-5 text-amber-100">{missingDataWarnings.join(" ")}</p>
+              </div>
+            ) : null}
             {adaptiveRecommendation?.warnings?.length ? (
               <p className="mt-3 text-xs leading-5 text-amber-200">{adaptiveRecommendation.warnings[0]}</p>
             ) : null}
@@ -2204,6 +2406,9 @@ function GoalsPage({
 function FoodPage({
   logs,
   targets,
+  dayTypeMacros,
+  adaptiveRecommendation,
+  onApplySuggestedMacros,
   nutritionHistory,
   nutritionAdherence,
   shortcuts,
@@ -2243,6 +2448,9 @@ function FoodPage({
 }: Readonly<{
   logs: NutritionEntry[];
   targets: Targets | null;
+  dayTypeMacros?: OptimizationData["day_type_macros"] | null;
+  adaptiveRecommendation?: AdaptiveNutritionRecommendation | null;
+  onApplySuggestedMacros: () => void;
   nutritionHistory: DailyNutritionSummary[];
   nutritionAdherence: NutritionAdherence | null;
   shortcuts: FoodShortcut[];
@@ -2297,12 +2505,18 @@ function FoodPage({
     }),
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
-  const hasMacroTargets = Boolean(targets && targets.target_calories > 0 && targets.protein_grams > 0 && targets.carb_grams > 0 && targets.fat_grams > 0);
-  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, targets?.target_calories ?? 0, "bg-cyan-300");
+  const displayTargets = targets ? {
+    target_calories: dayTypeMacros?.adjusted_targets?.calories ?? targets.target_calories,
+    protein_grams: dayTypeMacros?.adjusted_targets?.protein ?? targets.protein_grams,
+    carb_grams: dayTypeMacros?.adjusted_targets?.carbs ?? targets.carb_grams,
+    fat_grams: dayTypeMacros?.adjusted_targets?.fat ?? targets.fat_grams,
+  } : null;
+  const hasMacroTargets = Boolean(displayTargets && displayTargets.target_calories > 0 && displayTargets.protein_grams > 0 && displayTargets.carb_grams > 0 && displayTargets.fat_grams > 0);
+  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "bg-cyan-300");
   const macroProgress = [
-    buildMacroProgress("Protein", "g", selectedDateTotals.protein, targets?.protein_grams ?? 0, "bg-teal-300"),
-    buildMacroProgress("Carbs", "g", selectedDateTotals.carbs, targets?.carb_grams ?? 0, "bg-blue-300"),
-    buildMacroProgress("Fat", "g", selectedDateTotals.fat, targets?.fat_grams ?? 0, "bg-amber-300"),
+    buildMacroProgress("Protein", "g", selectedDateTotals.protein, displayTargets?.protein_grams ?? 0, "bg-teal-300"),
+    buildMacroProgress("Carbs", "g", selectedDateTotals.carbs, displayTargets?.carb_grams ?? 0, "bg-blue-300"),
+    buildMacroProgress("Fat", "g", selectedDateTotals.fat, displayTargets?.fat_grams ?? 0, "bg-amber-300"),
   ];
   const recentHistory = nutritionHistory.slice(-30);
   const filteredShortcuts = shortcuts.filter((shortcut) => normalizeSearchText(shortcut.shortcut_name).includes(normalizeSearchText(shortcutQuery)));
@@ -2440,6 +2654,46 @@ function FoodPage({
           <SectionHeader eyebrow="Targets" title="Macro progress" />
           {hasMacroTargets ? (
             <div className="space-y-4">
+              {dayTypeMacros ? (
+                <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-white">{dayTypeMacros.day_type}</p>
+                      <p className="mt-1 text-sm leading-6 text-zinc-400">{dayTypeMacros.reason}</p>
+                    </div>
+                    <span className="w-fit rounded-full border border-cyan-300/25 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100">
+                      {dayTypeMacros.confidence} confidence
+                    </span>
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-2 text-xs">
+                    <span className="rounded-full border border-white/10 px-2.5 py-1 text-zinc-300">{dayTypeMacros.delta.calories >= 0 ? "+" : ""}{dayTypeMacros.delta.calories} kcal</span>
+                    <span className="rounded-full border border-white/10 px-2.5 py-1 text-zinc-300">P {dayTypeMacros.delta.protein >= 0 ? "+" : ""}{dayTypeMacros.delta.protein}g</span>
+                    <span className="rounded-full border border-white/10 px-2.5 py-1 text-zinc-300">C {dayTypeMacros.delta.carbs >= 0 ? "+" : ""}{dayTypeMacros.delta.carbs}g</span>
+                    <span className="rounded-full border border-white/10 px-2.5 py-1 text-zinc-300">F {dayTypeMacros.delta.fat >= 0 ? "+" : ""}{dayTypeMacros.delta.fat}g</span>
+                  </div>
+                  {dayTypeMacros.signals.length ? <p className="mt-3 text-xs leading-5 text-zinc-500">{dayTypeMacros.signals[0]}</p> : null}
+                </div>
+              ) : null}
+              {adaptiveRecommendation ? (
+                <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-4">
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-sm font-semibold text-white">Adaptive baseline recommendation</p>
+                      <p className="mt-1 text-sm leading-6 text-zinc-400">
+                        {adaptiveRecommendation.caloriesTarget} kcal · P {adaptiveRecommendation.proteinTarget}g · C {adaptiveRecommendation.carbsTarget}g · F {adaptiveRecommendation.fatTarget}g
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-zinc-500">{adaptiveRecommendation.reasoning?.[0] ?? "Recommendation updates with body, food, training, runs, and recovery data."}</p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={onApplySuggestedMacros}
+                      className="w-fit rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-200"
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              ) : null}
               <MacroProgressCard macro={calorieProgress} />
               <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
                 {macroProgress.map((macro) => (
@@ -2792,6 +3046,7 @@ function RecoveryPage({
   bodyMetrics,
   recoveryLogs,
   sleepEntries,
+  adaptiveRecommendation,
   forms,
   setForms,
   onBodySubmit,
@@ -2800,6 +3055,7 @@ function RecoveryPage({
   bodyMetrics: BodyMetricEntry[];
   recoveryLogs: RecoveryEntry[];
   sleepEntries: SleepEntry[];
+  adaptiveRecommendation?: AdaptiveNutritionRecommendation | null;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onBodySubmit: (event: FormEvent) => void;
@@ -2906,6 +3162,19 @@ function RecoveryPage({
               <p className="text-sm font-semibold text-blue-100">Recovery impact</p>
               <p className="mt-2 text-sm leading-6 text-zinc-300">{recoveryImpact}</p>
             </div>
+            {adaptiveRecommendation?.signals.recovery ? (
+              <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] p-4">
+                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <p className="text-sm font-semibold text-emerald-100">Nutrition impact</p>
+                    <p className="mt-2 text-sm leading-6 text-zinc-300">{adaptiveRecommendation.signals.recovery.nutrition_implication}</p>
+                  </div>
+                  <span className="w-fit rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold capitalize text-emerald-100">
+                    {adaptiveRecommendation.signals.recovery.status}
+                  </span>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : (
           <EmptyState title="Sleep tracking will appear here once Fitbit / Google Fit is connected." description="Manual recovery sleep entries and future wearable sleep stages will power duration, consistency, and quality trends." action="Connect wearable" onAction={() => undefined} />
@@ -3394,10 +3663,31 @@ function TrainingPage({
   );
 }
 
+type CsvExportRange = "all" | "7d" | "30d" | "90d" | "custom";
+
+function localDateDaysAgo(daysAgo: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 10);
+}
+
+function csvFilenameFromDisposition(header: string | null) {
+  if (!header) return `performance-os-backup-${todayString()}.csv`;
+  const filenameStarMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (filenameStarMatch?.[1]) {
+    return decodeURIComponent(filenameStarMatch[1].replaceAll("\"", ""));
+  }
+  const filenameMatch = header.match(/filename="?([^";]+)"?/i);
+  return filenameMatch?.[1] ?? `performance-os-backup-${todayString()}.csv`;
+}
+
 function HistoryPage({
   nutritionLogs,
   nutritionHistory,
   nutritionAdherence,
+  optimization,
+  adaptiveRecommendation,
   bodyMetrics,
   recoveryTrend,
   trainingVolume,
@@ -3413,10 +3703,13 @@ function HistoryPage({
   setTrendDateRange,
   muscleTrendMetric,
   setMuscleTrendMetric,
+  onBackupImported,
 }: Readonly<{
   nutritionLogs: NutritionEntry[];
   nutritionHistory: DailyNutritionSummary[];
   nutritionAdherence: NutritionAdherence | null;
+  optimization: OptimizationData | null;
+  adaptiveRecommendation: AdaptiveNutritionRecommendation | null;
   bodyMetrics: BodyMetricEntry[];
   recoveryTrend: DashboardData["recovery_trend"];
   trainingVolume: DashboardData["training_volume"];
@@ -3432,7 +3725,17 @@ function HistoryPage({
   setTrendDateRange: (value: string) => void;
   muscleTrendMetric: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">;
   setMuscleTrendMetric: (value: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">) => void;
+  onBackupImported: () => Promise<void>;
 }>) {
+  const [exportRange, setExportRange] = useState<CsvExportRange>("all");
+  const [exportStartDate, setExportStartDate] = useState(localDateDaysAgo(29));
+  const [exportEndDate, setExportEndDate] = useState(todayString());
+  const [exportLoading, setExportLoading] = useState(false);
+  const [exportError, setExportError] = useState("");
+  const [backupLoading, setBackupLoading] = useState(false);
+  const [backupMessage, setBackupMessage] = useState("");
+  const [backupError, setBackupError] = useState("");
+  const backupInputRef = useRef<HTMLInputElement | null>(null);
   const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
   const dailyNutritionTrend = nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
     date: entry.date,
@@ -3460,8 +3763,336 @@ function HistoryPage({
     adherence_score: null,
     notes: "",
   }));
+
+  const handleCsvExport = useCallback(async () => {
+    setExportLoading(true);
+    setExportError("");
+    try {
+      const params = new URLSearchParams();
+      if (exportRange === "custom") {
+        if (exportStartDate) params.set("startDate", exportStartDate);
+        if (exportEndDate) params.set("endDate", exportEndDate);
+      } else if (exportRange !== "all") {
+        const days = Number(exportRange.replace("d", ""));
+        params.set("startDate", localDateDaysAgo(days - 1));
+        params.set("endDate", todayString());
+      }
+
+      const query = params.toString();
+      const response = await fetch(apiUrl(`/api/export/daily-csv${query ? `?${query}` : ""}`), {
+        cache: "no-store",
+        credentials: "include",
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        let message = `Export failed (${response.status}).`;
+        try {
+          const payload = JSON.parse(text);
+          message = payload.detail || payload.message || message;
+        } catch {
+          message = text || message;
+        }
+        throw new Error(message);
+      }
+
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = csvFilenameFromDisposition(response.headers.get("Content-Disposition"));
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } catch (error) {
+      setExportError(error instanceof Error ? error.message : "CSV export failed.");
+    } finally {
+      setExportLoading(false);
+    }
+  }, [exportEndDate, exportRange, exportStartDate]);
+
+  const handleFullBackupExport = useCallback(async () => {
+    setBackupLoading(true);
+    setBackupError("");
+    setBackupMessage("");
+    try {
+      const response = await fetch(apiUrl("/api/export/full-backup"), {
+        cache: "no-store",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Backup export failed (${response.status}).`);
+      }
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = csvFilenameFromDisposition(response.headers.get("Content-Disposition")).replace(".csv", ".json");
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+      setBackupMessage("Full JSON backup downloaded.");
+    } catch (error) {
+      setBackupError(error instanceof Error ? error.message : "Backup export failed.");
+    } finally {
+      setBackupLoading(false);
+    }
+  }, []);
+
+  const handleBackupImport = useCallback(async (file: File) => {
+    setBackupLoading(true);
+    setBackupError("");
+    setBackupMessage("");
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      const response = await fetch(apiUrl("/api/export/full-backup/import"), {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      const text = await response.text();
+      if (!response.ok) {
+        let message = `Backup import failed (${response.status}).`;
+        try {
+          const payload = JSON.parse(text);
+          message = payload.detail || payload.message || message;
+        } catch {
+          message = text || message;
+        }
+        throw new Error(message);
+      }
+      const payload = JSON.parse(text);
+      setBackupMessage(payload.message ?? "Backup imported safely.");
+      await onBackupImported();
+    } catch (error) {
+      setBackupError(error instanceof Error ? error.message : "Backup import failed.");
+    } finally {
+      setBackupLoading(false);
+      if (backupInputRef.current) {
+        backupInputRef.current.value = "";
+      }
+    }
+  }, [onBackupImported]);
+
   return (
     <div className="space-y-4">
+      <Card>
+        <SectionHeader
+          eyebrow="Backup"
+          title="CSV export"
+          action={
+            <button
+              type="button"
+              onClick={handleCsvExport}
+              disabled={exportLoading}
+              className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:border-cyan-200/40 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              <Download className="h-4 w-4" />
+              {exportLoading ? "Exporting..." : "Export CSV"}
+            </button>
+          }
+        />
+        <div className="grid gap-3 md:grid-cols-[minmax(180px,220px)_repeat(2,minmax(150px,1fr))] md:items-end">
+          <label className="space-y-2 text-sm text-zinc-300">
+            <span className="block text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Range</span>
+            <select
+              value={exportRange}
+              onChange={(event) => setExportRange(event.target.value as CsvExportRange)}
+              className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+            >
+              <option value="all">All time</option>
+              <option value="7d">Last 7 days</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="custom">Custom range</option>
+            </select>
+          </label>
+          {exportRange === "custom" ? (
+            <>
+              <label className="space-y-2 text-sm text-zinc-300">
+                <span className="block text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Start</span>
+                <input
+                  type="date"
+                  value={exportStartDate}
+                  onChange={(event) => setExportStartDate(event.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+              <label className="space-y-2 text-sm text-zinc-300">
+                <span className="block text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">End</span>
+                <input
+                  type="date"
+                  value={exportEndDate}
+                  onChange={(event) => setExportEndDate(event.target.value)}
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+                />
+              </label>
+            </>
+          ) : null}
+        </div>
+        {exportError ? (
+          <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-200">{exportError}</p>
+        ) : null}
+        <div className="mt-4 border-t border-white/10 pt-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-white">Full backup and restore</p>
+              <p className="mt-1 text-sm text-zinc-400">JSON backup includes logs, templates, targets, settings, recommendations, and learning insights.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={handleFullBackupExport}
+                disabled={backupLoading}
+                className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Export Full Backup
+              </button>
+              <button
+                type="button"
+                onClick={() => backupInputRef.current?.click()}
+                disabled={backupLoading}
+                className="rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Import Backup
+              </button>
+              <input
+                ref={backupInputRef}
+                type="file"
+                accept="application/json,.json"
+                className="hidden"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void handleBackupImport(file);
+                }}
+              />
+            </div>
+          </div>
+          {backupMessage ? <p className="mt-3 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100">{backupMessage}</p> : null}
+          {backupError ? <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-200">{backupError}</p> : null}
+        </div>
+      </Card>
+      {adaptiveRecommendation ? (
+        <Card>
+          <SectionHeader eyebrow="Adaptive Nutrition" title="Closed-loop analysis" />
+          <div className="grid gap-3 lg:grid-cols-4">
+            <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Recommendation</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{adaptiveRecommendation.caloriesTarget} kcal</p>
+              <p className="mt-1 text-sm text-zinc-400">P {adaptiveRecommendation.proteinTarget}g · C {adaptiveRecommendation.carbsTarget}g · F {adaptiveRecommendation.fatTarget}g</p>
+              <p className="mt-2 text-xs text-zinc-500">{adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}{adaptiveRecommendation.calorieAdjustment} kcal vs active baseline</p>
+            </div>
+            <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.055] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Day type</p>
+              <p className="mt-2 text-lg font-semibold text-white">{adaptiveRecommendation.dayType ?? "Learning"}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">{adaptiveRecommendation.dayTypeAdjustment?.reason ?? "Training day adjustment appears with logged workload."}</p>
+            </div>
+            <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.055] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Confidence</p>
+              <p className="mt-2 text-lg font-semibold capitalize text-white">{adaptiveRecommendation.confidence}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">Data quality {adaptiveRecommendation.dataQualityScore ?? 0}/100 · next review {adaptiveRecommendation.nextReviewDate ?? "pending"}</p>
+            </div>
+            <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.055] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Composition</p>
+              <p className="mt-2 text-lg font-semibold capitalize text-white">{adaptiveRecommendation.signals.bodyComposition?.lean_gain_quality ?? "unknown"}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">
+                Lean trend {adaptiveRecommendation.signals.bodyComposition?.lean_mass_trend_14 ?? "--"} lb/wk · Fat trend {adaptiveRecommendation.signals.bodyComposition?.fat_mass_trend_14 ?? "--"} lb/wk
+              </p>
+            </div>
+          </div>
+          <div className="mt-4 grid gap-3 lg:grid-cols-3">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-sm font-semibold text-white">Why it changed</p>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
+                {(adaptiveRecommendation.reasoning.length ? adaptiveRecommendation.reasoning : ["No target change is currently justified."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-sm font-semibold text-white">Personal trends</p>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
+                {(adaptiveRecommendation.detectedTrends?.length ? adaptiveRecommendation.detectedTrends : ["More overlapping history is needed before stronger personal trends are useful."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-sm font-semibold text-white">Data gaps</p>
+              <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
+                {(adaptiveRecommendation.missingDataWarnings?.length ? adaptiveRecommendation.missingDataWarnings : ["No major data gaps detected."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+              </ul>
+            </div>
+          </div>
+        </Card>
+      ) : null}
+      {optimization ? (
+        <Card>
+          <SectionHeader eyebrow="Optimization" title="Trend intelligence" />
+          <div className="grid gap-3 lg:grid-cols-3">
+            <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Macro adherence</p>
+              <p className="mt-2 text-3xl font-semibold text-white">{optimization.macro_adherence.weekly_score !== null ? Math.round(optimization.macro_adherence.weekly_score) : "--"}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">{optimization.macro_adherence.summary}</p>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                {Object.entries(optimization.macro_adherence.components).map(([key, value]) => (
+                  <span key={key} className="rounded-lg border border-white/10 bg-black/10 px-2 py-1 capitalize text-zinc-300">{key}: {value !== null ? Math.round(value) : "--"}</span>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau detection</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-300">{optimization.plateau_detection.summary}</p>
+              <div className="mt-3 space-y-2">
+                {(optimization.plateau_detection.details.length ? optimization.plateau_detection.details : [{ name: "Clear", message: "No conservative plateau flags are active.", severity: "low", signal: "clear", duration_weeks: 0, type: "clear", muscle_group: "" }]).slice(0, 5).map((alert) => (
+                  <div key={`${alert.type}-${alert.name}-${alert.signal}`} className="rounded-lg border border-white/10 bg-black/10 p-2">
+                    <p className="text-sm font-semibold text-white">{alert.name}</p>
+                    <p className="mt-1 text-xs leading-5 text-zinc-400">{alert.message}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-300">{optimization.personal_baseline.summary}</p>
+              <div className="mt-3 space-y-2">
+                {(optimization.personal_baseline.insights.length ? optimization.personal_baseline.insights : [{ title: "Learning", summary: "More overlapping history is needed before baseline ranges are useful.", confidence: "low", metric: "learning" }]).slice(0, 5).map((insight) => (
+                  <div key={`${insight.metric}-${insight.title}`} className="rounded-lg border border-white/10 bg-black/10 p-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-sm font-semibold text-white">{insight.title}</p>
+                      <span className="rounded-full border border-white/10 px-2 py-0.5 text-[11px] capitalize text-zinc-300">{insight.confidence}</span>
+                    </div>
+                    <p className="mt-1 text-xs leading-5 text-zinc-400">{insight.summary}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          {optimization.macro_adherence.daily.length ? (
+            <ChartFrame className="mt-4 h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={optimization.macro_adherence.daily}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                  <YAxis domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <Line dataKey="score" name="Adherence score" stroke="#22d3ee" strokeWidth={3} dot={false} />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          ) : null}
+          {optimization.macro_adherence.correlations.length ? (
+            <div className="mt-4 grid gap-3 md:grid-cols-3">
+              {optimization.macro_adherence.correlations.map((correlation) => (
+                <div key={correlation.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                  <p className="text-sm font-semibold text-white">{correlation.label}</p>
+                  <p className="mt-2 text-xs leading-5 text-zinc-400">{correlation.summary}</p>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </Card>
+      ) : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
           <SectionHeader eyebrow="Nutrition" title="Daily nutrition history" />
@@ -3565,6 +4196,348 @@ function HistoryPage({
   );
 }
 
+function AquariumEasterEgg() {
+  const [isOpen, setIsOpen] = useState(false);
+
+  return (
+    <div className="flex flex-col items-start gap-3 pt-2">
+      <button
+        type="button"
+        aria-expanded={isOpen}
+        aria-controls="settings-aquarium"
+        aria-label={isOpen ? "Close Aquarium easter egg" : "Open Aquarium easter egg"}
+        onClick={() => setIsOpen((value) => !value)}
+        className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-cyan-300/30 hover:bg-cyan-300/10 hover:text-cyan-100"
+      >
+        Aquarium
+      </button>
+      {isOpen ? (
+        <div
+          id="settings-aquarium"
+          className="aquarium-tile relative h-44 w-full max-w-xl overflow-hidden rounded-lg border border-cyan-200/15 bg-[#05131f] shadow-2xl shadow-cyan-950/25"
+        >
+          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(34,211,238,0.20),rgba(14,116,144,0.12)_45%,rgba(2,6,23,0.84)),radial-gradient(circle_at_20%_20%,rgba(125,211,252,0.20),transparent_28%),radial-gradient(circle_at_80%_12%,rgba(45,212,191,0.12),transparent_25%)]" />
+          <div className="absolute inset-x-0 bottom-0 h-12 bg-[linear-gradient(180deg,transparent,rgba(8,47,73,0.50))]" />
+          <span className="aquarium-bubble bubble-one" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-two" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-three" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-four" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-five" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-six" aria-hidden="true" />
+          <span className="aquarium-seaweed seaweed-one" aria-hidden="true" />
+          <span className="aquarium-seaweed seaweed-two" aria-hidden="true" />
+          <span className="aquarium-coral" aria-hidden="true" />
+          <span className="aquarium-fish fish-orange" aria-hidden="true">
+            <svg className="fish-svg" viewBox="0 0 72 34" focusable="false">
+              <path className="tail" d="M8 17L1 7C0 5 2 3 4 4L18 12V22L4 30C2 31 0 29 1 27L8 17Z" />
+              <ellipse className="body" cx="36" cy="17" rx="24" ry="12" />
+              <path className="fin top-fin" d="M26 8C31 1 42 3 46 9C39 8 33 8 26 8Z" />
+              <path className="fin bottom-fin" d="M30 25C35 31 45 29 48 22C41 25 36 26 30 25Z" />
+              <path className="stripe" d="M28 8C32 14 32 21 27 27" />
+              <circle className="eye" cx="55" cy="14" r="2" />
+            </svg>
+          </span>
+          <span className="aquarium-fish fish-tropical swim-left" aria-hidden="true">
+            <svg className="fish-svg" viewBox="0 0 72 38" focusable="false">
+              <path className="tail" d="M9 19L1 8C-1 5 2 2 5 4L20 13V25L5 34C2 36-1 33 1 30L9 19Z" />
+              <path className="body" d="M18 19C22 8 35 3 48 8C60 12 67 19 62 27C57 35 36 38 23 28C20 26 18 23 18 19Z" />
+              <path className="fin top-fin" d="M35 7C41 0 52 3 55 10C48 9 41 8 35 7Z" />
+              <path className="fin bottom-fin" d="M34 30C42 36 55 33 58 25C51 29 43 31 34 30Z" />
+              <path className="stripe stripe-one" d="M34 7C39 15 39 25 33 32" />
+              <path className="stripe stripe-two" d="M45 8C50 16 50 25 45 32" />
+              <circle className="eye" cx="56" cy="17" r="2.1" />
+            </svg>
+          </span>
+          <span className="aquarium-fish fish-sleek" aria-hidden="true">
+            <svg className="fish-svg" viewBox="0 0 86 28" focusable="false">
+              <path className="tail" d="M10 14L1 5C-1 3 1 0 4 2L21 9V19L4 26C1 28-1 25 1 23L10 14Z" />
+              <path className="body" d="M18 15C27 4 51 1 75 13C77 14 77 16 75 17C51 28 28 26 18 15Z" />
+              <path className="fin top-fin" d="M39 8C46 2 56 4 62 9C54 8 47 8 39 8Z" />
+              <path className="fin bottom-fin" d="M40 20C48 25 59 24 64 18C55 21 48 21 40 20Z" />
+              <path className="stripe" d="M30 10C43 14 55 15 70 15" />
+              <circle className="eye" cx="68" cy="13" r="1.8" />
+            </svg>
+          </span>
+          <span className="aquarium-fish fish-round swim-left" aria-hidden="true">
+            <svg className="fish-svg" viewBox="0 0 62 42" focusable="false">
+              <path className="tail" d="M10 21L2 10C0 7 3 4 6 6L18 14V28L6 36C3 38 0 35 2 32L10 21Z" />
+              <ellipse className="body" cx="35" cy="21" rx="20" ry="16" />
+              <path className="fin top-fin" d="M28 8C33 1 44 2 49 10C42 9 35 8 28 8Z" />
+              <path className="fin bottom-fin" d="M30 34C37 41 49 37 52 28C46 33 38 35 30 34Z" />
+              <circle className="spot" cx="32" cy="18" r="3.2" />
+              <circle className="spot spot-two" cx="43" cy="25" r="2.2" />
+              <circle className="eye" cx="49" cy="17" r="2" />
+            </svg>
+          </span>
+          <span className="aquarium-fish fish-school" aria-hidden="true">
+            <span className="school-cluster">
+              {[0, 1, 2].map((index) => (
+                <svg key={index} className={`school-svg school-${index + 1}`} viewBox="0 0 42 20" focusable="false">
+                  <path className="tail" d="M6 10L1 4C0 3 1 1 3 2L11 7V13L3 18C1 19 0 17 1 16L6 10Z" />
+                  <ellipse className="body" cx="24" cy="10" rx="14" ry="6.5" />
+                  <circle className="eye" cx="34" cy="8" r="1.2" />
+                </svg>
+              ))}
+            </span>
+          </span>
+          <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
+          <style>{`
+            .aquarium-fish {
+              position: absolute;
+              left: -26%;
+              display: block;
+              opacity: var(--fish-opacity, 0.92);
+              filter: drop-shadow(0 0 10px rgba(125, 211, 252, 0.12));
+              animation: aquarium-swim-right var(--swim-speed, 20s) linear infinite;
+              animation-delay: var(--swim-delay, 0s);
+              will-change: transform;
+              z-index: var(--fish-depth, 2);
+            }
+            .aquarium-fish.swim-left {
+              left: auto;
+              right: -26%;
+              animation-name: aquarium-swim-left;
+              --fish-direction: -1;
+            }
+            .fish-svg {
+              display: block;
+              width: var(--fish-width, 54px);
+              height: auto;
+              transform-origin: center;
+              animation: aquarium-fish-bob var(--bob-speed, 4.5s) ease-in-out infinite;
+              animation-delay: var(--bob-delay, 0s);
+            }
+            .body { fill: var(--fish-body); }
+            .tail,
+            .fin { fill: var(--fish-fin); }
+            .stripe {
+              fill: none;
+              stroke: var(--fish-detail);
+              stroke-width: 3;
+              stroke-linecap: round;
+              opacity: 0.62;
+            }
+            .spot { fill: var(--fish-detail); opacity: 0.58; }
+            .eye { fill: #020617; stroke: rgba(255,255,255,0.58); stroke-width: 0.7; }
+            .fish-orange {
+              top: 34%;
+              --fish-width: 54px;
+              --fish-body: #fb923c;
+              --fish-fin: #facc15;
+              --fish-detail: #fff7ed;
+              --swim-speed: 18s;
+              --swim-delay: -5s;
+              --bob-speed: 3.8s;
+              --bob-delay: -1.3s;
+              --fish-depth: 4;
+            }
+            .fish-tropical {
+              top: 58%;
+              --fish-width: 50px;
+              --fish-body: #38bdf8;
+              --fish-fin: #fde047;
+              --fish-detail: #0f172a;
+              --swim-speed: 25s;
+              --swim-delay: -13s;
+              --bob-speed: 4.9s;
+              --bob-delay: -2.4s;
+              --fish-depth: 3;
+            }
+            .fish-sleek {
+              top: 18%;
+              --fish-width: 72px;
+              --fish-body: #67e8f9;
+              --fish-fin: #5eead4;
+              --fish-detail: #e0f2fe;
+              --swim-speed: 31s;
+              --swim-delay: -20s;
+              --bob-speed: 5.8s;
+              --bob-delay: -3s;
+              --fish-opacity: 0.55;
+              --fish-depth: 1;
+            }
+            .fish-round {
+              top: 42%;
+              --fish-width: 44px;
+              --fish-body: #f472b6;
+              --fish-fin: #c084fc;
+              --fish-detail: #fdf2f8;
+              --swim-speed: 21s;
+              --swim-delay: -7s;
+              --bob-speed: 4.1s;
+              --bob-delay: -1.8s;
+              --fish-depth: 5;
+            }
+            .fish-school {
+              top: 70%;
+              --swim-speed: 34s;
+              --swim-delay: -24s;
+              --bob-speed: 6.4s;
+              --fish-opacity: 0.48;
+              --fish-depth: 1;
+            }
+            .school-cluster {
+              position: relative;
+              display: block;
+              width: 78px;
+              height: 32px;
+              animation: aquarium-fish-bob var(--bob-speed, 6s) ease-in-out infinite;
+            }
+            .school-svg {
+              position: absolute;
+              width: 28px;
+              --fish-body: #bae6fd;
+              --fish-fin: #7dd3fc;
+            }
+            .school-svg .body { fill: var(--fish-body); }
+            .school-svg .tail { fill: var(--fish-fin); }
+            .school-svg .eye { fill: #020617; stroke: rgba(255,255,255,0.45); stroke-width: 0.5; }
+            .school-1 { left: 0; top: 4px; }
+            .school-2 { left: 24px; top: 0; opacity: 0.75; transform: scale(0.82); }
+            .school-3 { left: 45px; top: 12px; opacity: 0.68; transform: scale(0.7); }
+            .fish-tropical .stripe-one { stroke: rgba(15, 23, 42, 0.62); }
+            .fish-tropical .stripe-two { stroke: rgba(15, 23, 42, 0.42); }
+            .fish-sleek .stripe {
+              stroke-width: 2;
+              opacity: 0.45;
+            }
+            .aquarium-bubble {
+              position: absolute;
+              bottom: -14px;
+              width: 7px;
+              height: 7px;
+              border-radius: 999px;
+              border: 1px solid rgba(186, 230, 253, 0.6);
+              background: rgba(186, 230, 253, 0.08);
+              animation: aquarium-bubble-rise 8s ease-in infinite;
+            }
+            .bubble-one { left: 16%; animation-delay: -1s; animation-duration: 7s; }
+            .bubble-two { left: 28%; width: 4px; height: 4px; animation-delay: -4s; animation-duration: 9s; }
+            .bubble-three { left: 74%; animation-delay: -2s; animation-duration: 10s; }
+            .bubble-four { left: 85%; width: 5px; height: 5px; animation-delay: -6s; animation-duration: 8s; }
+            .bubble-five { left: 52%; width: 3px; height: 3px; animation-delay: -5s; animation-duration: 11s; opacity: 0.55; }
+            .bubble-six { left: 63%; width: 9px; height: 9px; animation-delay: -8s; animation-duration: 12s; opacity: 0.42; }
+            .aquarium-seaweed {
+              position: absolute;
+              bottom: 12px;
+              width: 9px;
+              height: 52px;
+              border-radius: 999px 999px 0 0;
+              background: linear-gradient(180deg, rgba(45, 212, 191, 0.88), rgba(20, 184, 166, 0.20));
+              transform-origin: bottom center;
+              animation: aquarium-sway 4s ease-in-out infinite alternate;
+            }
+            .seaweed-one { left: 8%; }
+            .seaweed-two { right: 10%; height: 42px; animation-delay: -1.8s; }
+            .aquarium-coral {
+              position: absolute;
+              right: 20%;
+              bottom: 13px;
+              width: 28px;
+              height: 24px;
+              border-radius: 999px 999px 8px 8px;
+              background: linear-gradient(180deg, rgba(244, 114, 182, 0.88), rgba(244, 114, 182, 0.22));
+              opacity: 0.72;
+            }
+            @keyframes aquarium-swim-right {
+              0% { transform: translate3d(-10%, 0, 0) scale(var(--depth-scale, 1)); }
+              42% { transform: translate3d(58vw, 7px, 0) scale(var(--depth-scale, 1)); }
+              100% { transform: translate3d(122vw, -5px, 0) scale(var(--depth-scale, 1)); }
+            }
+            @keyframes aquarium-swim-left {
+              0% { transform: translate3d(10%, 0, 0) scale(var(--depth-scale, 1)); }
+              52% { transform: translate3d(-55vw, -7px, 0) scale(var(--depth-scale, 1)); }
+              100% { transform: translate3d(-122vw, 6px, 0) scale(var(--depth-scale, 1)); }
+            }
+            @keyframes aquarium-fish-bob {
+              0%, 100% { transform: translateY(0) scaleX(var(--fish-direction, 1)) rotate(-1deg); }
+              50% { transform: translateY(5px) scaleX(var(--fish-direction, 1)) rotate(1.4deg); }
+            }
+            @keyframes aquarium-bubble-rise {
+              0% { transform: translateY(0) scale(0.85); opacity: 0; }
+              18% { opacity: 0.58; }
+              100% { transform: translateY(-170px) scale(1.2); opacity: 0; }
+            }
+            @keyframes aquarium-sway {
+              from { transform: rotate(-4deg); }
+              to { transform: rotate(5deg); }
+            }
+            @media (prefers-reduced-motion: reduce) {
+              .aquarium-fish,
+              .fish-svg,
+              .school-cluster,
+              .aquarium-bubble,
+              .aquarium-seaweed {
+                animation: none;
+              }
+              .fish-orange { left: 14%; }
+              .fish-tropical { right: 12%; }
+              .fish-sleek { left: 42%; }
+              .fish-round { right: 40%; }
+              .fish-school { left: 26%; }
+              .aquarium-bubble { opacity: 0.35; bottom: 58%; }
+            }
+          `}</style>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function healthStatusClass(status: string) {
+  if (status === "connected") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
+  if (status === "syncing") return "border-cyan-300/20 bg-cyan-300/10 text-cyan-100";
+  if (status === "error") return "border-red-400/25 bg-red-400/10 text-red-100";
+  return "border-amber-300/20 bg-amber-300/10 text-amber-100";
+}
+
+function IntegrationHealthGrid({
+  cards,
+  onSyncHevy,
+  onImportStrava,
+}: Readonly<{
+  cards: SettingsHealthCard[];
+  onSyncHevy: () => void;
+  onImportStrava: () => void;
+}>) {
+  const actionFor = (card: SettingsHealthCard) => {
+    if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
+    if (card.action === "strava_import") return { label: "Import", onClick: onImportStrava };
+    return null;
+  };
+  return (
+    <Card>
+      <SectionHeader eyebrow="Health" title="Integration and data health" />
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {cards.map((card) => {
+          const action = actionFor(card);
+          return (
+            <div key={card.id} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">{card.title}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{card.detail}</p>
+                </div>
+                <span className={cx("shrink-0 rounded-full border px-2 py-1 text-[11px] font-semibold capitalize", healthStatusClass(card.status))}>
+                  {card.status}
+                </span>
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-2">
+                <p className="text-xs font-medium text-zinc-500">{card.last_synced_at ? relativeSyncTime(card.last_synced_at) : card.label}</p>
+                {action ? (
+                  <button type="button" onClick={action.onClick} className="rounded-md border border-white/10 px-2 py-1 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                    {action.label}
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 function SettingsPage({
   settings,
   forms,
@@ -3572,6 +4545,8 @@ function SettingsPage({
   onSubmit,
   onConnectStrava,
   onTestOpenAI,
+  onSyncHevy,
+  onImportStrava,
 }: Readonly<{
   settings: SettingsData | null;
   forms: FormState;
@@ -3579,9 +4554,12 @@ function SettingsPage({
   onSubmit: (event: FormEvent) => void;
   onConnectStrava: () => void;
   onTestOpenAI: () => void;
+  onSyncHevy: () => void;
+  onImportStrava: () => void;
 }>) {
   return (
     <div className="space-y-4">
+      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} /> : null}
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
         <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
@@ -3636,6 +4614,7 @@ function SettingsPage({
           </Card>
         ))}
       </div>
+      <AquariumEasterEgg />
     </div>
   );
 }
@@ -4072,6 +5051,13 @@ export default function Home() {
       <FoodPage
         logs={nutritionLogs}
         targets={dashboard?.targets ?? null}
+        dayTypeMacros={dashboard?.optimization?.day_type_macros ?? null}
+        adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
+        onApplySuggestedMacros={() =>
+          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            await apiSend("/api/goals/apply-suggested-macros", "POST", {});
+          }, "Suggested macros applied.")
+        }
         nutritionHistory={nutritionHistory}
         nutritionAdherence={nutritionAdherence}
         shortcuts={shortcutData.items}
@@ -4356,6 +5342,7 @@ export default function Home() {
         bodyMetrics={bodyMetrics}
         recoveryLogs={recoveryLogs}
         sleepEntries={sleepEntries}
+        adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
         forms={forms}
         setForms={setForms}
         onBodySubmit={(event) =>
@@ -4476,6 +5463,8 @@ export default function Home() {
         nutritionLogs={nutritionLogs}
         nutritionHistory={nutritionHistory}
         nutritionAdherence={nutritionAdherence}
+        optimization={dashboard?.optimization ?? null}
+        adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
         bodyMetrics={bodyMetrics}
         recoveryTrend={dashboard?.recovery_trend ?? []}
         trainingVolume={dashboard?.training_volume ?? []}
@@ -4491,6 +5480,7 @@ export default function Home() {
         setTrendDateRange={setTrendDateRange}
         muscleTrendMetric={muscleTrendMetric}
         setMuscleTrendMetric={setMuscleTrendMetric}
+        onBackupImported={refreshAll}
       />
     ),
     settings: (
@@ -4498,6 +5488,22 @@ export default function Home() {
         settings={settings}
         forms={forms}
         setForms={setForms}
+        onSyncHevy={() => {
+          void syncHevyNow(true);
+        }}
+        onImportStrava={() => {
+          void submitAndRefresh(
+            { preventDefault: () => undefined } as FormEvent,
+            async () => {
+              const result = await apiSend<{ status: string; message?: string; imported_runs: number; skipped_duplicates: number }>("/api/training/import/strava", "POST", { per_page: 30 });
+              if (result.status === "error") {
+                throw new Error(result.message ?? "Strava import failed.");
+              }
+              setMessage(`Imported ${result.imported_runs} Strava runs. Skipped ${result.skipped_duplicates} duplicates.`);
+            },
+            "Strava import complete.",
+          );
+        }}
         onConnectStrava={async () => {
           setApiError(null);
           setMessage(null);

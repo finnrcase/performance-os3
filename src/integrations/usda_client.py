@@ -13,6 +13,7 @@ import pandas as pd
 from dotenv import load_dotenv
 
 from src.paths import PROJECT_ROOT, processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 
@@ -55,9 +56,7 @@ def _empty_cache() -> pd.DataFrame:
 
 
 def _load_cache() -> pd.DataFrame:
-    if not USDA_CACHE_PATH.exists():
-        return _empty_cache()
-    cache_df = pd.read_csv(USDA_CACHE_PATH)
+    cache_df = load_dataframe("usda_food_cache", USDA_CACHE_PATH, USDA_CACHE_COLUMNS)
     for column in USDA_CACHE_COLUMNS:
         if column not in cache_df.columns:
             cache_df[column] = ""
@@ -70,8 +69,7 @@ def _load_cache() -> pd.DataFrame:
 
 
 def _save_cache(cache_df: pd.DataFrame) -> None:
-    USDA_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    cache_df.reindex(columns=USDA_CACHE_COLUMNS).to_csv(USDA_CACHE_PATH, index=False)
+    save_dataframe("usda_food_cache", USDA_CACHE_PATH, cache_df, USDA_CACHE_COLUMNS)
 
 
 def _http_json(url: str) -> dict:

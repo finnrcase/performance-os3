@@ -13,6 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.paths import processed_data_path
+from src.storage import load_dataframe, save_dataframe
 
 TRAINING_COLUMNS = [
     "workout_id",
@@ -115,10 +116,7 @@ def _hydrate_legacy_import_metadata(training_df: pd.DataFrame) -> pd.DataFrame:
 
 def load_training_log() -> pd.DataFrame:
     """Load training entries from local CSV."""
-    if not TRAINING_LOG_PATH.exists():
-        return _empty_training_log()
-
-    training_df = pd.read_csv(TRAINING_LOG_PATH)
+    training_df = load_dataframe("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS)
 
     for column in TRAINING_COLUMNS:
         if column not in training_df.columns:
@@ -150,9 +148,7 @@ def load_training_log() -> pd.DataFrame:
 
 def save_training_log(df) -> None:
     """Save training entries to local CSV."""
-    TRAINING_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    training_df = df.reindex(columns=TRAINING_COLUMNS)
-    training_df.to_csv(TRAINING_LOG_PATH, index=False)
+    save_dataframe("training_log", TRAINING_LOG_PATH, df, TRAINING_COLUMNS)
 
 
 def add_training_entry(

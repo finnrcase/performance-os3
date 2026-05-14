@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from backend.routes import body_metrics, goals, integrations, nutrition, personal_records, recovery, training
+from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training
 from backend.routes.utils import dataframe_records
 from src.analytics.food_history import (
     build_daily_nutrition_summary,
@@ -38,12 +38,14 @@ from src.goals import build_automatic_goals, load_user_goals
 from src.nutrition import calculate_daily_totals, load_nutrition_log
 from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets, load_nutrition_targets
 from src.optimization.adaptive_nutrition_engine import build_adaptive_nutrition_recommendation
+from src.optimization.high_value_features import build_optimization_features
 from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recommendation
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import load_recovery_log, load_sleep_entries
 from src.training import calculate_training_volume, load_training_log
 from src.integrations.hevy_client import HevyIntegrationError, sync_hevy_events
+from src.storage import ensure_database_schema, production_storage_warnings, use_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -79,13 +81,29 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
 )
 
 
 @app.get("/health")
 def health() -> dict:
     """Health check used by local development and deployment probes."""
-    return {"status": "ok", "service": "performance-os-api"}
+    warnings = production_storage_warnings()
+    return {
+        "status": "ok" if not warnings else "warning",
+        "service": "performance-os-api",
+        "storage": "postgres" if use_database() else "local_files",
+        "warnings": warnings,
+    }
+
+
+@app.on_event("startup")
+def initialize_storage() -> None:
+    """Initialize durable Postgres storage when DATABASE_URL is configured."""
+    if use_database():
+        ensure_database_schema()
+    for warning in production_storage_warnings():
+        logger.error(warning)
 
 
 def _hevy_poll_loop() -> None:
@@ -124,7 +142,7 @@ def dashboard() -> dict:
     goals = build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=training_df)
     active_targets = load_nutrition_targets()
     training_workload = analyze_training_workload(training_df, bodyweight=goals["current_bodyweight"])
-    targets = calculate_macro_targets(
+    base_targets = calculate_macro_targets(
         goals,
         nutrition_df=nutrition_df,
         training_df=training_df,
@@ -132,6 +150,7 @@ def dashboard() -> dict:
         body_metrics_df=body_metrics_df,
         workload_data=training_workload,
     )
+    targets = active_targets or base_targets
     daily_nutrition_summary = build_daily_nutrition_summary(nutrition_df, targets)
     save_daily_nutrition_summary(daily_nutrition_summary)
     nutrition_for_optimization = get_food_history_for_optimization(daily_nutrition_summary)
@@ -211,7 +230,9 @@ def dashboard() -> dict:
         nutrition_df=daily_nutrition_summary,
         training_df=training_df,
         recovery_df=recovery_df,
-        current_targets=active_targets or targets,
+        current_targets=targets,
+        sleep_df=sleep_df,
+        today=today,
     )
     personal_learning = generate_personal_response_learning(
         body_metrics_df=body_metrics_df,
@@ -219,9 +240,27 @@ def dashboard() -> dict:
         training_df=training_df,
         recovery_df=recovery_df,
         sleep_df=sleep_df,
-        current_targets=active_targets or targets,
+        current_targets=targets,
     )
-    food_tile = _food_dashboard_tile(nutrition_totals, targets)
+    optimization_features = build_optimization_features(
+        nutrition_summary_df=daily_nutrition_summary,
+        training_df=training_df,
+        recovery_df=recovery_df,
+        sleep_df=sleep_df,
+        body_metrics_df=body_metrics_df,
+        targets=targets,
+        personal_learning=personal_learning,
+        today=today,
+    )
+    adjusted_targets = optimization_features["day_type_macros"].get("adjusted_targets") or {}
+    dashboard_targets = {
+        **targets,
+        "target_calories": adjusted_targets.get("calories", targets.get("target_calories")),
+        "protein_grams": adjusted_targets.get("protein", targets.get("protein_grams")),
+        "carb_grams": adjusted_targets.get("carbs", targets.get("carb_grams")),
+        "fat_grams": adjusted_targets.get("fat", targets.get("fat_grams")),
+    }
+    food_tile = _food_dashboard_tile(nutrition_totals, dashboard_targets)
     weight_tile = _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today)
     recovery_tile = _recovery_dashboard_tile(recovery_df, latest_recovery, today)
     recovery_tile["extra_run_readiness"] = generate_extra_run_readiness(
@@ -269,6 +308,7 @@ def dashboard() -> dict:
         "prs": prs_tile,
         "goals": goals,
         "targets": targets,
+        "base_targets": base_targets,
         "training_workload": training_workload,
         "nutrition_today": nutrition_totals,
         "latest_bodyweight": latest_bodyweight,
@@ -285,6 +325,7 @@ def dashboard() -> dict:
         "lean_bulk_decision": lean_bulk_decision,
         "adaptive_recommendation": adaptive_recommendation,
         "personal_learning": personal_learning,
+        "optimization": optimization_features,
         "recommendation": performance_plan,
         "counts": {
             "nutrition": len(nutrition_df),
@@ -536,3 +577,4 @@ app.include_router(recovery.router)
 app.include_router(body_metrics.router)
 app.include_router(integrations.router)
 app.include_router(goals.router)
+app.include_router(data_export.router)
