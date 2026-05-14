@@ -1,14 +1,28 @@
 "use client";
 
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 
 export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [setupError, setSetupError] = useState("");
+
+  useEffect(() => {
+    fetch("/api/access/login")
+      .then((response) => response.json())
+      .then((data) => {
+        if (data?.configured === false) {
+          const missing = Array.isArray(data.missing) && data.missing.length ? ` Missing: ${data.missing.join(", ")}.` : "";
+          setSetupError(`${data.message ?? "Performance OS access is not configured."}${missing}`);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (setupError) return;
     setLoading(true);
     setError("");
     const response = await fetch("/api/access/login", {
@@ -19,7 +33,8 @@ export default function LoginPage() {
     setLoading(false);
 
     if (!response.ok) {
-      setError("Invalid password.");
+      const data = await response.json().catch(() => null);
+      setError(data?.message ?? "Invalid password.");
       return;
     }
 
@@ -34,6 +49,7 @@ export default function LoginPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300/80">Private Access</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Performance OS</h1>
         <p className="mt-2 text-sm leading-6 text-zinc-400">Enter your access password to open your private dashboard.</p>
+        {setupError ? <p className="mt-4 rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">{setupError}</p> : null}
         <label className="mt-6 block space-y-2 text-sm text-zinc-400">
           <span>Password</span>
           <input
@@ -41,11 +57,12 @@ export default function LoginPage() {
             value={password}
             type="password"
             autoFocus
+            disabled={Boolean(setupError)}
             onChange={(event) => setPassword(event.target.value)}
           />
         </label>
         {error ? <p className="mt-3 rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{error}</p> : null}
-        <button className="mt-5 h-11 w-full rounded-lg bg-cyan-300 text-sm font-semibold text-zinc-950 disabled:opacity-60" disabled={loading}>
+        <button className="mt-5 h-11 w-full rounded-lg bg-cyan-300 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60" disabled={loading || Boolean(setupError)}>
           {loading ? "Unlocking..." : "Unlock"}
         </button>
       </form>

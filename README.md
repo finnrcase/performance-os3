@@ -85,10 +85,15 @@ Development command: npm run dev
 Set these Vercel environment variables:
 
 ```bash
-APP_ACCESS_PASSWORD=your-private-password
+APP_PASSWORD=your-private-password
+SESSION_SECRET=your-long-random-session-secret
 BACKEND_API_URL=https://your-backend-url.example.com
 NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
 ```
+
+`APP_PASSWORD` is the password entered on the Performance OS login page.
+`SESSION_SECRET` signs the private access cookie after a successful login. Both
+are server-side only and must not use the `NEXT_PUBLIC_` prefix.
 
 `BACKEND_API_URL` is server-side only and is used by `frontend/next.config.ts`
 to proxy `/api/*` requests to FastAPI. You may set `NEXT_PUBLIC_API_URL` if you
@@ -97,6 +102,26 @@ want the browser to call the backend directly, but the proxy is preferred.
 Do not put backend API keys or OAuth secrets in the Vercel frontend project.
 Keep `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `HEVY_API_KEY`, and similar keys
 on the backend host only.
+
+### Local Frontend Password
+
+The Next.js login gate reads `APP_PASSWORD` and `SESSION_SECRET` server-side from
+the frontend environment. For local development, create `frontend/.env.local`:
+
+```bash
+APP_PASSWORD=your-private-password
+SESSION_SECRET=your-long-random-session-secret
+NEXT_PUBLIC_API_URL=http://localhost:8001
+```
+
+Then run the frontend from `frontend/`:
+
+```bash
+npm run dev
+```
+
+If either `APP_PASSWORD` or `SESSION_SECRET` is missing, the login page shows a
+setup error instead of silently accepting or rejecting access.
 
 ### Backend on Railway or Render
 
