@@ -123,6 +123,10 @@ npm run dev
 If either `APP_PASSWORD` or `SESSION_SECRET` is missing, the login page shows a
 setup error instead of silently accepting or rejecting access.
 
+After editing `frontend/.env.local`, restart `npm run dev` so Next.js reloads
+the password. `APP_PASSWORD` is read only by server-side code and should never
+be prefixed with `NEXT_PUBLIC_`.
+
 ### Backend on Railway or Render
 
 Deploy the repository root as a Python web service.

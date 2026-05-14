@@ -77,6 +77,9 @@ NEXT_PUBLIC_API_URL=http://localhost:8001
 If either `APP_PASSWORD` or `SESSION_SECRET` is missing, the login page shows a
 setup error so the gate does not fail silently.
 
+Restart `npm run dev` after editing `frontend/.env.local`; Next.js loads these
+server-side variables at server startup.
+
 ## Deploy to Vercel
 
 Create a Vercel project with `frontend/` as the project root.

@@ -12,12 +12,16 @@ function missingAuthVariables() {
 
 function setupErrorResponse() {
   const missing = missingAuthVariables();
+  const message = missing.includes("APP_PASSWORD")
+    ? "APP_PASSWORD is not configured"
+    : "SESSION_SECRET is not configured";
+
   return NextResponse.json(
     {
       ok: false,
       configured: false,
       missing,
-      message: `Performance OS access is not configured. Set ${missing.join(" and ")} in your environment.`,
+      message,
     },
     { status: 500 },
   );
@@ -41,13 +45,21 @@ export async function GET() {
     ok: true,
     configured: missing.length === 0,
     missing,
-    message: missing.length ? `Set ${missing.join(" and ")} before using private access.` : "Access gate is configured.",
+    message: missing.includes("APP_PASSWORD")
+      ? "APP_PASSWORD is not configured"
+      : missing.includes("SESSION_SECRET")
+        ? "SESSION_SECRET is not configured"
+        : "Access gate is configured.",
   });
 }
 
 export async function POST(request: Request) {
   const configuredPassword = process.env.APP_PASSWORD;
   const sessionSecret = process.env.SESSION_SECRET;
+
+  if (process.env.NODE_ENV === "development") {
+    console.info("[auth] APP_PASSWORD present:", Boolean(configuredPassword));
+  }
 
   if (!configuredPassword || !sessionSecret) {
     return setupErrorResponse();
