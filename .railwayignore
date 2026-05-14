@@ -1,0 +1,13 @@
+.venv/
+frontend/
+app/
+outputs/
+data/raw/*
+data/processed/*
+tests/
+scripts/
+__pycache__/
+*.pyc
+.next/
+node_modules/
+.DS_Store

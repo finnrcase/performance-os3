@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+matplotlib
+plotly
+fastapi
+uvicorn
+openai
+python-dotenv
+python-multipart
