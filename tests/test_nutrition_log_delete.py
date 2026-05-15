@@ -46,6 +46,29 @@ class NutritionLogDeleteTest(unittest.TestCase):
                 self.assertEqual(result["removed"], 1)
                 self.assertTrue(nutrition_module.load_nutrition_log().empty)
 
+    def test_food_log_icon_type_can_be_suggested_updated_and_cleared(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nutrition_path = Path(temp_dir) / "nutrition_log.csv"
+            with patch.object(nutrition_module, "NUTRITION_LOG_PATH", nutrition_path):
+                entry = nutrition_module.create_food_entry(
+                    date="2026-05-14",
+                    meal_type="Food",
+                    food_name="Everything bagel",
+                    calories=280,
+                    protein=11,
+                    carbs=56,
+                    fat=2,
+                )
+                self.assertEqual(entry["iconType"], "bagel")
+                nutrition_module.save_nutrition_log(pd.DataFrame([entry]))
+
+                updated = nutrition_module.update_food_log_entry(entry["food_log_id"], {"iconType": "chicken"})
+                self.assertEqual(updated["iconType"], "chicken")
+                self.assertEqual(nutrition_module.load_nutrition_log().iloc[0]["iconType"], "chicken")
+
+                cleared = nutrition_module.update_food_log_entry(entry["food_log_id"], {"iconType": None})
+                self.assertEqual(cleared["iconType"], "")
+
 
 if __name__ == "__main__":
     unittest.main()

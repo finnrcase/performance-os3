@@ -135,6 +135,29 @@ BACKUP_DEDUPE_KEYS = {
     "daily_nutrition_summary": ["date"],
 }
 
+# Stable primary IDs that should win over the fallback composite keys when present.
+# Lets re-imports correctly match rows that were edited after export (e.g. macros changed).
+BACKUP_PRIMARY_ID_KEYS = {
+    "sleep_entries": "id",
+    "food_shortcuts": "shortcut_id",
+}
+
+# Multi-stage dedupe for datasets where the simple "primary id + composite fallback" is unsafe.
+# Each stage is (required_non_empty_columns, dedupe_columns). A row participates in the FIRST
+# stage where all of its required columns are non-empty. Rows that match NO stage are preserved
+# without deduplication so genuinely duplicate-looking entries (e.g. the same lunch logged twice
+# with no timestamp) are not silently collapsed.
+BACKUP_DEDUPE_STAGES: dict[str, list[tuple[list[str], list[str]]]] = {
+    "nutrition_log": [
+        (["food_log_id"], ["food_log_id"]),
+        (["source", "source_id"], ["source", "source_id"]),
+        (
+            ["created_at"],
+            ["created_at", "date", "meal_type", "food_name", "calories", "protein", "carbs", "fat"],
+        ),
+    ],
+}
+
 
 def _sign_session(timestamp: str, secret: str) -> str:
     signature = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8"), hashlib.sha256).digest()
@@ -269,14 +292,76 @@ def _dataframe_records(df: pd.DataFrame) -> list[dict]:
     return [_json_ready(record) for record in clean.to_dict(orient="records")]
 
 
-def _dedupe_dataframe(dataset: str, df: pd.DataFrame) -> pd.DataFrame:
+def _nonempty_mask(df: pd.DataFrame, columns: list[str]) -> pd.Series:
+    """True for rows where every named column is present and not blank/NaN/sentinel."""
+    if df.empty:
+        return pd.Series([], dtype=bool)
+    mask = pd.Series(True, index=df.index)
+    for column in columns:
+        if column not in df.columns:
+            return pd.Series(False, index=df.index)
+        as_string = df[column].fillna("").astype(str).str.strip()
+        mask &= as_string.ne("") & ~as_string.isin(["nan", "None", "<NA>"])
+    return mask
+
+
+def _dedupe_dataframe(dataset: str, df: pd.DataFrame, keep: str = "last") -> pd.DataFrame:
+    """Drop duplicate rows. keep='first' = current production wins; keep='last' = incoming backup wins.
+
+    Datasets in BACKUP_DEDUPE_STAGES use a multi-tier scheme: each row attaches to the first
+    stage where every required column is non-empty. Rows that match NO stage are preserved
+    without deduplication so a repeated meal logged without timestamps is not silently merged.
+
+    Datasets without staged config use BACKUP_PRIMARY_ID_KEYS (if any) plus BACKUP_DEDUPE_KEYS
+    as a single composite, matching prior behavior.
+    """
+    if df.empty:
+        return df.reset_index(drop=True)
+
+    stages = BACKUP_DEDUPE_STAGES.get(dataset)
+    if stages:
+        remaining = df.copy()
+        buckets: list[pd.DataFrame] = []
+        for required, dedupe_cols in stages:
+            if remaining.empty:
+                break
+            if any(column not in remaining.columns for column in required):
+                continue
+            stage_mask = _nonempty_mask(remaining, required)
+            matched = remaining[stage_mask]
+            remaining = remaining[~stage_mask]
+            if matched.empty:
+                continue
+            applicable_dedupe = [column for column in dedupe_cols if column in matched.columns]
+            if applicable_dedupe:
+                matched = matched.drop_duplicates(subset=applicable_dedupe, keep=keep)
+            buckets.append(matched)
+        if not remaining.empty:
+            # Rows with no stable identifier are preserved verbatim — never collapse "two
+            # identical-looking entries without timestamps" into one, since they may be a
+            # legitimately repeated log entry.
+            buckets.append(remaining)
+        if not buckets:
+            return df.copy().reset_index(drop=True)
+        return pd.concat(buckets, ignore_index=True).reset_index(drop=True)
+
+    primary = BACKUP_PRIMARY_ID_KEYS.get(dataset)
     subset = [column for column in BACKUP_DEDUPE_KEYS.get(dataset, []) if column in df.columns]
+
+    if primary and primary in df.columns:
+        has_primary = _nonempty_mask(df, [primary])
+        with_id = df[has_primary].drop_duplicates(subset=[primary], keep=keep)
+        without_id = df[~has_primary]
+        if not without_id.empty and subset:
+            without_id = without_id.drop_duplicates(subset=subset, keep=keep)
+        return pd.concat([with_id, without_id], ignore_index=True).reset_index(drop=True)
+
     if subset:
-        return df.drop_duplicates(subset=subset, keep="last").reset_index(drop=True)
+        return df.drop_duplicates(subset=subset, keep=keep).reset_index(drop=True)
     try:
-        return df.drop_duplicates(keep="last").reset_index(drop=True)
+        return df.drop_duplicates(keep=keep).reset_index(drop=True)
     except TypeError:
-        return df.astype(str).drop_duplicates(keep="last").reset_index(drop=True)
+        return df.astype(str).drop_duplicates(keep=keep).reset_index(drop=True)
 
 
 def _unique_join(values, limit: int | None = None) -> str:
@@ -708,12 +793,13 @@ def export_full_backup(_: None = Depends(_require_authenticated_request)) -> Res
     )
 
 
-@router.post("/full-backup/import")
-async def import_full_backup(
-    _: None = Depends(_require_authenticated_request),
-    file: UploadFile = File(...),
-) -> dict:
-    """Safely merge a JSON backup into current storage with duplicate protection."""
+VALID_IMPORT_MODES = ("skip", "update")
+
+
+async def _run_backup_import(file: UploadFile, skip_documents: bool, import_mode: str, dry_run: bool) -> dict:
+    """Core import worker shared by the canonical and alias routes."""
+    if import_mode not in VALID_IMPORT_MODES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"import_mode must be one of {', '.join(VALID_IMPORT_MODES)}")
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backup import must be a JSON file.")
     content = await file.read()
@@ -725,6 +811,8 @@ async def import_full_backup(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backup file is not valid JSON.") from exc
     if not isinstance(bundle, dict) or "dataframes" not in bundle:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backup file is missing Performance OS dataframes.")
+
+    keep_strategy = "first" if import_mode == "skip" else "last"
 
     imported: dict[str, dict] = {}
     incoming_dataframes = bundle.get("dataframes", {})
@@ -743,28 +831,83 @@ async def import_full_backup(
                 incoming_df[column] = pd.NA
         incoming_df = incoming_df[columns]
         current_df = load_dataframe(dataset, path, columns)
+        before_rows = len(current_df)
         merged_df = pd.concat([current_df, incoming_df], ignore_index=True)
-        merged_df = _dedupe_dataframe(dataset, merged_df)
-        save_dataframe(dataset, path, merged_df, columns)
-        imported[dataset] = {"incoming_rows": len(incoming_df), "saved_rows": len(merged_df)}
+        merged_df = _dedupe_dataframe(dataset, merged_df, keep=keep_strategy)
+        saved_rows = len(merged_df)
+        if not dry_run:
+            save_dataframe(dataset, path, merged_df, columns)
+        incoming_rows = len(incoming_df)
+        created_rows = max(saved_rows - before_rows, 0)
+        overlap = max(incoming_rows - created_rows, 0)
+        updated_rows = overlap if import_mode == "update" else 0
+        skipped_rows = overlap if import_mode == "skip" else 0
+        imported[dataset] = {
+            "incoming_rows": incoming_rows,
+            "current_rows_before": before_rows,
+            "saved_rows": saved_rows,
+            "created_rows": created_rows,
+            "updated_rows": updated_rows,
+            "skipped_rows": skipped_rows,
+        }
 
     incoming_documents = bundle.get("documents", {})
     if incoming_documents and not isinstance(incoming_documents, dict):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Backup documents must be an object.")
     document_count = 0
-    for name, path in BACKUP_DOCUMENTS.items():
-        document = incoming_documents.get(name) if isinstance(incoming_documents, dict) else None
-        if not isinstance(document, dict) or not document:
-            continue
-        save_document(name, path, document)
-        document_count += 1
+    documents_skipped = 0
+    if skip_documents:
+        documents_skipped = sum(
+            1
+            for name in BACKUP_DOCUMENTS
+            if isinstance(incoming_documents, dict) and isinstance(incoming_documents.get(name), dict) and incoming_documents.get(name)
+        )
+    else:
+        for name, path in BACKUP_DOCUMENTS.items():
+            document = incoming_documents.get(name) if isinstance(incoming_documents, dict) else None
+            if not isinstance(document, dict) or not document:
+                continue
+            if not dry_run:
+                save_document(name, path, document)
+            document_count += 1
 
-    if "nutrition_log" in imported or "nutrition_targets" in incoming_documents:
+    if not dry_run and ("nutrition_log" in imported or (not skip_documents and "nutrition_targets" in incoming_documents)):
         save_daily_nutrition_summary(build_daily_nutrition_summary(load_nutrition_log(), load_nutrition_targets()))
 
     return {
         "status": "ok",
-        "message": "Backup imported safely.",
+        "message": "Dry run preview." if dry_run else "Backup imported safely.",
+        "import_mode": import_mode,
+        "dry_run": dry_run,
         "datasets": imported,
         "documents_imported": document_count,
+        "documents_skipped": documents_skipped,
+        "skip_documents": skip_documents,
     }
+
+
+@router.post("/full-backup/import")
+async def import_full_backup(
+    _: None = Depends(_require_authenticated_request),
+    file: UploadFile = File(...),
+    skip_documents: bool = Query(True, description="If true (default), skip importing settings/goals/targets/personal_records/hevy_sync_state documents. Prevents overwriting current production settings with stale local ones."),
+    import_mode: str = Query("skip", description="'skip' (default) preserves current production rows on a match; 'update' lets backup values overwrite matching production rows."),
+    dry_run: bool = Query(False, description="If true, compute and return per-dataset create/update/skip counts without writing anything."),
+) -> dict:
+    """Safely merge a JSON backup into current storage with duplicate protection."""
+    return await _run_backup_import(file=file, skip_documents=skip_documents, import_mode=import_mode, dry_run=dry_run)
+
+
+import_router = APIRouter(prefix="/api/import", tags=["import"])
+
+
+@import_router.post("/full-backup")
+async def import_full_backup_alias(
+    _: None = Depends(_require_authenticated_request),
+    file: UploadFile = File(...),
+    skip_documents: bool = Query(True),
+    import_mode: str = Query("skip"),
+    dry_run: bool = Query(False),
+) -> dict:
+    """Alias for POST /api/export/full-backup/import."""
+    return await _run_backup_import(file=file, skip_documents=skip_documents, import_mode=import_mode, dry_run=dry_run)

@@ -60,6 +60,7 @@ const navigation = [
 ] as const;
 
 type PageId = (typeof navigation)[number]["id"];
+type FoodIconType = "bagel" | "protein_bar" | "oats" | "protein_shake" | "chicken";
 
 type Goals = {
   current_bodyweight: number;
@@ -132,6 +133,7 @@ type NutritionEntry = {
   date: string;
   meal_type: string;
   food_name: string;
+  iconType?: FoodIconType | null;
   calories: number;
   protein: number;
   carbs: number;
@@ -1039,6 +1041,7 @@ async function apiGet<T>(path: string): Promise<T> {
 async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
   const response = await fetchWithTimeout(apiUrl(path), {
     method,
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
@@ -1373,16 +1376,175 @@ function foodMacroSummary(entry: Pick<NutritionEntry, "calories" | "protein" | "
   return `${formatFoodAmount(entry.calories)} kcal · P ${formatFoodAmount(entry.protein)}g · C ${formatFoodAmount(entry.carbs)}g · F ${formatFoodAmount(entry.fat)}g`;
 }
 
+type FoodIconProps = { className?: string };
+
+const FOOD_ICON_TYPES: FoodIconType[] = ["bagel", "protein_bar", "oats", "protein_shake", "chicken"];
+
+function BagelIcon({ className }: FoodIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+      <circle cx="12" cy="12" r="7.5" fill="currentColor" opacity="0.14" />
+      <circle cx="12" cy="12" r="7.5" stroke="currentColor" strokeWidth="1.7" />
+      <ellipse cx="12" cy="12.2" rx="3.1" ry="2.4" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M8.2 8.1h.01M15.6 8.5h.01M16 15.5h.01M7.8 14.9h.01" stroke="currentColor" strokeLinecap="round" strokeWidth="1.9" />
+    </svg>
+  );
+}
+
+function ProteinBarIcon({ className }: FoodIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+      <rect x="4.2" y="7" width="15.6" height="10" rx="2.4" fill="currentColor" opacity="0.12" />
+      <rect x="4.2" y="7" width="15.6" height="10" rx="2.4" stroke="currentColor" strokeWidth="1.7" />
+      <path d="M7.1 9.6h5.2M7.1 12h3.6M14 10l2.9 4.2M17 9.7l-2.9 4.2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.45" />
+      <path d="M5.5 7.9l1.2-1.5M17.3 17.6l1.2-1.5" stroke="currentColor" strokeLinecap="round" strokeWidth="1.2" opacity="0.75" />
+    </svg>
+  );
+}
+
+function OatsIcon({ className }: FoodIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+      <path d="M5.2 11.2h13.6l-1.1 4.1a4 4 0 0 1-3.9 3H10.2a4 4 0 0 1-3.9-3z" fill="currentColor" opacity="0.12" />
+      <path d="M5.2 11.2h13.6l-1.1 4.1a4 4 0 0 1-3.9 3H10.2a4 4 0 0 1-3.9-3z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.7" />
+      <path d="M8.1 11.1c.3-1.5 1.5-2.6 2.9-2.6s2.1.8 2.8.8 1.2-.5 2.1-.5c1.1 0 2 .8 2.4 2.3" stroke="currentColor" strokeLinecap="round" strokeWidth="1.45" />
+      <path d="M9.5 14.2h.01M12.2 13.5h.01M14.8 14.5h.01" stroke="currentColor" strokeLinecap="round" strokeWidth="1.9" />
+      <path d="M16.4 7.2l2.8-2" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" opacity="0.8" />
+    </svg>
+  );
+}
+
+function ProteinShakeIcon({ className }: FoodIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+      <path d="M8 8h8l-.8 10.1a2.2 2.2 0 0 1-2.2 2H11a2.2 2.2 0 0 1-2.2-2z" fill="currentColor" opacity="0.12" />
+      <path d="M8 8h8l-.8 10.1a2.2 2.2 0 0 1-2.2 2H11a2.2 2.2 0 0 1-2.2-2zM7.6 5.1h8.8M9 3.6h6" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.7" />
+      <path d="M9.1 13.4h6.2M9.4 10.2h6.2M10.4 16.3h3.3" stroke="currentColor" strokeLinecap="round" strokeWidth="1.25" opacity="0.82" />
+    </svg>
+  );
+}
+
+function ChickenIcon({ className }: FoodIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+      <path d="M13.8 5.5c2.9.4 5 2.5 5 5.2 0 2.9-2.4 5.3-5.7 5.3-3.6 0-6.4-2.5-6.4-5.6 0-2.8 2.6-5.4 7.1-4.9z" fill="currentColor" opacity="0.12" />
+      <path d="M13.8 5.5c2.9.4 5 2.5 5 5.2 0 2.9-2.4 5.3-5.7 5.3-3.6 0-6.4-2.5-6.4-5.6 0-2.8 2.6-5.4 7.1-4.9z" stroke="currentColor" strokeLinejoin="round" strokeWidth="1.7" />
+      <path d="M7.7 14.5 5.8 16.4M5.8 16.4l-1.6-1.2M5.8 16.4l1.1 1.7" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+      <path d="M13.1 8.5c1.2.2 2.1.9 2.6 1.9" stroke="currentColor" strokeLinecap="round" strokeWidth="1.25" opacity="0.82" />
+    </svg>
+  );
+}
+
+function FoodIcon({ type, className }: Readonly<{ type: FoodIconType; className?: string }>) {
+  switch (type) {
+    case "bagel":
+      return <BagelIcon className={className} />;
+    case "protein_bar":
+      return <ProteinBarIcon className={className} />;
+    case "oats":
+      return <OatsIcon className={className} />;
+    case "protein_shake":
+      return <ProteinShakeIcon className={className} />;
+    case "chicken":
+      return <ChickenIcon className={className} />;
+    default:
+      return null;
+  }
+}
+
+const FOOD_ICON_OPTIONS: Array<{ type: FoodIconType; label: string }> = [
+  { type: "bagel", label: "Bagel" },
+  { type: "protein_bar", label: "Protein bar" },
+  { type: "oats", label: "Oats" },
+  { type: "protein_shake", label: "Protein shake" },
+  { type: "chicken", label: "Chicken" },
+];
+
+function normalizeFoodIconType(value: string | null | undefined): FoodIconType | null {
+  const selected = String(value ?? "").trim() as FoodIconType;
+  return FOOD_ICON_TYPES.includes(selected) ? selected : null;
+}
+
+function suggestFoodIconType(foodName: string | null | undefined): FoodIconType | null {
+  const normalizedName = String(foodName ?? "").toLowerCase();
+  if (normalizedName.includes("bagel")) return "bagel";
+  if (normalizedName.includes("built bar") || normalizedName.includes("protein bar") || (normalizedName.includes("protein") && normalizedName.includes("bar"))) return "protein_bar";
+  if (normalizedName.includes("oat") || normalizedName.includes("oatmeal")) return "oats";
+  if (normalizedName.includes("protein shake") || normalizedName.includes("shake")) return "protein_shake";
+  if (normalizedName.includes("chicken")) return "chicken";
+  return null;
+}
+
+function FoodIconPicker({
+  value,
+  onChange,
+}: Readonly<{
+  value: FoodIconType | null;
+  onChange: (value: FoodIconType | null) => void;
+}>) {
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-3">
+        <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Icon</p>
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          disabled={!value}
+          className="rounded-md border border-white/10 px-2 py-1 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Clear
+        </button>
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-2 sm:grid-cols-5">
+        {FOOD_ICON_OPTIONS.map((option) => {
+          const selected = value === option.type;
+          return (
+            <button
+              key={option.type}
+              type="button"
+              aria-pressed={selected}
+              onClick={() => onChange(option.type)}
+              className={cx(
+                "flex min-h-16 flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-center text-xs font-semibold transition",
+                selected
+                  ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100"
+                  : "border-white/10 bg-zinc-950/45 text-zinc-300 hover:border-cyan-300/25 hover:bg-cyan-300/[0.06]",
+              )}
+            >
+              <FoodIcon type={option.type} className="h-5 w-5 text-cyan-200" />
+              <span>{option.label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function FoodLogList({
   entries,
   emptyDescription,
   onRemove,
   removingId,
+  onEdit,
+  editingId,
+  editingIcon,
+  onEditingIconChange,
+  onCancelEdit,
+  onSaveIcon,
+  savingId,
 }: Readonly<{
   entries: NutritionEntry[];
   emptyDescription: string;
   onRemove?: (entry: NutritionEntry) => void;
   removingId?: string | null;
+  onEdit?: (entry: NutritionEntry) => void;
+  editingId?: string | null;
+  editingIcon?: FoodIconType | null;
+  onEditingIconChange?: (iconType: FoodIconType | null) => void;
+  onCancelEdit?: () => void;
+  onSaveIcon?: (entry: NutritionEntry) => void;
+  savingId?: string | null;
 }>) {
   if (!entries.length) {
     return (
@@ -1397,31 +1559,84 @@ function FoodLogList({
 
   return (
     <div className="space-y-2">
-      {entries.map((entry, index) => (
-        <div key={entry.food_log_id || `${entry.date}-${entry.food_name}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2">
-                <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
-                {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+      {entries.map((entry, index) => {
+        const entryId = entry.food_log_id || `${entry.date}-${entry.food_name}-${index}`;
+        const selectedIcon = normalizeFoodIconType(entry.iconType);
+        const isEditing = Boolean(entry.food_log_id && editingId === entry.food_log_id);
+        const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
+        return (
+          <div key={entryId} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
+                {selectedIcon ? (
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-300/20 bg-cyan-300/10 text-cyan-200">
+                    <FoodIcon type={selectedIcon} className="h-5 w-5" />
+                  </span>
+                ) : null}
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
+                    {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+                  </div>
+                  <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
+                </div>
               </div>
-              <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                {onEdit ? (
+                  <button
+                    type="button"
+                    onClick={() => onEdit(entry)}
+                    disabled={!entry.food_log_id || isSaving}
+                    className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={`Edit ${entry.food_name || "food entry"}`}
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </button>
+                ) : null}
+                {onRemove ? (
+                  <button
+                    type="button"
+                    onClick={() => onRemove(entry)}
+                    disabled={!entry.food_log_id || removingId === entry.food_log_id || isSaving}
+                    className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={`Remove ${entry.food_name || "food entry"}`}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {removingId === entry.food_log_id ? "Removing..." : "Remove"}
+                  </button>
+                ) : null}
+              </div>
             </div>
-            {onRemove ? (
-              <button
-                type="button"
-                onClick={() => onRemove(entry)}
-                disabled={!entry.food_log_id || removingId === entry.food_log_id}
-                className="inline-flex w-fit shrink-0 items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
-                aria-label={`Remove ${entry.food_name || "food entry"}`}
-              >
-                <Trash2 className="h-3.5 w-3.5" />
-                {removingId === entry.food_log_id ? "Removing..." : "Remove"}
-              </button>
+
+            {isEditing && onEditingIconChange && onCancelEdit && onSaveIcon ? (
+              <div className="mt-4 border-t border-white/10 pt-4">
+                <FoodIconPicker value={editingIcon ?? null} onChange={onEditingIconChange} />
+                <div className="mt-3 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={onCancelEdit}
+                    disabled={isSaving}
+                    className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSaveIcon(entry)}
+                    disabled={isSaving}
+                    className="inline-flex items-center gap-2 rounded-lg bg-cyan-300 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <Check className="h-3.5 w-3.5" />
+                    {isSaving ? "Saving..." : "Save"}
+                  </button>
+                </div>
+              </div>
             ) : null}
           </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -2537,6 +2752,7 @@ function FoodPage({
   onSaveAndLogToday,
   onLogShortcut,
   onDeleteFoodLog,
+  onUpdateFoodLog,
   onUpdateShortcut,
   onDeleteShortcut,
   onLogMealTemplate,
@@ -2580,6 +2796,7 @@ function FoodPage({
   onSaveAndLogToday: (event: FormEvent) => void;
   onLogShortcut: (shortcutId: string) => void;
   onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
+  onUpdateFoodLog: (entry: NutritionEntry, updates: { iconType: FoodIconType | null }) => Promise<void>;
   onUpdateShortcut: (shortcut: FoodShortcut) => void;
   onDeleteShortcut: (shortcutId: string) => void;
   onLogMealTemplate: (templateName: string) => Promise<void>;
@@ -2599,6 +2816,9 @@ function FoodPage({
   const [templateRenameValue, setTemplateRenameValue] = useState("");
   const [pendingTemplateAction, setPendingTemplateAction] = useState<string | null>(null);
   const [deletingFoodLogId, setDeletingFoodLogId] = useState<string | null>(null);
+  const [editingFoodLogId, setEditingFoodLogId] = useState<string | null>(null);
+  const [editingFoodLogIcon, setEditingFoodLogIcon] = useState<FoodIconType | null>(null);
+  const [savingFoodLogId, setSavingFoodLogId] = useState<string | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
@@ -2666,6 +2886,25 @@ function FoodPage({
       setPendingTemplateAction(null);
     }
   };
+  const beginFoodLogEdit = (entry: NutritionEntry) => {
+    if (!entry.food_log_id) return;
+    setEditingFoodLogId(entry.food_log_id);
+    setEditingFoodLogIcon(normalizeFoodIconType(entry.iconType) ?? suggestFoodIconType(entry.food_name));
+  };
+  const cancelFoodLogEdit = () => {
+    setEditingFoodLogId(null);
+    setEditingFoodLogIcon(null);
+  };
+  const saveFoodLogIcon = async (entry: NutritionEntry) => {
+    if (!entry.food_log_id) return;
+    setSavingFoodLogId(entry.food_log_id);
+    try {
+      await onUpdateFoodLog(entry, { iconType: editingFoodLogIcon });
+      cancelFoodLogEdit();
+    } finally {
+      setSavingFoodLogId(null);
+    }
+  };
   const removeFoodLogEntry = async (entry: NutritionEntry) => {
     if (!entry.food_log_id) return;
     const confirmed = window.confirm(`Remove ${entry.food_name || "this food entry"} from ${entry.date}?`);
@@ -2673,6 +2912,7 @@ function FoodPage({
     setDeletingFoodLogId(entry.food_log_id);
     try {
       await onDeleteFoodLog(entry);
+      if (editingFoodLogId === entry.food_log_id) cancelFoodLogEdit();
     } finally {
       setDeletingFoodLogId(null);
     }
@@ -2859,6 +3099,13 @@ function FoodPage({
               emptyDescription="Manual entries for this date will appear here immediately after saving."
               onRemove={(entry) => void removeFoodLogEntry(entry)}
               removingId={deletingFoodLogId}
+              onEdit={beginFoodLogEdit}
+              editingId={editingFoodLogId}
+              editingIcon={editingFoodLogIcon}
+              onEditingIconChange={setEditingFoodLogIcon}
+              onCancelEdit={cancelFoodLogEdit}
+              onSaveIcon={(entry) => void saveFoodLogIcon(entry)}
+              savingId={savingFoodLogId}
             />
           </div>
         </Card>
@@ -3803,6 +4050,110 @@ function csvFilenameFromDisposition(header: string | null) {
   return filenameMatch?.[1] ?? `performance-os-backup-${todayString()}.csv`;
 }
 
+type BackupDatasetPreview = { name: string; label: string; count: number };
+type BackupDocumentPreview = { name: string; label: string };
+type BackupPreview = {
+  fileName: string;
+  datasets: BackupDatasetPreview[];
+  documents: BackupDocumentPreview[];
+  dateRange: { earliest: string; latest: string } | null;
+  unknownDatasets: string[];
+};
+type BackupImportMode = "skip" | "update";
+type BackupDatasetResult = {
+  incoming_rows?: number;
+  current_rows_before?: number;
+  saved_rows?: number;
+  created_rows?: number;
+  updated_rows?: number;
+  skipped_rows?: number;
+  duplicates_skipped?: number;
+};
+type BackupSummary = {
+  datasets: Record<string, BackupDatasetResult>;
+  documents_imported: number;
+  documents_skipped: number;
+  skip_documents: boolean;
+  import_mode: BackupImportMode;
+  dry_run: boolean;
+};
+
+const BACKUP_DATASET_LABELS: Record<string, string> = {
+  nutrition_log: "Food logs",
+  frequent_foods: "Frequent foods",
+  food_shortcuts: "Food shortcuts",
+  meal_templates: "Meal templates",
+  body_metrics: "Body metrics (weight, body fat)",
+  training_log: "Workouts (Hevy + manual + Strava runs)",
+  recovery_log: "Recovery check-ins",
+  sleep_entries: "Sleep entries",
+  daily_nutrition_summary: "Daily nutrition summaries",
+};
+
+const BACKUP_DOCUMENT_LABELS: Record<string, string> = {
+  user_settings: "Settings",
+  user_goals: "Goals",
+  nutrition_targets: "Macro targets",
+  nutrition_recommendation_history: "Recommendation history",
+  personal_records: "Personal records",
+  hevy_sync_state: "Hevy sync state",
+};
+
+function buildBackupPreview(fileName: string, bundle: unknown): BackupPreview {
+  if (!bundle || typeof bundle !== "object") {
+    throw new Error("Backup must be a JSON object.");
+  }
+  const root = bundle as Record<string, unknown>;
+  const dataframes = root.dataframes;
+  if (!dataframes || typeof dataframes !== "object") {
+    throw new Error("Backup is missing the dataframes section.");
+  }
+  const datasets: BackupDatasetPreview[] = [];
+  const unknownDatasets: string[] = [];
+  let earliest: string | null = null;
+  let latest: string | null = null;
+
+  for (const [name, value] of Object.entries(dataframes as Record<string, unknown>)) {
+    if (!Array.isArray(value)) continue;
+    const label = BACKUP_DATASET_LABELS[name];
+    if (label) {
+      datasets.push({ name, label, count: value.length });
+    } else if (value.length > 0) {
+      unknownDatasets.push(name);
+    }
+    for (const row of value) {
+      if (!row || typeof row !== "object") continue;
+      const dateValue = (row as Record<string, unknown>).date;
+      if (typeof dateValue !== "string" || dateValue.length < 10) continue;
+      const iso = dateValue.slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+      if (!earliest || iso < earliest) earliest = iso;
+      if (!latest || iso > latest) latest = iso;
+    }
+  }
+  datasets.sort((a, b) => b.count - a.count);
+
+  const documents: BackupDocumentPreview[] = [];
+  const documentsRaw = root.documents;
+  if (documentsRaw && typeof documentsRaw === "object") {
+    for (const [name, value] of Object.entries(documentsRaw as Record<string, unknown>)) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      if (Object.keys(value as Record<string, unknown>).length === 0) continue;
+      const label = BACKUP_DOCUMENT_LABELS[name] ?? name;
+      documents.push({ name, label });
+    }
+  }
+  documents.sort((a, b) => a.label.localeCompare(b.label));
+
+  return {
+    fileName,
+    datasets,
+    documents,
+    dateRange: earliest && latest ? { earliest, latest } : null,
+    unknownDatasets,
+  };
+}
+
 function HistoryPage({
   nutritionLogs,
   nutritionHistory,
@@ -3856,6 +4207,13 @@ function HistoryPage({
   const [backupLoading, setBackupLoading] = useState(false);
   const [backupMessage, setBackupMessage] = useState("");
   const [backupError, setBackupError] = useState("");
+  const [backupSkipDocuments, setBackupSkipDocuments] = useState(true);
+  const [backupImportMode, setBackupImportMode] = useState<BackupImportMode>("skip");
+  const [backupPreview, setBackupPreview] = useState<BackupPreview | null>(null);
+  const [backupPreCommit, setBackupPreCommit] = useState<BackupSummary | null>(null);
+  const [backupPreCommitLoading, setBackupPreCommitLoading] = useState(false);
+  const [backupSummary, setBackupSummary] = useState<BackupSummary | null>(null);
+  const [backupFile, setBackupFile] = useState<File | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
   const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
   const dailyNutritionTrend = nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
@@ -3963,31 +4321,118 @@ function HistoryPage({
     }
   }, []);
 
-  const handleBackupImport = useCallback(async (file: File) => {
+  const postBackupImport = useCallback(async (file: File, options: { skipDocuments: boolean; mode: BackupImportMode; dryRun: boolean }): Promise<BackupSummary> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const params = new URLSearchParams({
+      skip_documents: options.skipDocuments ? "true" : "false",
+      import_mode: options.mode,
+      dry_run: options.dryRun ? "true" : "false",
+    });
+    const response = await fetch(apiUrl(`/api/import/full-backup?${params.toString()}`), {
+      method: "POST",
+      body: formData,
+      credentials: "include",
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      let message = `Backup import failed (${response.status}).`;
+      try {
+        const payload = JSON.parse(text);
+        message = payload.detail || payload.message || message;
+      } catch {
+        message = text || message;
+      }
+      throw new Error(message);
+    }
+    const payload = JSON.parse(text);
+    return {
+      datasets: (payload?.datasets ?? {}) as Record<string, BackupDatasetResult>,
+      documents_imported: Number(payload?.documents_imported ?? 0),
+      documents_skipped: Number(payload?.documents_skipped ?? 0),
+      skip_documents: Boolean(payload?.skip_documents),
+      import_mode: (payload?.import_mode === "update" ? "update" : "skip") as BackupImportMode,
+      dry_run: Boolean(payload?.dry_run),
+    };
+  }, []);
+
+  const runDryRun = useCallback(async (file: File, mode: BackupImportMode, skipDocuments: boolean) => {
+    setBackupPreCommitLoading(true);
+    try {
+      const result = await postBackupImport(file, { skipDocuments, mode, dryRun: true });
+      setBackupPreCommit(result);
+    } catch (error) {
+      setBackupError(error instanceof Error ? error.message : "Could not analyze backup against production.");
+      setBackupPreCommit(null);
+    } finally {
+      setBackupPreCommitLoading(false);
+    }
+  }, [postBackupImport]);
+
+  const handleBackupFileSelect = useCallback(async (file: File) => {
+    setBackupError("");
+    setBackupMessage("");
+    setBackupSummary(null);
+    setBackupPreview(null);
+    setBackupPreCommit(null);
+    setBackupFile(null);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const preview = buildBackupPreview(file.name, parsed);
+      if (preview.datasets.length === 0 && preview.documents.length === 0) {
+        throw new Error("Backup contains no recognizable Performance OS data.");
+      }
+      setBackupPreview(preview);
+      setBackupFile(file);
+      void runDryRun(file, backupImportMode, backupSkipDocuments);
+    } catch (error) {
+      setBackupError(error instanceof Error ? error.message : "Backup file is not valid JSON.");
+    } finally {
+      if (backupInputRef.current) {
+        backupInputRef.current.value = "";
+      }
+    }
+  }, [backupImportMode, backupSkipDocuments, runDryRun]);
+
+  const handleBackupCancel = useCallback(() => {
+    setBackupPreview(null);
+    setBackupPreCommit(null);
+    setBackupFile(null);
+    setBackupError("");
+  }, []);
+
+  const handleBackupModeChange = useCallback((mode: BackupImportMode) => {
+    setBackupImportMode(mode);
+    if (backupFile) {
+      void runDryRun(backupFile, mode, backupSkipDocuments);
+    }
+  }, [backupFile, backupSkipDocuments, runDryRun]);
+
+  const handleBackupSkipDocumentsChange = useCallback((skip: boolean) => {
+    setBackupSkipDocuments(skip);
+    if (backupFile) {
+      void runDryRun(backupFile, backupImportMode, skip);
+    }
+  }, [backupFile, backupImportMode, runDryRun]);
+
+  const handleBackupConfirm = useCallback(async () => {
+    if (!backupFile) return;
     setBackupLoading(true);
     setBackupError("");
     setBackupMessage("");
+    setBackupSummary(null);
     try {
-      const formData = new FormData();
-      formData.append("file", file);
-      const response = await fetch(apiUrl("/api/export/full-backup/import"), {
-        method: "POST",
-        body: formData,
-        credentials: "include",
+      const result = await postBackupImport(backupFile, {
+        skipDocuments: backupSkipDocuments,
+        mode: backupImportMode,
+        dryRun: false,
       });
-      const text = await response.text();
-      if (!response.ok) {
-        let message = `Backup import failed (${response.status}).`;
-        try {
-          const payload = JSON.parse(text);
-          message = payload.detail || payload.message || message;
-        } catch {
-          message = text || message;
-        }
-        throw new Error(message);
-      }
-      const payload = JSON.parse(text);
-      setBackupMessage(payload.message ?? "Backup imported safely.");
+      setBackupSummary(result);
+      setBackupMessage("Backup imported safely.");
+      setBackupPreview(null);
+      setBackupPreCommit(null);
+      setBackupFile(null);
       await onBackupImported();
     } catch (error) {
       setBackupError(error instanceof Error ? error.message : "Backup import failed.");
@@ -3997,7 +4442,7 @@ function HistoryPage({
         backupInputRef.current.value = "";
       }
     }
-  }, [onBackupImported]);
+  }, [backupFile, backupSkipDocuments, backupImportMode, postBackupImport, onBackupImported]);
 
   return (
     <div className="space-y-4">
@@ -4088,12 +4533,168 @@ function HistoryPage({
                 className="hidden"
                 onChange={(event) => {
                   const file = event.target.files?.[0];
-                  if (file) void handleBackupImport(file);
+                  if (file) void handleBackupFileSelect(file);
                 }}
               />
             </div>
           </div>
-          {backupMessage ? <p className="mt-3 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100">{backupMessage}</p> : null}
+          {backupPreview ? (
+            <div className="mt-4 rounded-lg border border-cyan-300/25 bg-cyan-300/[0.05] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <p className="text-sm font-semibold text-white">Review backup before importing</p>
+                  <p className="mt-1 text-xs text-zinc-400">{backupPreview.fileName}</p>
+                </div>
+                {backupPreview.dateRange ? (
+                  <p className="text-xs text-zinc-300">Date range: <span className="text-cyan-200">{backupPreview.dateRange.earliest} → {backupPreview.dateRange.latest}</span></p>
+                ) : null}
+              </div>
+              <div className="mt-4 rounded border border-white/5 bg-zinc-950/40 p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Import mode</p>
+                <div className="mt-2 grid gap-2 sm:grid-cols-2">
+                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "skip" ? "border-cyan-300/40 bg-cyan-300/[0.06] text-cyan-100" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
+                    <input
+                      type="radio"
+                      name="backupImportMode"
+                      checked={backupImportMode === "skip"}
+                      onChange={() => handleBackupModeChange("skip")}
+                      className="mt-1 h-4 w-4"
+                    />
+                    <span>
+                      <span className="font-medium">Skip existing (recommended)</span>
+                      <span className="block text-xs text-zinc-400">Current production rows win on a match. Only truly new rows are added.</span>
+                    </span>
+                  </label>
+                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "update" ? "border-amber-300/40 bg-amber-300/[0.06] text-amber-100" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
+                    <input
+                      type="radio"
+                      name="backupImportMode"
+                      checked={backupImportMode === "update"}
+                      onChange={() => handleBackupModeChange("update")}
+                      className="mt-1 h-4 w-4"
+                    />
+                    <span>
+                      <span className="font-medium">Update matching</span>
+                      <span className="block text-xs text-zinc-400">Backup rows overwrite production rows that match on dedupe keys. Use to restore from a known-good backup.</span>
+                    </span>
+                  </label>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded border border-white/5 bg-zinc-950/40 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Against current production</p>
+                  {backupPreCommitLoading ? <p className="text-xs text-zinc-400">Analyzing…</p> : null}
+                </div>
+                {backupPreview.datasets.length > 0 ? (
+                  <ul className="mt-2 grid gap-1 text-sm text-zinc-200 sm:grid-cols-2">
+                    {backupPreview.datasets.map((dataset) => {
+                      const result = backupPreCommit?.datasets?.[dataset.name];
+                      const created = Number(result?.created_rows ?? 0);
+                      const updated = Number(result?.updated_rows ?? 0);
+                      const skipped = Number(result?.skipped_rows ?? result?.duplicates_skipped ?? 0);
+                      return (
+                        <li key={dataset.name} className="rounded border border-white/5 bg-zinc-950/60 px-3 py-2">
+                          <div className="flex items-center justify-between gap-3">
+                            <span className="text-zinc-100">{dataset.label}</span>
+                            <span className="text-xs text-zinc-500">{dataset.count.toLocaleString()} in backup</span>
+                          </div>
+                          {result ? (
+                            <p className="mt-1 text-xs text-zinc-400">
+                              <span className="text-emerald-200">{created.toLocaleString()} new</span>
+                              {backupImportMode === "update" ? <> · <span className="text-amber-200">{updated.toLocaleString()} update</span></> : null}
+                              {backupImportMode === "skip" ? <> · <span className="text-zinc-400">{skipped.toLocaleString()} skipped</span></> : null}
+                            </p>
+                          ) : (
+                            <p className="mt-1 text-xs text-zinc-500">—</p>
+                          )}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                ) : null}
+              </div>
+
+              {backupPreview.documents.length > 0 ? (
+                <div className="mt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Documents in backup</p>
+                  <p className="mt-1 text-sm text-zinc-300">{backupPreview.documents.map((document) => document.label).join(", ")}</p>
+                </div>
+              ) : null}
+              {backupPreview.unknownDatasets.length > 0 ? (
+                <p className="mt-3 text-xs text-amber-200/80">Ignored unknown datasets: {backupPreview.unknownDatasets.join(", ")}</p>
+              ) : null}
+              <label className="mt-4 flex items-start gap-2 text-sm text-zinc-200">
+                <input
+                  type="checkbox"
+                  checked={backupSkipDocuments}
+                  onChange={(event) => handleBackupSkipDocumentsChange(event.target.checked)}
+                  className="mt-1 h-4 w-4 rounded border-white/20 bg-zinc-950 text-cyan-300 focus:ring-cyan-300"
+                />
+                <span>
+                  <span className="font-medium">Skip importing settings &amp; documents</span>
+                  <span className="block text-xs text-zinc-400">Recommended. Prevents overwriting current settings/goals/macro targets/personal records/hevy sync state with values from this backup.</span>
+                </span>
+              </label>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleBackupConfirm}
+                  disabled={backupLoading || backupPreCommitLoading}
+                  className="rounded-lg border border-emerald-300/25 bg-emerald-300/10 px-3 py-2 text-sm font-semibold text-emerald-100 transition hover:bg-emerald-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {backupLoading ? "Importing..." : "Confirm Import"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleBackupCancel}
+                  disabled={backupLoading}
+                  className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : null}
+          {backupSummary ? (
+            <div className="mt-4 rounded-lg border border-emerald-300/25 bg-emerald-300/[0.06] p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <p className="text-sm font-semibold text-white">Import complete</p>
+                <button
+                  type="button"
+                  onClick={() => setBackupSummary(null)}
+                  className="text-xs text-zinc-400 underline-offset-2 hover:text-zinc-200 hover:underline"
+                >
+                  Dismiss
+                </button>
+              </div>
+              <p className="mt-1 text-xs text-zinc-400">Mode: <span className="text-cyan-200">{backupSummary.import_mode === "update" ? "Update matching" : "Skip existing"}</span></p>
+              <ul className="mt-3 grid gap-1 text-sm text-zinc-200 sm:grid-cols-2">
+                {Object.entries(backupSummary.datasets).map(([key, result]) => {
+                  const label = BACKUP_DATASET_LABELS[key] ?? key;
+                  const incoming = Number(result.incoming_rows ?? 0);
+                  const created = Number(result.created_rows ?? 0);
+                  const updated = Number(result.updated_rows ?? 0);
+                  const skipped = Number(result.skipped_rows ?? result.duplicates_skipped ?? 0);
+                  return (
+                    <li key={key} className="rounded border border-white/5 bg-zinc-950/40 px-3 py-2">
+                      <p className="text-zinc-100">{label}</p>
+                      <p className="mt-0.5 text-xs text-zinc-400">
+                        {incoming.toLocaleString()} in backup · <span className="text-emerald-200">{created.toLocaleString()} new</span>
+                        {updated > 0 ? <> · <span className="text-amber-200">{updated.toLocaleString()} updated</span></> : null}
+                        {skipped > 0 ? <> · <span className="text-zinc-400">{skipped.toLocaleString()} skipped</span></> : null}
+                      </p>
+                    </li>
+                  );
+                })}
+              </ul>
+              <p className="mt-3 text-xs text-zinc-400">
+                Documents: {backupSummary.documents_imported} imported, {backupSummary.documents_skipped} skipped
+                {backupSummary.skip_documents ? " (documents skipped by request)" : ""}.
+              </p>
+            </div>
+          ) : null}
+          {backupMessage && !backupSummary ? <p className="mt-3 rounded-lg border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-sm text-emerald-100">{backupMessage}</p> : null}
           {backupError ? <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-200">{backupError}</p> : null}
         </div>
       </Card>
@@ -4317,8 +4918,88 @@ function HistoryPage({
   );
 }
 
+const AQUARIUM_FISH_SLOTS = ["fish-orange", "fish-tropical", "fish-sleek", "fish-round", "fish-school"] as const;
+type AquariumFishSlot = (typeof AQUARIUM_FISH_SLOTS)[number];
+
+function pickSpecialAquariumFishSlot(): AquariumFishSlot | null {
+  if (Math.random() >= 0.1) return null;
+  return AQUARIUM_FISH_SLOTS[Math.floor(Math.random() * AQUARIUM_FISH_SLOTS.length)] ?? null;
+}
+
+function SpecialGirlfriendFish({
+  slot,
+  showBubble,
+  onClick,
+}: Readonly<{
+  slot: AquariumFishSlot;
+  showBubble: boolean;
+  onClick: () => void;
+}>) {
+  const swimsLeft = slot === "fish-tropical" || slot === "fish-round";
+  return (
+    <button
+      type="button"
+      data-fish-type="special_girlfriend_fish"
+      aria-label={showBubble ? "Special aquarium fish says fussing" : "Special aquarium fish"}
+      onClick={onClick}
+      className={cx("aquarium-fish special_girlfriend_fish", slot, swimsLeft && "swim-left")}
+    >
+      <span className={cx("special-fish-bubble", showBubble && "is-visible")} aria-hidden="true">
+        *fussing*
+      </span>
+      <svg className="fish-svg special-fish-svg" viewBox="0 0 78 42" focusable="false" aria-hidden="true">
+        <path className="tail" d="M10 21L2 10C0 7 3 4 6 6L20 14V28L6 36C3 38 0 35 2 32L10 21Z" />
+        <path className="body" d="M18 21C23 9 38 4 53 8C66 11 74 21 68 30C62 39 39 40 24 30C20 27 18 24 18 21Z" />
+        <path className="fin top-fin" d="M32 8C38 1 51 3 56 10C48 9 40 8 32 8Z" />
+        <path className="fin bottom-fin" d="M33 33C41 40 55 36 59 27C52 32 43 34 33 33Z" />
+        <path className="stripe" d="M31 10C36 18 36 27 30 34" />
+        <circle className="blush" cx="57" cy="23" r="2.1" />
+        <circle className="eye" cx="52" cy="17" r="1.6" />
+        <circle className="eye" cx="62" cy="17" r="1.6" />
+        <circle className="glasses-lens" cx="52" cy="17" r="4" />
+        <circle className="glasses-lens" cx="62" cy="17" r="4" />
+        <path className="glasses-bridge" d="M56 17h2" />
+        <path className="heart" d="M61.9 9.9c-1.1-1.2-3.1-.4-3.1 1.2 0 2 3.1 3.6 3.1 3.6s3.2-1.6 3.2-3.6c0-1.6-2-2.4-3.2-1.2Z" />
+      </svg>
+    </button>
+  );
+}
+
 function AquariumEasterEgg() {
   const [isOpen, setIsOpen] = useState(false);
+  const [specialFishSlot, setSpecialFishSlot] = useState<AquariumFishSlot | null>(null);
+  const [showSpecialBubble, setShowSpecialBubble] = useState(false);
+  const specialBubbleTimeout = useRef<number | null>(null);
+
+  const clearSpecialBubbleTimeout = useCallback(() => {
+    if (specialBubbleTimeout.current !== null) {
+      window.clearTimeout(specialBubbleTimeout.current);
+      specialBubbleTimeout.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => clearSpecialBubbleTimeout(), [clearSpecialBubbleTimeout]);
+
+  const toggleAquarium = () => {
+    if (isOpen) {
+      clearSpecialBubbleTimeout();
+      setShowSpecialBubble(false);
+      setIsOpen(false);
+      return;
+    }
+    setSpecialFishSlot(pickSpecialAquariumFishSlot());
+    setShowSpecialBubble(false);
+    setIsOpen(true);
+  };
+
+  const showSpecialFishMessage = () => {
+    clearSpecialBubbleTimeout();
+    setShowSpecialBubble(true);
+    specialBubbleTimeout.current = window.setTimeout(() => {
+      setShowSpecialBubble(false);
+      specialBubbleTimeout.current = null;
+    }, 2000);
+  };
 
   return (
     <div className="flex flex-col items-start gap-3 pt-2">
@@ -4327,7 +5008,7 @@ function AquariumEasterEgg() {
         aria-expanded={isOpen}
         aria-controls="settings-aquarium"
         aria-label={isOpen ? "Close Aquarium easter egg" : "Open Aquarium easter egg"}
-        onClick={() => setIsOpen((value) => !value)}
+        onClick={toggleAquarium}
         className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-cyan-300/30 hover:bg-cyan-300/10 hover:text-cyan-100"
       >
         Aquarium
@@ -4348,6 +5029,9 @@ function AquariumEasterEgg() {
           <span className="aquarium-seaweed seaweed-one" aria-hidden="true" />
           <span className="aquarium-seaweed seaweed-two" aria-hidden="true" />
           <span className="aquarium-coral" aria-hidden="true" />
+          {specialFishSlot === "fish-orange" ? (
+            <SpecialGirlfriendFish slot="fish-orange" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
+          ) : (
           <span className="aquarium-fish fish-orange" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 72 34" focusable="false">
               <path className="tail" d="M8 17L1 7C0 5 2 3 4 4L18 12V22L4 30C2 31 0 29 1 27L8 17Z" />
@@ -4358,6 +5042,10 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="55" cy="14" r="2" />
             </svg>
           </span>
+          )}
+          {specialFishSlot === "fish-tropical" ? (
+            <SpecialGirlfriendFish slot="fish-tropical" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
+          ) : (
           <span className="aquarium-fish fish-tropical swim-left" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 72 38" focusable="false">
               <path className="tail" d="M9 19L1 8C-1 5 2 2 5 4L20 13V25L5 34C2 36-1 33 1 30L9 19Z" />
@@ -4369,6 +5057,10 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="56" cy="17" r="2.1" />
             </svg>
           </span>
+          )}
+          {specialFishSlot === "fish-sleek" ? (
+            <SpecialGirlfriendFish slot="fish-sleek" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
+          ) : (
           <span className="aquarium-fish fish-sleek" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 86 28" focusable="false">
               <path className="tail" d="M10 14L1 5C-1 3 1 0 4 2L21 9V19L4 26C1 28-1 25 1 23L10 14Z" />
@@ -4379,6 +5071,10 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="68" cy="13" r="1.8" />
             </svg>
           </span>
+          )}
+          {specialFishSlot === "fish-round" ? (
+            <SpecialGirlfriendFish slot="fish-round" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
+          ) : (
           <span className="aquarium-fish fish-round swim-left" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 62 42" focusable="false">
               <path className="tail" d="M10 21L2 10C0 7 3 4 6 6L18 14V28L6 36C3 38 0 35 2 32L10 21Z" />
@@ -4390,6 +5086,10 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="49" cy="17" r="2" />
             </svg>
           </span>
+          )}
+          {specialFishSlot === "fish-school" ? (
+            <SpecialGirlfriendFish slot="fish-school" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
+          ) : (
           <span className="aquarium-fish fish-school" aria-hidden="true">
             <span className="school-cluster">
               {[0, 1, 2].map((index) => (
@@ -4401,12 +5101,18 @@ function AquariumEasterEgg() {
               ))}
             </span>
           </span>
+          )}
           <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
           <style>{`
             .aquarium-fish {
               position: absolute;
               left: -26%;
               display: block;
+              border: 0;
+              padding: 0;
+              background: transparent;
+              color: inherit;
+              font: inherit;
               opacity: var(--fish-opacity, 0.92);
               filter: drop-shadow(0 0 10px rgba(125, 211, 252, 0.12));
               animation: aquarium-swim-right var(--swim-speed, 20s) linear infinite;
@@ -4522,6 +5228,81 @@ function AquariumEasterEgg() {
               stroke-width: 2;
               opacity: 0.45;
             }
+            .special_girlfriend_fish {
+              --fish-width: 58px;
+              --fish-body: #f9a8d4;
+              --fish-fin: #f472b6;
+              --fish-detail: #fdf2f8;
+              --fish-opacity: 0.96;
+              --fish-depth: 6;
+              cursor: pointer;
+              overflow: visible;
+              filter: drop-shadow(0 0 12px rgba(244, 114, 182, 0.20));
+            }
+            .special_girlfriend_fish:hover .special-fish-svg,
+            .special_girlfriend_fish:focus-visible .special-fish-svg {
+              filter: drop-shadow(0 0 8px rgba(244, 114, 182, 0.28));
+            }
+            .special_girlfriend_fish:focus-visible {
+              outline: 2px solid rgba(125, 211, 252, 0.72);
+              outline-offset: 4px;
+              border-radius: 999px;
+            }
+            .special-fish-svg .stripe {
+              stroke: rgba(255, 255, 255, 0.66);
+              stroke-width: 2.3;
+            }
+            .special-fish-svg .blush {
+              fill: rgba(251, 113, 133, 0.58);
+            }
+            .special-fish-svg .glasses-lens,
+            .special-fish-svg .glasses-bridge {
+              fill: none;
+              stroke: rgba(15, 23, 42, 0.82);
+              stroke-width: 1.35;
+              stroke-linecap: round;
+            }
+            .special-fish-svg .heart {
+              fill: #ef4444;
+              opacity: 0.9;
+            }
+            .special-fish-bubble {
+              position: absolute;
+              left: 50%;
+              top: -28px;
+              z-index: 8;
+              transform: translate3d(-50%, 6px, 0) scale(0.96);
+              border: 1px solid rgba(186, 230, 253, 0.22);
+              border-radius: 999px;
+              background: rgba(8, 47, 73, 0.76);
+              box-shadow: 0 8px 22px rgba(2, 6, 23, 0.28);
+              color: rgba(240, 249, 255, 0.86);
+              font-size: 11px;
+              font-weight: 600;
+              letter-spacing: 0;
+              line-height: 1;
+              opacity: 0;
+              padding: 6px 9px;
+              pointer-events: none;
+              white-space: nowrap;
+              transition: opacity 280ms ease, transform 280ms ease;
+            }
+            .special-fish-bubble::after {
+              position: absolute;
+              left: 50%;
+              bottom: -4px;
+              width: 7px;
+              height: 7px;
+              content: "";
+              transform: translateX(-50%) rotate(45deg);
+              border-right: 1px solid rgba(186, 230, 253, 0.18);
+              border-bottom: 1px solid rgba(186, 230, 253, 0.18);
+              background: rgba(8, 47, 73, 0.76);
+            }
+            .special-fish-bubble.is-visible {
+              transform: translate3d(-50%, 0, 0) scale(1);
+              opacity: 0.94;
+            }
             .aquarium-bubble {
               position: absolute;
               bottom: -14px;
@@ -4590,6 +5371,9 @@ function AquariumEasterEgg() {
               .aquarium-bubble,
               .aquarium-seaweed {
                 animation: none;
+              }
+              .special-fish-bubble {
+                transition: none;
               }
               .fish-orange { left: 14%; }
               .fish-tropical { right: 12%; }
@@ -5444,6 +6228,12 @@ export default function Home() {
             if (!entry.food_log_id) throw new Error("Food log ID is missing.");
             await apiDelete(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`);
           }, "Food entry removed.")
+        }
+        onUpdateFoodLog={(entry, updates) =>
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            if (!entry.food_log_id) throw new Error("Food log ID is missing.");
+            await apiSend(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`, "PUT", updates);
+          }, "Food icon updated.")
         }
         onUpdateShortcut={(shortcut) =>
           void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {

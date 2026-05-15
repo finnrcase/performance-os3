@@ -22,6 +22,7 @@ NUTRITION_COLUMNS = [
     "date",
     "meal_type",
     "food_name",
+    "iconType",
     "calories",
     "protein",
     "carbs",
@@ -100,6 +101,30 @@ FREQUENT_FOODS_PATH = processed_data_path("frequent_foods.csv")
 MEAL_TEMPLATES_PATH = processed_data_path("meal_templates.csv")
 FOOD_SHORTCUTS_PATH = processed_data_path("food_shortcuts.csv")
 
+FOOD_ICON_TYPES = {"bagel", "protein_bar", "oats", "protein_shake", "chicken"}
+
+
+def normalize_food_icon(icon_type) -> str:
+    """Return a persisted food icon key or an empty string."""
+    selected_icon = str(icon_type or "").strip()
+    return selected_icon if selected_icon in FOOD_ICON_TYPES else ""
+
+
+def suggest_food_icon(food_name) -> str:
+    """Pick a lightweight default icon from the food name when possible."""
+    normalized_name = str(food_name or "").lower()
+    if "bagel" in normalized_name:
+        return "bagel"
+    if "built bar" in normalized_name or "protein bar" in normalized_name or ("protein" in normalized_name and "bar" in normalized_name):
+        return "protein_bar"
+    if "oat" in normalized_name or "oatmeal" in normalized_name:
+        return "oats"
+    if "protein shake" in normalized_name or "shake" in normalized_name:
+        return "protein_shake"
+    if "chicken" in normalized_name:
+        return "chicken"
+    return ""
+
 
 def create_food_entry(
     food_name,
@@ -109,6 +134,7 @@ def create_food_entry(
     fat,
     meal_type,
     date,
+    iconType=None,
     serving_size_grams=None,
     grams_consumed=None,
     serving_multiplier=None,
@@ -142,6 +168,7 @@ def create_food_entry(
         "date": str(date),
         "meal_type": str(meal_type),
         "food_name": str(food_name).strip(),
+        "iconType": normalize_food_icon(iconType) or suggest_food_icon(food_name),
         "calories": float(calories),
         "protein": float(protein),
         "carbs": float(carbs),
@@ -249,6 +276,7 @@ def load_nutrition_log() -> pd.DataFrame:
     entries_df["meal_type"] = entries_df["meal_type"].astype(str)
     entries_df["food_name"] = entries_df["food_name"].astype(str)
     for column in [
+        "iconType",
         "source_label_file",
         "unit",
         "serving_description",
@@ -264,6 +292,7 @@ def load_nutrition_log() -> pd.DataFrame:
         "updated_at",
     ]:
         entries_df[column] = entries_df[column].fillna("").astype(str)
+    entries_df["iconType"] = entries_df["iconType"].apply(normalize_food_icon)
     entries_df["needs_review"] = (
         entries_df["needs_review"]
         .fillna(False)
@@ -296,6 +325,24 @@ def delete_food_log_entry(food_log_id: str) -> dict:
     entries_df = entries_df.loc[~match].reset_index(drop=True)
     save_nutrition_log(entries_df)
     return deleted_entry
+
+
+def update_food_log_entry(food_log_id: str, updates: dict) -> dict:
+    """Update editable fields on a detailed food log entry by stable ID."""
+    entries_df = load_nutrition_log()
+    selected_id = str(food_log_id or "").strip()
+    if not selected_id:
+        raise ValueError("Food log ID is required.")
+    match = entries_df["food_log_id"].astype(str) == selected_id
+    if entries_df.empty or not match.any():
+        raise ValueError(f"Food log entry not found: {food_log_id}")
+
+    row_index = entries_df.index[match][0]
+    if "iconType" in updates:
+        entries_df.at[row_index, "iconType"] = normalize_food_icon(updates.get("iconType"))
+    entries_df.at[row_index, "updated_at"] = datetime.now(timezone.utc).isoformat()
+    save_nutrition_log(entries_df)
+    return load_nutrition_log().loc[lambda df: df["food_log_id"].astype(str) == selected_id].iloc[0].to_dict()
 
 
 def clear_food_logs_for_date(date: str) -> dict:

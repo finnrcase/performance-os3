@@ -1,5 +1,6 @@
 from pathlib import Path
 from shutil import copyfileobj
+from typing import Literal
 from uuid import uuid4
 import base64
 import hashlib
@@ -32,6 +33,7 @@ from src.nutrition import (
     log_meal_template,
     log_food_shortcut,
     save_nutrition_log,
+    update_food_log_entry,
     update_food_shortcut,
     update_meal_template_name,
 )
@@ -92,6 +94,7 @@ class NutritionEntry(BaseModel):
     date: str
     meal_type: str
     food_name: str = Field(min_length=1)
+    iconType: Literal["bagel", "protein_bar", "oats", "protein_shake", "chicken"] | None = None
     calories: float = Field(ge=0)
     protein: float = Field(ge=0)
     carbs: float = Field(ge=0)
@@ -111,6 +114,10 @@ class NutritionEntry(BaseModel):
 
 class FoodParseRequest(BaseModel):
     text: str = Field(min_length=1)
+
+
+class FoodLogUpdatePayload(BaseModel):
+    iconType: Literal["bagel", "protein_bar", "oats", "protein_shake", "chicken"] | None = None
 
 
 class FoodAnalyzeTextRequest(BaseModel):
@@ -233,6 +240,20 @@ def remove_nutrition_log(food_log_id: str, _: None = Depends(_require_authentica
     rebuild_daily_summary()
     return {
         "deleted": deleted_entry,
+        "items": dataframe_records(load_nutrition_log()),
+    }
+
+
+@router.put("/api/nutrition/logs/{food_log_id}")
+def update_nutrition_log(food_log_id: str, payload: FoodLogUpdatePayload, _: None = Depends(_require_authenticated_request)) -> dict:
+    """Update editable metadata for one detailed food log entry."""
+    try:
+        updated_entry = update_food_log_entry(food_log_id, payload.model_dump(exclude_unset=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    rebuild_daily_summary()
+    return {
+        "item": updated_entry,
         "items": dataframe_records(load_nutrition_log()),
     }
 
