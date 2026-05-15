@@ -91,7 +91,7 @@ class TrainingWorkloadTest(unittest.TestCase):
         self.assertEqual(goals["aggressiveness"], "Conservative")
         self.assertGreater(goals["cardio_frequency_per_week"], 0)
         self.assertGreater(targets["workload_calorie_adjustment"], 0)
-        self.assertGreater(targets["carb_grams"], 320)
+        self.assertGreater(targets["carb_grams"], 300)
 
     def test_hevy_performance_signal_detects_multi_exercise_decline(self):
         rows = []

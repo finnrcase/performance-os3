@@ -27,6 +27,17 @@ STRAVA_TOKEN_FIELDS = {
     "refresh_token": "",
     "expires_at": 0,
     "athlete_id": "",
+    "scopes": "",
+}
+
+STRAVA_SYNC_FIELDS = {
+    "last_synced_at": "",
+    "last_error": "",
+    "last_imported_count": 0,
+    "last_updated_count": 0,
+    "last_fetched_count": 0,
+    "latest_activity_date": "",
+    "needs_reconnect": False,
 }
 
 
@@ -37,6 +48,7 @@ def default_settings() -> dict:
         "metadata": {
             "version": 1,
             "strava_tokens": STRAVA_TOKEN_FIELDS.copy(),
+            "strava_sync": STRAVA_SYNC_FIELDS.copy(),
         },
     }
 
@@ -59,6 +71,11 @@ def load_settings() -> dict:
         key: saved_tokens.get(key, default)
         for key, default in STRAVA_TOKEN_FIELDS.items()
     }
+    saved_sync = saved.get("metadata", {}).get("strava_sync", {})
+    settings["metadata"]["strava_sync"] = {
+        key: saved_sync.get(key, default)
+        for key, default in STRAVA_SYNC_FIELDS.items()
+    }
     return settings
 
 
@@ -76,6 +93,11 @@ def save_settings(settings: dict) -> None:
     normalized["metadata"]["strava_tokens"] = {
         key: tokens.get(key, default)
         for key, default in STRAVA_TOKEN_FIELDS.items()
+    }
+    sync = settings.get("metadata", {}).get("strava_sync", {})
+    normalized["metadata"]["strava_sync"] = {
+        key: sync.get(key, default)
+        for key, default in STRAVA_SYNC_FIELDS.items()
     }
     save_document("user_settings", SETTINGS_PATH, normalized)
 

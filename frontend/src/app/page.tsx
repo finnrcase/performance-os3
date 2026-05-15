@@ -16,6 +16,7 @@ import {
   Settings,
   Sparkles,
   Target,
+  Trash2,
   Utensils,
   Weight,
   X,
@@ -127,6 +128,7 @@ type WeightFeedback = {
 };
 
 type NutritionEntry = {
+  food_log_id?: string;
   date: string;
   meal_type: string;
   food_name: string;
@@ -295,6 +297,15 @@ type WorkoutGroup = {
   duration_minutes: number;
   source: string;
   details: TrainingEntry[];
+};
+
+type RunSummary = {
+  run_count: number;
+  distance_miles: number;
+  duration_minutes: number;
+  average_pace_min_per_mile: number | null;
+  calories_burned?: number | null;
+  average_heart_rate?: number | null;
 };
 
 type StrengthTrend = {
@@ -632,6 +643,17 @@ type SettingsHealthCard = {
   detail: string;
   last_synced_at?: string;
   action?: string;
+  metadata?: {
+    connected?: boolean;
+    athlete_id?: string;
+    token_status?: string;
+    scopes?: string;
+    last_imported_count?: number;
+    last_updated_count?: number;
+    last_fetched_count?: number;
+    latest_activity_date?: string;
+    last_error?: string;
+  };
 };
 
 type HevyPreviewWorkout = {
@@ -696,6 +718,7 @@ type DashboardData = {
     comparison: string | null;
     today_volume: number | null;
     percent_vs_average: number | null;
+    run_summary?: RunSummary | null;
   };
   workout_quality: {
     status: string;
@@ -982,8 +1005,31 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
+const DEFAULT_API_TIMEOUT_MS = 15_000;
+const UPLOAD_API_TIMEOUT_MS = 60_000;
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs: number = DEFAULT_API_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : "request";
+      throw new Error(`${target} timed out after ${timeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path), { cache: "no-store" });
+  const response = await fetchWithTimeout(apiUrl(path), { cache: "no-store" });
   if (!response.ok) {
     throw new Error(`${path} returned ${response.status}`);
   }
@@ -991,7 +1037,7 @@ async function apiGet<T>(path: string): Promise<T> {
 }
 
 async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
-  const response = await fetch(apiUrl(path), {
+  const response = await fetchWithTimeout(apiUrl(path), {
     method,
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -1004,7 +1050,7 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
 }
 
 async function apiDelete<T>(path: string): Promise<T> {
-  const response = await fetch(apiUrl(path), { method: "DELETE" });
+  const response = await fetchWithTimeout(apiUrl(path), { method: "DELETE", credentials: "include" });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${path} returned ${response.status}: ${text}`);
@@ -1013,10 +1059,14 @@ async function apiDelete<T>(path: string): Promise<T> {
 }
 
 async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
-  const response = await fetch(apiUrl(path), {
-    method: "POST",
-    body: formData,
-  });
+  const response = await fetchWithTimeout(
+    apiUrl(path),
+    {
+      method: "POST",
+      body: formData,
+    },
+    UPLOAD_API_TIMEOUT_MS,
+  );
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`${path} returned ${response.status}: ${text}`);
@@ -1298,6 +1348,23 @@ function formatFoodAmount(value: unknown, digits = 0) {
   return digits > 0 ? numberValue.toFixed(digits).replace(/\.0$/, "") : `${Math.round(numberValue)}`;
 }
 
+function formatRunDuration(minutes?: number | null) {
+  if (!minutes || minutes <= 0) return "--:--";
+  const totalSeconds = Math.round(minutes * 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}:${mins.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
+  }
+  return `${mins}:${seconds.toString().padStart(2, "0")}`;
+}
+
+function formatRunPace(minutes?: number | null) {
+  if (!minutes || minutes <= 0) return "--/mi";
+  return `${formatRunDuration(minutes)}/mi`;
+}
+
 function hasFoodDetail(value: unknown) {
   return value !== null && value !== undefined && value !== "" && String(value) !== "NaN";
 }
@@ -1306,7 +1373,17 @@ function foodMacroSummary(entry: Pick<NutritionEntry, "calories" | "protein" | "
   return `${formatFoodAmount(entry.calories)} kcal · P ${formatFoodAmount(entry.protein)}g · C ${formatFoodAmount(entry.carbs)}g · F ${formatFoodAmount(entry.fat)}g`;
 }
 
-function FoodLogList({ entries, emptyDescription }: Readonly<{ entries: NutritionEntry[]; emptyDescription: string }>) {
+function FoodLogList({
+  entries,
+  emptyDescription,
+  onRemove,
+  removingId,
+}: Readonly<{
+  entries: NutritionEntry[];
+  emptyDescription: string;
+  onRemove?: (entry: NutritionEntry) => void;
+  removingId?: string | null;
+}>) {
   if (!entries.length) {
     return (
       <EmptyState
@@ -1321,8 +1398,8 @@ function FoodLogList({ entries, emptyDescription }: Readonly<{ entries: Nutritio
   return (
     <div className="space-y-2">
       {entries.map((entry, index) => (
-        <div key={`${entry.date}-${entry.food_name}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div key={entry.food_log_id || `${entry.date}-${entry.food_name}-${index}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+          <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
@@ -1330,6 +1407,18 @@ function FoodLogList({ entries, emptyDescription }: Readonly<{ entries: Nutritio
               </div>
               <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
             </div>
+            {onRemove ? (
+              <button
+                type="button"
+                onClick={() => onRemove(entry)}
+                disabled={!entry.food_log_id || removingId === entry.food_log_id}
+                className="inline-flex w-fit shrink-0 items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                aria-label={`Remove ${entry.food_name || "food entry"}`}
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                {removingId === entry.food_log_id ? "Removing..." : "Remove"}
+              </button>
+            ) : null}
           </div>
         </div>
       ))}
@@ -1892,6 +1981,19 @@ function Dashboard({
         <p className="mt-3 text-sm leading-6 text-zinc-400">{lift?.summary ?? "Log a workout or import from Hevy."}</p>
         {lift?.today_volume ? <p className="mt-4 text-sm text-amber-200">Volume: {Math.round(lift.today_volume).toLocaleString()}</p> : null}
         {lift?.comparison ? <p className="mt-2 text-xs text-zinc-500">{lift.comparison}</p> : null}
+        {lift?.run_summary ? (
+          <div className="mt-4 border-t border-white/10 pt-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
+            <p className="mt-1 text-sm font-semibold text-cyan-100">
+              {lift.run_summary.distance_miles.toFixed(2)} mi{lift.run_summary.run_count > 1 ? " total" : ""} · {formatRunDuration(lift.run_summary.duration_minutes)} · {formatRunPace(lift.run_summary.average_pace_min_per_mile)}{lift.run_summary.run_count > 1 ? " avg" : ""}
+            </p>
+            {(lift.run_summary.calories_burned || lift.run_summary.average_heart_rate) ? (
+              <p className="mt-1 text-xs text-zinc-500">
+                {[lift.run_summary.calories_burned ? `${Math.round(lift.run_summary.calories_burned)} kcal` : "", lift.run_summary.average_heart_rate ? `${Math.round(lift.run_summary.average_heart_rate)} bpm avg` : ""].filter(Boolean).join(" · ")}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
       </Card>
 
       <Card>
@@ -2120,7 +2222,7 @@ function GoalsPage({
             <div className="mt-4 grid gap-3 text-sm leading-6 text-zinc-300">
               <p><span className="text-zinc-500">Goal:</span> Slow muscle gain while minimizing fat gain.</p>
               <p><span className="text-zinc-500">Method:</span> Dynamic calorie and macro adjustment based on bodyweight, training, running, food logs, and recovery.</p>
-              <p><span className="text-zinc-500">Mode:</span> Performance-focused, high-carb support for strength progression and recovery.</p>
+              <p><span className="text-zinc-500">Mode:</span> Conservative 2500 kcal baseline with training-day carb support when workload and recovery justify it.</p>
             </div>
           </div>
           <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.045] p-4">
@@ -2434,6 +2536,7 @@ function FoodPage({
   onSaveMealTemplate,
   onSaveAndLogToday,
   onLogShortcut,
+  onDeleteFoodLog,
   onUpdateShortcut,
   onDeleteShortcut,
   onLogMealTemplate,
@@ -2476,6 +2579,7 @@ function FoodPage({
   onSaveMealTemplate: (event: FormEvent) => void;
   onSaveAndLogToday: (event: FormEvent) => void;
   onLogShortcut: (shortcutId: string) => void;
+  onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
   onUpdateShortcut: (shortcut: FoodShortcut) => void;
   onDeleteShortcut: (shortcutId: string) => void;
   onLogMealTemplate: (templateName: string) => Promise<void>;
@@ -2494,6 +2598,7 @@ function FoodPage({
   const [editingTemplateName, setEditingTemplateName] = useState<string | null>(null);
   const [templateRenameValue, setTemplateRenameValue] = useState("");
   const [pendingTemplateAction, setPendingTemplateAction] = useState<string | null>(null);
+  const [deletingFoodLogId, setDeletingFoodLogId] = useState<string | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
@@ -2559,6 +2664,17 @@ function FoodPage({
       await onLogMealTemplate(templateName);
     } finally {
       setPendingTemplateAction(null);
+    }
+  };
+  const removeFoodLogEntry = async (entry: NutritionEntry) => {
+    if (!entry.food_log_id) return;
+    const confirmed = window.confirm(`Remove ${entry.food_name || "this food entry"} from ${entry.date}?`);
+    if (!confirmed) return;
+    setDeletingFoodLogId(entry.food_log_id);
+    try {
+      await onDeleteFoodLog(entry);
+    } finally {
+      setDeletingFoodLogId(null);
     }
   };
 
@@ -2738,7 +2854,12 @@ function FoodPage({
             <MetricCard title="Fat" value={`${Math.round(selectedDateTotals.fat)}g`} detail="selected day" icon={FatMoleculeIcon} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
           </div>
           <div className="mt-4">
-            <FoodLogList entries={selectedDateEntries.slice().reverse()} emptyDescription="Manual entries for this date will appear here immediately after saving." />
+            <FoodLogList
+              entries={selectedDateEntries.slice().reverse()}
+              emptyDescription="Manual entries for this date will appear here immediately after saving."
+              onRemove={(entry) => void removeFoodLogEntry(entry)}
+              removingId={deletingFoodLogId}
+            />
           </div>
         </Card>
         {showFoodHistory ? (
@@ -3593,10 +3714,10 @@ function TrainingPage({
             </div>
             <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
               <p className="font-medium text-white">Import Strava activities</p>
-              <p className="mt-2 text-sm text-zinc-400">After connecting Strava, import recent runs into the local training log. Duplicate Strava activity IDs are skipped.</p>
+              <p className="mt-2 text-sm text-zinc-400">After connecting Strava, sync recent runs into the training log. Matching Strava activity IDs are updated without creating duplicates.</p>
               <button onClick={onImportStrava} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-orange-300 px-3 py-2 text-sm font-semibold text-zinc-950">
                 <RefreshCw className="h-4 w-4" />
-                Import Strava runs
+                Sync Strava
               </button>
             </div>
           </div>
@@ -4502,7 +4623,7 @@ function IntegrationHealthGrid({
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
     if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
-    if (card.action === "strava_import") return { label: "Import", onClick: onImportStrava };
+    if (card.action === "strava_import") return { label: "Sync", onClick: onImportStrava };
     return null;
   };
   return (
@@ -4530,6 +4651,15 @@ function IntegrationHealthGrid({
                   </button>
                 ) : null}
               </div>
+              {card.id === "strava" && card.metadata ? (
+                <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
+                  <p>Athlete: <span className="text-zinc-300">{card.metadata.athlete_id || "Not connected"}</span></p>
+                  <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
+                  <p>Scopes: <span className="text-zinc-300">{card.metadata.scopes || "Not granted"}</span></p>
+                  <p>Fetched: <span className="text-zinc-300">{card.metadata.last_fetched_count ?? 0}</span> · Imported: <span className="text-zinc-300">{card.metadata.last_imported_count ?? 0}</span> · Updated: <span className="text-zinc-300">{card.metadata.last_updated_count ?? 0}</span></p>
+                  {card.metadata.latest_activity_date ? <p>Latest activity: <span className="text-zinc-300">{card.metadata.latest_activity_date}</span></p> : null}
+                </div>
+              ) : null}
             </div>
           );
         })}
@@ -4581,9 +4711,9 @@ function SettingsPage({
           <SectionHeader eyebrow="Strava" title="OAuth connection" />
           <p className="text-sm text-zinc-400">Status: <span className="text-cyan-200">{settings?.statuses.strava ?? "Not configured"}</span></p>
           <button onClick={onConnectStrava} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
-            Connect Strava
+            {settings?.statuses.strava === "Connected" || settings?.statuses.strava === "Disconnected" ? "Reconnect Strava" : "Connect Strava"}
           </button>
-          <p className="mt-3 text-xs text-zinc-500">Uses OAuth2 scopes: read and activity:read_all. Tokens are stored locally and never displayed.</p>
+          <p className="mt-3 text-xs text-zinc-500">Uses OAuth2 scopes: read and activity:read_all. Tokens are stored server-side and never displayed.</p>
         </Card>
         <Card>
           <SectionHeader eyebrow="OpenAI" title="Food parser" />
@@ -4678,7 +4808,7 @@ export default function Home() {
   const [workoutHistory, setWorkoutHistory] = useState<WorkoutGroup[]>([]);
   const [strengthTrends, setStrengthTrends] = useState<StrengthTrendResponse | null>(null);
   const [selectedExercise, setSelectedExercise] = useState("");
-  const [trendView, setTrendView] = useState<"exercise" | "muscle_group">("exercise");
+  const [trendView, setTrendView] = useState<"exercise" | "muscle_group">("muscle_group");
   const [selectedMuscleGroup, setSelectedMuscleGroup] = useState("");
   const [trendDateRange, setTrendDateRange] = useState("12w");
   const [muscleTrendMetric, setMuscleTrendMetric] = useState<keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">>("strength_index");
@@ -4712,6 +4842,7 @@ export default function Home() {
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [loadFailures, setLoadFailures] = useState<string[]>([]);
   const hevyAutoSyncRef = useRef(false);
 
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
@@ -4728,41 +4859,146 @@ export default function Home() {
   }, [selectedExercise, selectedMuscleGroup, trendDateRange]);
 
   const refreshAll = useCallback(async () => {
-    try {
+    setApiError(null);
+    setLoadFailures([]);
+
+    type GoalsResponse = {
+      goals: Goals;
+      targets: Targets;
+      weight_feedback: WeightFeedback;
+      lean_bulk_decision: LeanBulkDecision;
+      adaptive_recommendation: AdaptiveNutritionRecommendation;
+    };
+
+    const steps: Array<{
+      key: string;
+      label: string;
+      required: boolean;
+      run: () => Promise<void>;
+    }> = [
+      {
+        key: "dashboard",
+        label: "Dashboard",
+        required: true,
+        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard")),
+      },
+      {
+        key: "goals",
+        label: "Goals & targets",
+        required: true,
+        run: async () => {
+          const goalsData = await apiGet<GoalsResponse>("/api/goals");
+          setForms((state) => ({ ...state, goals: goalsData.goals }));
+        },
+      },
+      {
+        key: "settings",
+        label: "Settings",
+        required: true,
+        run: async () => setSettings(await apiGet<SettingsData>("/api/settings")),
+      },
+      {
+        key: "nutrition_logs",
+        label: "Nutrition logs",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs");
+          setNutritionLogs(data.items);
+        },
+      },
+      {
+        key: "nutrition_history",
+        label: "Nutrition history",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history");
+          setNutritionHistory(data.items);
+          setNutritionAdherence(data.adherence);
+        },
+      },
+      {
+        key: "nutrition_shortcuts",
+        label: "Nutrition shortcuts",
+        required: false,
+        run: async () => setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts")),
+      },
+      {
+        key: "body_metrics",
+        label: "Body metrics",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: BodyMetricEntry[] }>("/api/body-metrics");
+          setBodyMetrics(data.items);
+        },
+      },
+      {
+        key: "recovery_logs",
+        label: "Recovery logs",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: RecoveryEntry[] }>("/api/recovery/logs");
+          setRecoveryLogs(data.items);
+        },
+      },
+      {
+        key: "sleep",
+        label: "Sleep",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: SleepEntry[] }>("/api/recovery/sleep");
+          setSleepEntries(data.items);
+        },
+      },
+      {
+        key: "training_history",
+        label: "Training history",
+        required: false,
+        run: async () => {
+          const data = await apiGet<{ items: WorkoutGroup[] }>("/api/training/history");
+          setWorkoutHistory(data.items);
+        },
+      },
+      {
+        key: "strength_trends",
+        label: "Strength trends",
+        required: false,
+        run: async () => {
+          const data = await apiGet<StrengthTrendResponse>(strengthTrendPath());
+          setStrengthTrends(data);
+          setSelectedExercise((current) => current || data.selected_exercise || data.exercise_options[0] || "");
+        },
+      },
+      {
+        key: "hevy_sync_status",
+        label: "Hevy sync status",
+        required: false,
+        run: async () => setHevySync(await apiGet<HevySyncStatus>("/api/training/sync/hevy/status")),
+      },
+    ];
+
+    const results = await Promise.allSettled(steps.map((step) => step.run()));
+
+    const failures: string[] = [];
+    const requiredFailures: string[] = [];
+    results.forEach((result, index) => {
+      if (result.status === "rejected") {
+        const step = steps[index];
+        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+        console.error(`[startup] ${step.key} failed: ${reason}`);
+        failures.push(`${step.label}: ${reason}`);
+        if (step.required) {
+          requiredFailures.push(step.label);
+        }
+      }
+    });
+
+    setLoadFailures(failures);
+    if (requiredFailures.length > 0) {
+      setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. The backend may be offline.`);
+    } else if (failures.length > 0) {
       setApiError(null);
-      const [dashboardData, goalsData, nutritionData, nutritionHistoryData, shortcutResponse, bodyData, recoveryData, sleepData, historyData, strengthData, settingsData, hevySyncData] = await Promise.all([
-        apiGet<DashboardData>("/api/dashboard"),
-        apiGet<{ goals: Goals; targets: Targets; weight_feedback: WeightFeedback; lean_bulk_decision: LeanBulkDecision; adaptive_recommendation: AdaptiveNutritionRecommendation }>("/api/goals"),
-        apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs"),
-        apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history"),
-        apiGet<NutritionShortcutData>("/api/nutrition/shortcuts"),
-        apiGet<{ items: BodyMetricEntry[] }>("/api/body-metrics"),
-        apiGet<{ items: RecoveryEntry[] }>("/api/recovery/logs"),
-        apiGet<{ items: SleepEntry[] }>("/api/recovery/sleep"),
-        apiGet<{ items: WorkoutGroup[] }>("/api/training/history"),
-        apiGet<StrengthTrendResponse>(strengthTrendPath()),
-        apiGet<SettingsData>("/api/settings"),
-        apiGet<HevySyncStatus>("/api/training/sync/hevy/status"),
-      ]);
-      setDashboard(dashboardData);
-      setNutritionLogs(nutritionData.items);
-      setNutritionHistory(nutritionHistoryData.items);
-      setNutritionAdherence(nutritionHistoryData.adherence);
-      setShortcutData(shortcutResponse);
-      setBodyMetrics(bodyData.items);
-      setRecoveryLogs(recoveryData.items);
-      setSleepEntries(sleepData.items);
-      setWorkoutHistory(historyData.items);
-      setStrengthTrends(strengthData);
-      setSelectedExercise((current) => current || strengthData.selected_exercise || strengthData.exercise_options[0] || "");
-      setSettings(settingsData);
-      setHevySync(hevySyncData);
-      setForms((state) => ({ ...state, goals: goalsData.goals }));
-    } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Unable to reach FastAPI backend.");
-    } finally {
-      setLoading(false);
     }
+    setLoading(false);
   }, [strengthTrendPath]);
 
   useEffect(() => {
@@ -5203,6 +5439,12 @@ export default function Home() {
             });
           }, "Shortcut logged.")
         }
+        onDeleteFoodLog={(entry) =>
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            if (!entry.food_log_id) throw new Error("Food log ID is missing.");
+            await apiDelete(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`);
+          }, "Food entry removed.")
+        }
         onUpdateShortcut={(shortcut) =>
           void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", {
@@ -5447,11 +5689,11 @@ export default function Home() {
           void submitAndRefresh(
             { preventDefault: () => undefined } as FormEvent,
             async () => {
-              const result = await apiSend<{ status: string; message?: string; imported_runs: number; skipped_duplicates: number }>("/api/training/import/strava", "POST", { per_page: 30 });
+              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string }>("/api/training/import/strava", "POST", { per_page: 30 });
               if (result.status === "error") {
                 throw new Error(result.message ?? "Strava import failed.");
               }
-              setMessage(`Imported ${result.imported_runs} Strava runs. Skipped ${result.skipped_duplicates} duplicates.`);
+              setMessage(`Synced ${result.fetched_activities ?? result.imported_runs} Strava runs. Imported ${result.imported_runs}, updated ${result.updated_runs ?? 0}.`);
             },
             "Strava import complete.",
           );
@@ -5495,11 +5737,11 @@ export default function Home() {
           void submitAndRefresh(
             { preventDefault: () => undefined } as FormEvent,
             async () => {
-              const result = await apiSend<{ status: string; message?: string; imported_runs: number; skipped_duplicates: number }>("/api/training/import/strava", "POST", { per_page: 30 });
+              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string }>("/api/training/import/strava", "POST", { per_page: 30 });
               if (result.status === "error") {
                 throw new Error(result.message ?? "Strava import failed.");
               }
-              setMessage(`Imported ${result.imported_runs} Strava runs. Skipped ${result.skipped_duplicates} duplicates.`);
+              setMessage(`Synced ${result.fetched_activities ?? result.imported_runs} Strava runs. Imported ${result.imported_runs}, updated ${result.updated_runs ?? 0}.`);
             },
             "Strava import complete.",
           );
@@ -5508,7 +5750,7 @@ export default function Home() {
           setApiError(null);
           setMessage(null);
           try {
-            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/integrations/strava/auth-url");
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/integrations/strava/auth-url?reconnect=true");
             if (result.status !== "ok" || !result.auth_url) {
               throw new Error(result.message ?? "Unable to generate Strava authorization URL.");
             }
@@ -5600,9 +5842,34 @@ export default function Home() {
           <div className="p-4 sm:p-6 lg:p-8">
             {apiError ? (
               <Card className="mb-4 border-red-400/30 bg-red-400/10">
-                <p className="font-medium text-red-100">Action needs attention</p>
-                <p className="mt-2 text-sm text-red-100/80">{apiError}</p>
-                <p className="mt-2 text-sm text-red-100/70">If this is a connection issue, start FastAPI with: uvicorn backend.main:app --reload</p>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-red-100">Action needs attention</p>
+                    <p className="mt-2 text-sm text-red-100/80">{apiError}</p>
+                    <p className="mt-2 text-sm text-red-100/70">If this is a connection issue, start FastAPI with: uvicorn backend.main:app --reload</p>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setLoading(true);
+                      void refreshAll();
+                    }}
+                    className="inline-flex h-9 items-center gap-2 rounded-lg border border-red-300/40 bg-red-400/10 px-3 text-sm text-red-50"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                    Retry
+                  </button>
+                </div>
+              </Card>
+            ) : null}
+            {!apiError && loadFailures.length > 0 ? (
+              <Card className="mb-4 border-amber-400/30 bg-amber-400/10">
+                <p className="font-medium text-amber-100">Some optional data did not load</p>
+                <ul className="mt-2 space-y-1 text-sm text-amber-100/80">
+                  {loadFailures.map((line) => (
+                    <li key={line}>• {line}</li>
+                  ))}
+                </ul>
+                <p className="mt-2 text-sm text-amber-100/70">The rest of the app is usable. Use Refresh to try the failing services again.</p>
               </Card>
             ) : null}
             {message ? (
@@ -5610,7 +5877,25 @@ export default function Home() {
                 <p className="text-sm text-emerald-100">{message}</p>
               </Card>
             ) : null}
-            {loading ? <Card>Loading local data...</Card> : pageContent[activePage]}
+            {loading ? (
+              <Card>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm text-zinc-300">Loading local data...</p>
+                  <button
+                    onClick={() => {
+                      setLoading(true);
+                      void refreshAll();
+                    }}
+                    className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200"
+                  >
+                    <RefreshCw className="h-4 w-4" />
+                    Retry
+                  </button>
+                </div>
+              </Card>
+            ) : (
+              pageContent[activePage]
+            )}
           </div>
         </section>
       </div>

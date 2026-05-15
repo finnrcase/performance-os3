@@ -111,10 +111,22 @@ OPENAI_API_KEY=...
 HEVY_API_KEY=...
 STRAVA_CLIENT_ID=...
 STRAVA_CLIENT_SECRET=...
-STRAVA_REDIRECT_URI=https://your-performance-os-api.example.com/api/integrations/strava/callback
+STRAVA_REDIRECT_URI=https://your-vercel-app.vercel.app/api/strava/callback
+NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
 CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
 FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
 ```
+
+For local Strava testing, use this exact callback in the Strava developer app
+and backend env:
+
+```bash
+STRAVA_REDIRECT_URI=http://localhost:3000/api/strava/callback
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+The callback URL is intentionally on the frontend origin; Next.js forwards it
+to FastAPI so the token exchange and saved refresh token stay server-side.
 
 Use `python scripts/export_local_data.py` locally, then run
 `DATABASE_URL=postgres://... python scripts/import_production_data.py` from the

@@ -18,6 +18,7 @@ from src.paths import processed_data_path
 from src.storage import load_dataframe, save_dataframe
 
 NUTRITION_COLUMNS = [
+    "food_log_id",
     "date",
     "meal_type",
     "food_name",
@@ -137,6 +138,7 @@ def create_food_entry(
     now = datetime.now(timezone.utc).isoformat()
     assumptions_json = assumptions if isinstance(assumptions, str) else json.dumps(assumptions or [])
     return {
+        "food_log_id": str(uuid4()),
         "date": str(date),
         "meal_type": str(meal_type),
         "food_name": str(food_name).strip(),
@@ -206,9 +208,11 @@ def load_nutrition_log() -> pd.DataFrame:
     """Load the local nutrition log, creating an empty frame if needed."""
     entries_df = load_dataframe("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS)
 
+    needs_id_backfill = False
     for column in NUTRITION_COLUMNS:
         if column not in entries_df.columns:
             entries_df[column] = np.nan
+            needs_id_backfill = needs_id_backfill or column == "food_log_id"
 
     entries_df = entries_df[NUTRITION_COLUMNS]
 
@@ -234,6 +238,12 @@ def load_nutrition_log() -> pd.DataFrame:
         entries_df[column] = pd.to_numeric(entries_df[column], errors="coerce")
     for column in ["calories", "protein", "carbs", "fat"]:
         entries_df[column] = entries_df[column].fillna(0)
+
+    entries_df["food_log_id"] = entries_df["food_log_id"].fillna("").astype(str)
+    missing_id_mask = entries_df["food_log_id"].str.strip().isin(["", "nan", "None", "<NA>"])
+    if missing_id_mask.any():
+        entries_df.loc[missing_id_mask, "food_log_id"] = [str(uuid4()) for _ in range(int(missing_id_mask.sum()))]
+        needs_id_backfill = True
 
     entries_df["date"] = entries_df["date"].astype(str)
     entries_df["meal_type"] = entries_df["meal_type"].astype(str)
@@ -262,12 +272,43 @@ def load_nutrition_log() -> pd.DataFrame:
         .isin(["true", "1", "yes"])
     )
 
+    if needs_id_backfill:
+        save_nutrition_log(entries_df)
+
     return entries_df
 
 
 def save_nutrition_log(entries_df) -> None:
     """Save the nutrition log locally."""
     save_dataframe("nutrition_log", NUTRITION_LOG_PATH, entries_df, NUTRITION_COLUMNS)
+
+
+def delete_food_log_entry(food_log_id: str) -> dict:
+    """Delete a single detailed food log entry by stable ID."""
+    entries_df = load_nutrition_log()
+    selected_id = str(food_log_id or "").strip()
+    if not selected_id:
+        raise ValueError("Food log ID is required.")
+    match = entries_df["food_log_id"].astype(str) == selected_id
+    if entries_df.empty or not match.any():
+        raise ValueError(f"Food log entry not found: {food_log_id}")
+    deleted_entry = entries_df.loc[match].iloc[0].to_dict()
+    entries_df = entries_df.loc[~match].reset_index(drop=True)
+    save_nutrition_log(entries_df)
+    return deleted_entry
+
+
+def clear_food_logs_for_date(date: str) -> dict:
+    """Remove detailed food intake rows for one date without touching other logs."""
+    entries_df = load_nutrition_log()
+    selected_date = str(date)
+    if entries_df.empty:
+        return {"date": selected_date, "removed": 0, "items": []}
+    match = entries_df["date"].astype(str) == selected_date
+    removed_items = entries_df.loc[match].to_dict(orient="records")
+    entries_df = entries_df.loc[~match].reset_index(drop=True)
+    save_nutrition_log(entries_df)
+    return {"date": selected_date, "removed": len(removed_items), "items": removed_items}
 
 
 def _empty_frequent_foods() -> pd.DataFrame:

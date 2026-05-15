@@ -21,13 +21,12 @@ class NutritionTargetTest(unittest.TestCase):
 
         targets = calculate_macro_targets(goals)
 
-        self.assertGreaterEqual(targets["target_calories"], 2750)
-        self.assertLessEqual(targets["target_calories"], 2850)
+        self.assertEqual(targets["target_calories"], 2500)
         self.assertGreaterEqual(targets["protein_grams"], 175)
         self.assertLessEqual(targets["protein_grams"], 185)
-        self.assertGreaterEqual(targets["fat_grams"], 65)
-        self.assertGreaterEqual(targets["carb_grams"], 320)
-        self.assertIn("High-carb", targets["carb_emphasis"])
+        self.assertGreaterEqual(targets["fat_grams"], 64)
+        self.assertGreaterEqual(targets["carb_grams"], 290)
+        self.assertIn("2500 kcal", targets["carb_emphasis"])
         macro_calories = (targets["protein_grams"] * 4) + (targets["carb_grams"] * 4) + (targets["fat_grams"] * 9)
         self.assertEqual(targets["macro_calories"], macro_calories)
         self.assertLessEqual(abs(targets["calorie_macro_delta"]), 2)
@@ -93,7 +92,7 @@ class NutritionTargetTest(unittest.TestCase):
 
         self.assertEqual(signal["status"], "gaining too fast")
         self.assertLess(signal["calorie_adjustment"], 0)
-        self.assertLess(targets["target_calories"], 2750)
+        self.assertLess(targets["target_calories"], 2500)
 
 
 if __name__ == "__main__":

@@ -145,8 +145,8 @@ OPENAI_API_KEY=...
 USDA_FDC_API_KEY=...
 STRAVA_CLIENT_ID=...
 STRAVA_CLIENT_SECRET=...
-STRAVA_REDIRECT_URI=https://your-backend-url.example.com/api/integrations/strava/callback
-STRAVA_ACCESS_TOKEN=...
+STRAVA_REDIRECT_URI=https://your-vercel-app.vercel.app/api/strava/callback
+NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
 HEVY_API_KEY=...
 HEVY_WEBHOOK_SECRET=...
 WITHINGS_CLIENT_ID=...
@@ -154,6 +154,18 @@ WITHINGS_CLIENT_SECRET=...
 CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
 FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
 ```
+
+For local Strava OAuth, set the Strava app callback and backend env to:
+
+```bash
+STRAVA_REDIRECT_URI=http://localhost:3000/api/strava/callback
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
+
+The frontend `/api/strava/callback` route forwards the OAuth code to the
+FastAPI backend, where tokens are exchanged and stored server-side. In
+production, the same Vercel callback URL must be entered exactly in the Strava
+developer dashboard.
 
 Railway can use `railway.json`. Render can use `render.yaml`. A `Procfile` is also included for platforms that support it.
 

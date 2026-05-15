@@ -8,9 +8,10 @@ gitignored settings file and are never returned to the frontend.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -27,9 +28,14 @@ STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITY_MARKER = "strava_activity_id="
 RUN_SPORT_TYPES = {"Run", "TrailRun", "VirtualRun"}
 METERS_PER_MILE = 1609.344
+logger = logging.getLogger(__name__)
 
 class StravaIntegrationError(Exception):
     """Raised when Strava import cannot complete."""
+
+
+class StravaReconnectRequired(StravaIntegrationError):
+    """Raised when saved Strava tokens are invalid and OAuth must be run again."""
 
 
 def _read_dotenv_value(key: str) -> str:
@@ -63,7 +69,12 @@ def _get_strava_credentials() -> tuple[str, str]:
         or _read_dotenv_value("STRAVA_CLIENT_SECRET").strip()
     )
     if not client_id or not client_secret:
-        raise StravaIntegrationError("Strava client ID and secret are required before connecting.")
+        missing = []
+        if not client_id:
+            missing.append("STRAVA_CLIENT_ID")
+        if not client_secret:
+            missing.append("STRAVA_CLIENT_SECRET")
+        raise StravaIntegrationError(f"{' and '.join(missing)} must be configured before connecting Strava.")
     return client_id, client_secret
 
 
@@ -71,6 +82,9 @@ def get_strava_connection_status() -> str:
     """Return a frontend-safe Strava connection status."""
     settings = load_settings()
     tokens = settings.get("metadata", {}).get("strava_tokens", {})
+    sync_state = settings.get("metadata", {}).get("strava_sync", {})
+    if sync_state.get("needs_reconnect"):
+        return "Disconnected"
     integrations = settings.get("integrations", {})
     if tokens.get("access_token") and tokens.get("refresh_token"):
         return "Connected"
@@ -89,14 +103,17 @@ def get_strava_connection_status() -> str:
     return "Not configured"
 
 
-def build_strava_auth_url(redirect_uri: str, state: str | None = None) -> str:
+def build_strava_auth_url(redirect_uri: str, state: str | None = None, force_approval: bool = False) -> str:
     """Generate a Strava OAuth URL for read and activity import scopes."""
     client_id, _ = _get_strava_credentials()
+    if not redirect_uri:
+        raise StravaIntegrationError("STRAVA_REDIRECT_URI could not be resolved.")
+    logger.info("Starting Strava OAuth with redirect_uri=%s", redirect_uri)
     query = {
         "client_id": client_id,
         "redirect_uri": redirect_uri,
         "response_type": "code",
-        "approval_prompt": "auto",
+        "approval_prompt": "force" if force_approval else "auto",
         "scope": "read,activity:read_all",
     }
     if state:
@@ -117,6 +134,7 @@ def _post_token_request(body: dict) -> dict:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        logger.exception("Strava OAuth request failed with status %s", exc.code)
         raise StravaIntegrationError(f"Strava OAuth request failed with status {exc.code}: {detail}") from exc
     except URLError as exc:
         raise StravaIntegrationError(f"Could not reach Strava OAuth: {exc.reason}") from exc
@@ -130,18 +148,48 @@ def _save_strava_tokens(token_payload: dict) -> dict:
     """Persist Strava tokens locally without exposing them to frontend responses."""
     settings = load_settings()
     athlete = token_payload.get("athlete") or {}
+    previous_tokens = settings.get("metadata", {}).get("strava_tokens", {})
     settings.setdefault("metadata", {})["strava_tokens"] = {
         "access_token": str(token_payload.get("access_token", "")),
         "refresh_token": str(token_payload.get("refresh_token", "")),
         "expires_at": int(token_payload.get("expires_at") or 0),
-        "athlete_id": str(athlete.get("id", "")),
+        "athlete_id": str(athlete.get("id", "") or previous_tokens.get("athlete_id", "")),
+        "scopes": str(token_payload.get("scope") or previous_tokens.get("scopes") or "read,activity:read_all"),
     }
+    settings.setdefault("metadata", {}).setdefault("strava_sync", {})["needs_reconnect"] = False
+    settings["metadata"]["strava_sync"]["last_error"] = ""
     save_settings(settings)
+    logger.info(
+        "Stored Strava tokens for athlete_id=%s expires_at=%s",
+        settings["metadata"]["strava_tokens"].get("athlete_id", ""),
+        settings["metadata"]["strava_tokens"].get("expires_at", 0),
+    )
     return settings["metadata"]["strava_tokens"]
+
+
+def clear_strava_connection(reason: str = "", mark_error: bool = True) -> dict:
+    """Clear saved OAuth tokens so the next action starts a clean reconnect flow."""
+    settings = load_settings()
+    athlete_id = str(settings.get("metadata", {}).get("strava_tokens", {}).get("athlete_id", "") or "")
+    settings.setdefault("metadata", {})["strava_tokens"] = {
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0,
+        "athlete_id": athlete_id,
+        "scopes": "",
+    }
+    sync = settings.setdefault("metadata", {}).setdefault("strava_sync", {})
+    sync["needs_reconnect"] = True
+    sync["last_error"] = (reason or "Strava authorization expired. Reconnect Strava.") if mark_error else ""
+    sync["last_synced_at"] = datetime.now(timezone.utc).isoformat()
+    save_settings(settings)
+    logger.warning("Cleared Strava connection state: %s", reason or "manual reconnect")
+    return sync
 
 
 def exchange_strava_code(code: str) -> dict:
     """Exchange a Strava OAuth authorization code for local tokens."""
+    logger.info("Strava OAuth callback received; exchanging code.")
     client_id, client_secret = _get_strava_credentials()
     token_payload = _post_token_request(
         {
@@ -151,7 +199,8 @@ def exchange_strava_code(code: str) -> dict:
             "grant_type": "authorization_code",
         }
     )
-    _save_strava_tokens(token_payload)
+    tokens = _save_strava_tokens(token_payload)
+    logger.info("Strava token exchange succeeded for athlete_id=%s", tokens.get("athlete_id", ""))
     return {"status": "Connected", "athlete_id": str((token_payload.get("athlete") or {}).get("id", ""))}
 
 
@@ -162,41 +211,54 @@ def refresh_strava_token_if_needed(force: bool = False) -> str:
     access_token = str(tokens.get("access_token", "")).strip()
     refresh_token = str(tokens.get("refresh_token", "")).strip()
     expires_at = int(tokens.get("expires_at") or 0)
+    now = int(time.time())
 
     if not refresh_token:
         if access_token:
-            return access_token
-        raise StravaIntegrationError("Strava is not connected yet.")
+            clear_strava_connection("Saved Strava access token has no refresh token. Reconnect Strava.")
+            raise StravaReconnectRequired("Saved Strava access token has no refresh token. Reconnect Strava.")
+        raise StravaReconnectRequired("Strava is not connected yet. Connect Strava from Settings.")
 
-    if not force and access_token and expires_at > int(time.time()) + 120:
+    if not force and access_token and expires_at > now + 300:
         return access_token
 
     client_id, client_secret = _get_strava_credentials()
-    token_payload = _post_token_request(
-        {
-            "client_id": client_id,
-            "client_secret": client_secret,
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-        }
-    )
+    logger.info("Refreshing Strava access token; expires_at=%s now=%s force=%s", expires_at, now, force)
+    try:
+        token_payload = _post_token_request(
+            {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            }
+        )
+    except StravaIntegrationError as exc:
+        clear_strava_connection(f"Strava token refresh failed. Reconnect Strava. {exc}")
+        logger.exception("Strava token refresh failed; reconnect required.")
+        raise StravaReconnectRequired("Strava token refresh failed. Reconnect Strava from Settings.") from exc
     tokens = _save_strava_tokens(token_payload)
+    logger.info("Strava token refresh succeeded; expires_at=%s", tokens.get("expires_at", 0))
     return str(tokens.get("access_token", ""))
 
 
 def _get_access_token(access_token: str | None = None) -> str:
-    """Read a Strava access token from argument, saved OAuth tokens, env, or .env."""
+    """Read a Strava access token from saved OAuth tokens, refreshing when needed."""
     token = (access_token or "").strip()
     if not token:
+        settings = load_settings()
+        saved_tokens = settings.get("metadata", {}).get("strava_tokens", {})
+        has_saved_oauth = bool(saved_tokens.get("access_token") or saved_tokens.get("refresh_token"))
         try:
             token = refresh_strava_token_if_needed()
+        except StravaReconnectRequired:
+            raise
         except StravaIntegrationError:
+            if has_saved_oauth:
+                raise
             token = ""
-    token = token or os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or _read_dotenv_value("STRAVA_ACCESS_TOKEN").strip()
     if not token:
-        raise StravaIntegrationError(
-            "Missing Strava access token. Connect Strava or set STRAVA_ACCESS_TOKEN."
-        )
+        raise StravaReconnectRequired("Missing Strava access token. Connect Strava from Settings.")
     return token
 
 
@@ -228,21 +290,59 @@ def _estimate_run_load(distance_miles: float, duration_minutes: float, average_s
     return round((distance_miles * 10) + (duration_minutes * 0.45) + speed_component, 1)
 
 
-def fetch_recent_runs(access_token: str | None = None, per_page: int = 30) -> list[dict]:
-    """Fetch recent Strava activities and keep run-like sport types."""
-    token = _get_access_token(access_token)
+def _fetch_recent_activities_with_token(token: str, per_page: int) -> list[dict]:
     safe_per_page = max(1, min(int(per_page), 200))
     query = urlencode({"page": 1, "per_page": safe_per_page})
     request = Request(
         f"{STRAVA_API_BASE_URL}/athlete/activities?{query}",
         headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
     )
+    with urlopen(request, timeout=20) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def fetch_recent_runs(access_token: str | None = None, per_page: int = 30) -> list[dict]:
+    """Fetch recent Strava activities and keep run-like sport types."""
+    token = _get_access_token(access_token)
 
     try:
-        with urlopen(request, timeout=20) as response:
-            activities = json.loads(response.read().decode("utf-8"))
+        activities = _fetch_recent_activities_with_token(token, per_page)
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 401 and access_token is None:
+            logger.warning("Strava API returned 401. Attempting one forced token refresh before reconnect.")
+            try:
+                refreshed_token = refresh_strava_token_if_needed(force=True)
+            except StravaReconnectRequired:
+                raise
+            except StravaIntegrationError as refresh_exc:
+                clear_strava_connection(f"Strava access token is invalid. Reconnect Strava. Last response: {detail}")
+                logger.exception("Strava refresh after 401 failed; reconnect required.")
+                raise StravaReconnectRequired("Strava access token is invalid. Reconnect Strava from Settings.") from refresh_exc
+            try:
+                activities = _fetch_recent_activities_with_token(refreshed_token, per_page)
+            except HTTPError as retry_exc:
+                retry_detail = retry_exc.read().decode("utf-8", errors="replace")
+                if retry_exc.code == 401:
+                    clear_strava_connection(f"Strava access token is invalid after refresh. Reconnect Strava. Last response: {retry_detail}")
+                    logger.exception("Strava 401 recovery failed; reconnect required.")
+                    raise StravaReconnectRequired("Strava access token is invalid. Reconnect Strava from Settings.") from retry_exc
+                raise StravaIntegrationError(f"Strava request failed with status {retry_exc.code}: {retry_detail}") from retry_exc
+        else:
+            if exc.code == 401:
+                logger.exception("Strava request failed with 401 invalid access token.")
+                raise StravaReconnectRequired("Strava access token is invalid. Reconnect Strava from Settings.") from exc
+            raise StravaIntegrationError(
+                f"Strava request failed with status {exc.code}: {detail}"
+            ) from exc
+    except StravaReconnectRequired:
+        raise
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        if exc.code == 401:
+            clear_strava_connection(f"Strava access token is invalid after refresh. Reconnect Strava. Last response: {detail}")
+            logger.exception("Strava request failed with 401 after refresh.")
+            raise StravaReconnectRequired("Strava access token is invalid. Reconnect Strava from Settings.") from exc
         raise StravaIntegrationError(
             f"Strava request failed with status {exc.code}: {detail}"
         ) from exc
@@ -253,11 +353,13 @@ def fetch_recent_runs(access_token: str | None = None, per_page: int = 30) -> li
     except json.JSONDecodeError as exc:
         raise StravaIntegrationError("Strava returned invalid JSON.") from exc
 
-    return [
+    runs = [
         activity
         for activity in activities
         if activity.get("sport_type") in RUN_SPORT_TYPES or activity.get("type") == "Run"
     ]
+    logger.info("Fetched %s Strava activities; %s run activities after filtering.", len(activities), len(runs))
+    return runs
 
 
 def normalize_strava_run(activity: dict) -> dict:
@@ -266,6 +368,8 @@ def normalize_strava_run(activity: dict) -> dict:
     distance_miles = _distance_miles(activity.get("distance"))
     duration_minutes = round(float(activity.get("moving_time") or 0) / 60, 1)
     pace = _pace_minutes_per_mile(distance_miles, activity.get("moving_time"))
+    calories = round(float(activity.get("calories") or 0), 0)
+    average_heart_rate = round(float(activity.get("average_heartrate") or 0), 0)
     estimated_load = _estimate_run_load(
         distance_miles=distance_miles,
         duration_minutes=duration_minutes,
@@ -292,6 +396,8 @@ def normalize_strava_run(activity: dict) -> dict:
             f" | sport_type={sport_type}"
             f" | distance_miles={distance_miles}"
             f" | pace_min_per_mile={pace}"
+            f" | calories={calories}"
+            f" | average_heartrate={average_heart_rate}"
             f" | estimated_run_load={estimated_load}"
         ),
         "source": "strava",
@@ -313,35 +419,91 @@ def _imported_activity_ids(training_df: pd.DataFrame) -> set[str]:
     return imported_ids
 
 
+def _save_strava_sync_state(state: dict) -> dict:
+    settings = load_settings()
+    current = settings.setdefault("metadata", {}).setdefault("strava_sync", {})
+    current.update(state)
+    save_settings(settings)
+    return settings["metadata"]["strava_sync"]
+
+
+def load_strava_sync_state() -> dict:
+    return load_settings().get("metadata", {}).get("strava_sync", {})
+
+
+def _run_activity_id(row: pd.Series) -> str:
+    external_id = str(row.get("external_id", "") or "").strip()
+    if external_id:
+        return external_id
+    note = str(row.get("notes", "") or "")
+    if STRAVA_ACTIVITY_MARKER in note:
+        return note.split(STRAVA_ACTIVITY_MARKER, 1)[1].split("|", 1)[0].strip()
+    return str(row.get("workout_id", "") or "").strip()
+
+
 def import_recent_runs(access_token: str | None = None, per_page: int = 30) -> dict:
-    """Import recent Strava runs into data/processed/training_log.csv."""
-    runs = fetch_recent_runs(access_token=access_token, per_page=per_page)
-    training_df = load_training_log()
-    existing_ids = _imported_activity_ids(training_df)
-    imported_rows = []
-    skipped_duplicates = 0
+    """Import recent Strava runs into the persisted training log."""
+    try:
+        runs = fetch_recent_runs(access_token=access_token, per_page=per_page)
+        training_df = load_training_log()
+        existing_ids = _imported_activity_ids(training_df)
+        import_rows = []
+        imported_count = 0
+        updated_count = 0
 
-    for run in runs:
-        activity_id = str(run.get("id", "")).strip()
-        if not activity_id:
-            continue
-        if activity_id in existing_ids:
-            skipped_duplicates += 1
-            continue
-        imported_rows.append(normalize_strava_run(run))
-        existing_ids.add(activity_id)
+        for run in runs:
+            activity_id = str(run.get("id", "")).strip()
+            if not activity_id:
+                continue
+            import_rows.append(normalize_strava_run(run))
+            if activity_id in existing_ids:
+                updated_count += 1
+            else:
+                imported_count += 1
 
-    if imported_rows:
-        import_df = pd.DataFrame(imported_rows).reindex(columns=TRAINING_COLUMNS)
-        training_df = pd.concat([training_df, import_df], ignore_index=True)
-        training_df = training_df.sort_values("date", kind="stable").reset_index(drop=True)
-        save_training_log(training_df)
+        if import_rows:
+            upsert_ids = {str(row["external_id"]) for row in import_rows if str(row.get("external_id", "")).strip()}
+            if not training_df.empty:
+                existing_row_ids = training_df.apply(_run_activity_id, axis=1)
+                training_df = training_df[~existing_row_ids.isin(upsert_ids)].copy()
+            import_df = pd.DataFrame(import_rows).reindex(columns=TRAINING_COLUMNS)
+            training_df = pd.concat([training_df, import_df], ignore_index=True)
+            training_df = training_df.sort_values("date", kind="stable").reset_index(drop=True)
+            save_training_log(training_df)
 
-    return {
-        "imported_runs": len(imported_rows),
-        "skipped_duplicates": skipped_duplicates,
-        "training_log": training_df,
-    }
+        latest_activity_date = ""
+        if import_rows:
+            latest_activity_date = max(str(row.get("date", "")) for row in import_rows)
+        state = _save_strava_sync_state(
+            {
+                "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                "last_error": "",
+                "last_imported_count": imported_count,
+                "last_updated_count": updated_count,
+                "last_fetched_count": len(runs),
+                "latest_activity_date": latest_activity_date,
+            }
+        )
+        logger.info(
+            "Strava sync completed: fetched=%s imported=%s updated=%s latest_activity_date=%s",
+            len(runs),
+            imported_count,
+            updated_count,
+            latest_activity_date,
+        )
+        return {
+            "imported_runs": imported_count,
+            "updated_runs": updated_count,
+            "skipped_duplicates": updated_count,
+            "fetched_activities": len(runs),
+            "latest_activity_date": latest_activity_date,
+            "last_synced_at": state.get("last_synced_at", ""),
+            "training_log": training_df,
+        }
+    except Exception as exc:
+        _save_strava_sync_state({"last_error": str(exc), "last_synced_at": datetime.now(timezone.utc).isoformat()})
+        logger.exception("Strava sync failed.")
+        raise
 
 
 def _extract_note_number(note: str, key: str) -> float:

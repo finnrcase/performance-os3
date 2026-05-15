@@ -1,8 +1,11 @@
 import os
+import logging
+import time
+from urllib.parse import urlencode, urlparse
 
 import pandas as pd
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from src.config import INTEGRATION_FIELDS, fitbit_google_health_status, integration_status, load_settings, mask_secret, save_settings
@@ -11,8 +14,11 @@ from src.integrations.hevy_client import load_hevy_sync_state
 from src.integrations.strava_client import (
     StravaIntegrationError,
     build_strava_auth_url,
+    clear_strava_connection,
     exchange_strava_code,
     get_strava_connection_status,
+    load_strava_sync_state,
+    refresh_strava_token_if_needed,
 )
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
@@ -21,6 +27,7 @@ from src.training import load_training_log
 
 
 router = APIRouter(tags=["integrations"])
+logger = logging.getLogger(__name__)
 
 
 @router.get("/status")
@@ -90,6 +97,73 @@ def _freshness_detail(label: str, date_value: str) -> str:
     return f"{label} data updated {days} days ago."
 
 
+def _masked_athlete_id(value: str) -> str:
+    if not value:
+        return ""
+    return f"••••{value[-4:]}" if len(value) > 4 else "••••"
+
+
+def _strava_redirect_uri(request: Request) -> str:
+    configured = os.getenv("STRAVA_REDIRECT_URI", "").strip() or _read_dotenv_value("STRAVA_REDIRECT_URI").strip()
+    if configured:
+        return configured
+    origin = request.headers.get("origin", "").strip().rstrip("/")
+    if not origin:
+        referer = request.headers.get("referer", "").strip()
+        if referer:
+            parsed = urlparse(referer)
+            origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    app_url = (
+        os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
+        or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
+        or _read_dotenv_value("NEXT_PUBLIC_APP_URL").strip().rstrip("/")
+        or origin
+    )
+    if app_url:
+        return f"{app_url}/api/strava/callback"
+    return str(request.url_for("strava_callback"))
+
+
+def _frontend_return_url(request: Request, status: str, message: str = "") -> str:
+    app_url = (
+        os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
+        or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
+        or _read_dotenv_value("NEXT_PUBLIC_APP_URL").strip().rstrip("/")
+    )
+    if not app_url:
+        referer = request.headers.get("referer", "").strip()
+        if referer:
+            parsed = urlparse(referer)
+            app_url = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
+    if not app_url:
+        app_url = str(request.base_url).rstrip("/")
+    query = urlencode({"strava": status, "message": message})
+    return f"{app_url}/?{query}"
+
+
+def _strava_debug_status(settings: dict, latest_strava: str) -> dict:
+    tokens = settings.get("metadata", {}).get("strava_tokens", {})
+    sync_state = load_strava_sync_state()
+    expires_at = int(tokens.get("expires_at") or 0)
+    now = int(time.time())
+    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    token_expired = bool(connected and expires_at <= now)
+    token_expiring = bool(connected and not token_expired and expires_at <= now + 300)
+    return {
+        "connected": connected,
+        "athlete_id": _masked_athlete_id(str(tokens.get("athlete_id", "") or "")),
+        "token_expires_at": expires_at,
+        "token_status": "expired" if token_expired else "refresh soon" if token_expiring else "valid" if connected else "missing",
+        "scopes": str(tokens.get("scopes", "") or ""),
+        "last_synced_at": sync_state.get("last_synced_at", ""),
+        "latest_activity_date": sync_state.get("latest_activity_date", "") or latest_strava,
+        "last_imported_count": sync_state.get("last_imported_count", 0),
+        "last_updated_count": sync_state.get("last_updated_count", 0),
+        "last_fetched_count": sync_state.get("last_fetched_count", 0),
+        "last_error": sync_state.get("last_error", ""),
+    }
+
+
 def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     training_df = load_training_log()
     body_df = load_body_metrics()
@@ -102,6 +176,7 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     hevy_configured = statuses.get("hevy_api_key") == "Configured"
     strava_status = statuses.get("strava", "Not configured")
     latest_strava = _latest_date(training_df, "strava")
+    strava_debug = _strava_debug_status(settings, latest_strava)
     latest_weight = _latest_date(body_df)
     latest_food = _latest_date(nutrition_df)
     latest_recovery = _latest_date(recovery_df) or _latest_date(sleep_df)
@@ -127,11 +202,12 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
         {
             "id": "strava",
             "title": "Strava",
-            "status": "connected" if strava_status == "Connected" and latest_strava else "warning",
+            "status": "error" if strava_debug["last_error"] else "connected" if strava_status == "Connected" and latest_strava else "warning",
             "label": strava_status,
-            "detail": _freshness_detail("Strava run", latest_strava) if strava_status == "Connected" else "OAuth is required before run sync works.",
-            "last_synced_at": latest_strava,
+            "detail": strava_debug["last_error"] or (_freshness_detail("Strava run", latest_strava) if strava_status == "Connected" else "OAuth is required before run sync works."),
+            "last_synced_at": strava_debug["last_synced_at"] or latest_strava,
             "action": "strava_import" if strava_status == "Connected" else "",
+            "metadata": strava_debug,
         },
         {
             "id": "fitbit_google_health",
@@ -183,8 +259,9 @@ def _settings_response(settings: dict) -> dict:
     statuses = {
         "hevy_api_key": integration_status("hevy_api_key", settings),
         "strava": get_strava_connection_status(),
-        "strava_client_id": integration_status("strava_client_id", settings),
-        "strava_client_secret": integration_status("strava_client_secret", settings),
+        "strava_client_id": "Configured" if _configured_from_env("STRAVA_CLIENT_ID") else integration_status("strava_client_id", settings),
+        "strava_client_secret": "Configured" if _configured_from_env("STRAVA_CLIENT_SECRET") else integration_status("strava_client_secret", settings),
+        "strava_redirect_uri": "Configured" if _configured_from_env("STRAVA_REDIRECT_URI") else "Auto from app URL",
         "fitbit_client_id": integration_status("fitbit_client_id", settings),
         "fitbit_client_secret": integration_status("fitbit_client_secret", settings),
         "fitbit_google_health": fitbit_google_health_status(settings),
@@ -227,9 +304,11 @@ def get_integration_statuses() -> dict:
 
 
 @router.get("/api/integrations/strava/auth-url")
-def get_strava_auth_url(request: Request) -> dict:
+def get_strava_auth_url(request: Request, reconnect: bool = Query(default=False)) -> dict:
     """Return a Strava OAuth URL for the frontend Connect Strava button."""
-    redirect_uri = os.getenv("STRAVA_REDIRECT_URI", "").strip() or str(request.url_for("strava_callback"))
+    if reconnect:
+        clear_strava_connection("Reconnect requested from Settings.", mark_error=False)
+    redirect_uri = _strava_redirect_uri(request)
     production_like = os.getenv("VERCEL") or os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RENDER") or os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"}
     if production_like and "localhost" in redirect_uri:
         return {
@@ -238,33 +317,49 @@ def get_strava_auth_url(request: Request) -> dict:
             "auth_url": "",
         }
     try:
-        auth_url = build_strava_auth_url(redirect_uri=redirect_uri)
+        logger.info("Strava OAuth start requested with redirect_uri=%s", redirect_uri)
+        auth_url = build_strava_auth_url(redirect_uri=redirect_uri, force_approval=reconnect)
     except StravaIntegrationError as exc:
         return {"status": "error", "message": str(exc), "auth_url": ""}
     return {"status": "ok", "auth_url": auth_url}
 
 
-@router.get("/api/integrations/strava/callback", name="strava_callback")
+@router.get("/api/strava/callback", name="strava_callback")
+@router.get("/api/integrations/strava/callback")
 def strava_callback(
+    request: Request,
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
-) -> HTMLResponse:
+) -> RedirectResponse:
     """Exchange Strava OAuth callback code and store tokens locally."""
     if error:
         message = f"Strava authorization failed: {error}"
-        return HTMLResponse(f"<h1>Strava connection failed</h1><p>{message}</p>", status_code=400)
+        logger.error("Strava OAuth callback failed: %s", error)
+        return RedirectResponse(_frontend_return_url(request, "error", message), status_code=303)
     if not code:
-        return HTMLResponse("<h1>Strava connection failed</h1><p>Missing authorization code.</p>", status_code=400)
+        logger.error("Strava OAuth callback missing code.")
+        return RedirectResponse(_frontend_return_url(request, "error", "Missing authorization code."), status_code=303)
 
     try:
-        exchange_strava_code(code)
+        result = exchange_strava_code(code)
+        logger.info("Strava OAuth callback connected athlete_id=%s", result.get("athlete_id", ""))
     except StravaIntegrationError as exc:
-        return HTMLResponse(f"<h1>Strava connection failed</h1><p>{str(exc)}</p>", status_code=400)
+        logger.exception("Strava OAuth callback token exchange failed.")
+        return RedirectResponse(_frontend_return_url(request, "error", str(exc)), status_code=303)
 
-    return HTMLResponse(
-        """
-        <h1>Strava connected</h1>
-        <p>You can close this tab and return to Performance OS.</p>
-        <p>No tokens are displayed here; they were stored locally.</p>
-        """
-    )
+    return RedirectResponse(_frontend_return_url(request, "connected", "Strava connected."), status_code=303)
+
+
+@router.post("/api/strava/refresh-token")
+def refresh_strava_token() -> dict:
+    try:
+        refresh_strava_token_if_needed(force=True)
+    except StravaIntegrationError as exc:
+        return {"status": "error", "message": str(exc)}
+    return {"status": "ok"}
+
+
+@router.post("/api/integrations/strava/disconnect")
+def disconnect_strava() -> dict:
+    clear_strava_connection("Strava disconnected. Reconnect from Settings.")
+    return _settings_response(load_settings())

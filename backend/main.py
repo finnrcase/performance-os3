@@ -436,8 +436,73 @@ def _daily_training_rows(training_df: pd.DataFrame) -> pd.DataFrame:
     return grouped
 
 
+def _note_number(note: str, key: str) -> float:
+    marker = f"{key}="
+    if marker not in str(note):
+        return 0.0
+    raw = str(note).split(marker, 1)[1].split("|", 1)[0].strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+def _today_run_summary(training_df: pd.DataFrame, today: str) -> dict | None:
+    if training_df.empty:
+        return None
+    df = training_df.copy()
+    df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
+    df = df.dropna(subset=["date"])
+    if df.empty:
+        return None
+    for column in ["workout_type", "source", "notes", "duration_minutes"]:
+        if column not in df.columns:
+            df[column] = "" if column != "duration_minutes" else 0
+    df["workout_type"] = df["workout_type"].fillna("").astype(str)
+    df["source"] = df["source"].fillna("").astype(str)
+    df["notes"] = df["notes"].fillna("").astype(str)
+    df["duration_minutes"] = pd.to_numeric(df["duration_minutes"], errors="coerce").fillna(0)
+
+    today_rows = df[df["date"].dt.date.astype(str) == today].copy()
+    run_rows = today_rows[
+        df.loc[today_rows.index, "source"].str.lower().eq("strava")
+        | df.loc[today_rows.index, "workout_type"].str.lower().eq("run")
+        | df.loc[today_rows.index, "notes"].str.contains("strava_activity_id=", regex=False, na=False)
+    ].copy()
+    if run_rows.empty:
+        return None
+
+    run_rows["distance_miles"] = run_rows["notes"].apply(lambda note: _note_number(note, "distance_miles"))
+    run_rows["calories_burned"] = run_rows["notes"].apply(lambda note: _note_number(note, "calories"))
+    run_rows["average_heart_rate"] = run_rows["notes"].apply(lambda note: _note_number(note, "average_heartrate"))
+    total_distance = float(run_rows["distance_miles"].sum())
+    total_duration = float(run_rows["duration_minutes"].sum())
+    if total_distance <= 0 and total_duration <= 0:
+        return None
+    average_pace = total_duration / total_distance if total_distance > 0 else None
+    run_count = run_rows[["date", "workout_id"]].drop_duplicates().shape[0] if "workout_id" in run_rows.columns else len(run_rows)
+    calories = float(run_rows["calories_burned"].sum())
+    heart_rate_rows = run_rows[run_rows["average_heart_rate"] > 0]
+    average_heart_rate = None
+    if not heart_rate_rows.empty:
+        duration_weights = heart_rate_rows["duration_minutes"].clip(lower=0)
+        if float(duration_weights.sum()) > 0:
+            average_heart_rate = float((heart_rate_rows["average_heart_rate"] * duration_weights).sum() / duration_weights.sum())
+        else:
+            average_heart_rate = float(heart_rate_rows["average_heart_rate"].mean())
+    return {
+        "run_count": int(run_count),
+        "distance_miles": round(total_distance, 2),
+        "duration_minutes": round(total_duration, 1),
+        "average_pace_min_per_mile": round(average_pace, 2) if average_pace else None,
+        "calories_burned": round(calories) if calories > 0 else None,
+        "average_heart_rate": round(average_heart_rate) if average_heart_rate else None,
+    }
+
+
 def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
     daily = _daily_training_rows(training_df)
+    run_summary = _today_run_summary(training_df, today)
     if daily.empty:
         return {
             "status": "No lift logged today",
@@ -445,6 +510,7 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
             "comparison": None,
             "today_volume": None,
             "percent_vs_average": None,
+            "run_summary": run_summary,
         }
     today_dt = pd.to_datetime(today)
     today_rows = daily[daily["date"].dt.date.astype(str) == today]
@@ -455,6 +521,7 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
             "comparison": None,
             "today_volume": None,
             "percent_vs_average": None,
+            "run_summary": run_summary,
         }
     today_row = today_rows.iloc[-1]
     previous = daily[daily["date"] < today_dt]
@@ -471,6 +538,7 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
             "comparison": None,
             "today_volume": round(float(today_row["total_volume"]), 0),
             "percent_vs_average": None,
+            "run_summary": run_summary,
         }
     baseline = float(similar.tail(4)["total_volume"].mean())
     today_volume = float(today_row["total_volume"])
@@ -482,6 +550,7 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
         "comparison": f"{today_row['workout_type']} · {today_row['muscle_group']}",
         "today_volume": round(today_volume, 0),
         "percent_vs_average": round(percent, 1),
+        "run_summary": run_summary,
     }
 
 

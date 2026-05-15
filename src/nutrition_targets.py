@@ -29,6 +29,8 @@ LEAN_BULK_RATE_RANGES = {
     "Aggressive": (0.5, 0.8),
 }
 
+LEAN_BULK_BASELINE_CALORIES = 2500
+
 CUT_RATE_RANGES = {
     "Conservative": (-0.5, -0.75),
     "Moderate": (-0.75, -1.0),
@@ -314,7 +316,7 @@ def calculate_macro_targets(
         target_low, target_high = LEAN_BULK_RATE_RANGES.get(aggressiveness, LEAN_BULK_RATE_RANGES["Conservative"])
         target_weekly_change_pct = round((target_low + target_high) / 2, 2)
         target_description = (
-            "Protein-first lean bulk with high-carb training support and a conservative surplus."
+            "Protein-first lean bulk with a 2500 kcal conservative baseline, tighter surplus control, and carb support only when workload/recovery data justifies it."
         )
         if training_frequency >= 5:
             calorie_adjustment += 50
@@ -367,9 +369,13 @@ def calculate_macro_targets(
 
     target_calories = max(1200, maintenance + calorie_adjustment + historical_calorie_adjustment)
     if normalized_goal == "lean bulk" and 145 <= bodyweight <= 175:
-        baseline_floor = 2750 + (75 if training_frequency >= 5 else 0) + (50 if cardio_frequency >= 3 or weekly_mileage >= 12 else 0)
-        if weight_signal["status"] != "gaining too fast":
-            target_calories = max(target_calories, baseline_floor)
+        target_calories = LEAN_BULK_BASELINE_CALORIES
+        if weight_signal["status"] == "gaining too slowly":
+            target_calories += min(150, max(50, int(weight_signal["calorie_adjustment"])))
+        elif weight_signal["status"] == "gaining too fast":
+            target_calories += max(-200, min(-75, int(weight_signal["calorie_adjustment"])))
+        elif performance_label in {"declining", "fatigue/performance stagnation"} and recovery_demand == "high":
+            target_calories += 75
     final_calorie_adjustment = target_calories - maintenance
 
     if normalized_goal == "cut":
@@ -404,9 +410,9 @@ def calculate_macro_targets(
     carb_emphasis = "Moderate carb baseline."
     if normalized_goal == "lean bulk":
         if training_frequency >= 5 or cardio_frequency >= 3 or weekly_mileage >= 12:
-            carb_emphasis = "High-carb performance support for frequent lifting/cardio."
+            carb_emphasis = "Conservative 2500 kcal baseline with training-day carb support for frequent lifting/cardio."
         else:
-            carb_emphasis = "High-carb lean bulk support for training performance and recovery."
+            carb_emphasis = "Conservative 2500 kcal lean-bulk baseline with carbs filling the remaining performance fuel."
     elif normalized_goal == "cut":
         carb_emphasis = "Carbs fill remaining calories after protein and fat floors."
 

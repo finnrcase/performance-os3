@@ -1,8 +1,13 @@
 from pathlib import Path
 from shutil import copyfileobj
 from uuid import uuid4
+import base64
+import hashlib
+import hmac
+import os
+import time
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel, Field
 
 from backend.routes.utils import dataframe_records
@@ -17,6 +22,7 @@ from src.nutrition import (
     add_food_shortcut,
     add_meal_template_items,
     create_food_entry,
+    delete_food_log_entry,
     delete_food_shortcut,
     load_food_shortcuts,
     load_frequent_foods,
@@ -36,6 +42,37 @@ import pandas as pd
 
 router = APIRouter(tags=["nutrition"])
 LABEL_UPLOAD_DIR = raw_data_path("nutrition_labels")
+ACCESS_COOKIE = "performance_os_access"
+SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+
+
+def _sign_session(timestamp: str, secret: str) -> str:
+    signature = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8"), hashlib.sha256).digest()
+    return base64.b64encode(signature).decode("utf-8").replace("+", "-").replace("/", "_").replace("=", "")
+
+
+def _require_authenticated_request(request: Request) -> None:
+    """Require the same access cookie used by the frontend gate."""
+    if not os.getenv("APP_PASSWORD"):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="APP_PASSWORD is not configured")
+    session_secret = os.getenv("SESSION_SECRET")
+    if not session_secret:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="SESSION_SECRET is not configured")
+
+    token = request.cookies.get(ACCESS_COOKIE)
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
+    timestamp, separator, signature = token.partition(".")
+    if not separator:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
+    try:
+        timestamp_ms = int(timestamp)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session") from exc
+    if int(time.time() * 1000) - timestamp_ms > SESSION_MAX_AGE_SECONDS * 1000:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
+    if not hmac.compare_digest(signature, _sign_session(timestamp, session_secret)):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
 
 
 def _display_path(path: Path) -> str:
@@ -184,6 +221,20 @@ def add_nutrition_log(entry: NutritionEntry) -> dict:
     save_nutrition_log(entries_df)
     rebuild_daily_summary()
     return {"item": food_entry, "items": dataframe_records(load_nutrition_log())}
+
+
+@router.delete("/api/nutrition/logs/{food_log_id}")
+def remove_nutrition_log(food_log_id: str, _: None = Depends(_require_authenticated_request)) -> dict:
+    """Delete one detailed food log entry by ID without touching templates or targets."""
+    try:
+        deleted_entry = delete_food_log_entry(food_log_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    rebuild_daily_summary()
+    return {
+        "deleted": deleted_entry,
+        "items": dataframe_records(load_nutrition_log()),
+    }
 
 
 @router.post("/api/nutrition/label-upload")

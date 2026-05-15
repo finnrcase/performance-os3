@@ -254,6 +254,9 @@ def import_strava(payload: StravaImportRequest) -> dict:
     return {
         "status": "ok",
         "imported_runs": result["imported_runs"],
+        "updated_runs": result.get("updated_runs", 0),
+        "fetched_activities": result.get("fetched_activities", 0),
+        "latest_activity_date": result.get("latest_activity_date", ""),
         "skipped_duplicates": result["skipped_duplicates"],
         "personal_records": update_personal_records_from_logs(result["training_log"]),
         "items": dataframe_records(result["training_log"]),
