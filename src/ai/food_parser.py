@@ -237,7 +237,14 @@ def _local_saved_food_response(query: str) -> dict | None:
 def _normalize_food(food: dict[str, Any], fallback_name: str) -> dict:
     """Validate and normalize one parsed food row."""
     notes = []
-    food_name = str(food.get("food_name") or fallback_name).strip() or fallback_name
+    raw_name = str(food.get("food_name") or fallback_name).strip() or fallback_name
+    model_display = str(food.get("display_name") or "").strip()
+    display_name = _clean_display_name(model_display or raw_name, fallback=raw_name)
+    if not display_name:
+        display_name = _clean_display_name(fallback_name) or str(fallback_name or "").strip()
+    normalized_name = _normalized_name(str(food.get("normalized_name") or "").strip() or display_name)
+    # The clean display name is the canonical title used everywhere downstream.
+    food_name = display_name or raw_name
     quantity_raw = food.get("quantity")
     quantity = str(quantity_raw or "").strip()
     confidence = str(food.get("confidence") or "medium").strip().lower()
@@ -249,7 +256,9 @@ def _normalize_food(food: dict[str, Any], fallback_name: str) -> dict:
 
     normalized = {
         "food_name": food_name,
-        "original_text": str(food.get("original_text") or food_name).strip(),
+        "display_name": display_name,
+        "normalized_name": normalized_name,
+        "original_text": str(food.get("original_text") or raw_name).strip(),
         "quantity": quantity,
         "quantity_value": _optional_float(quantity_raw),
         "unit": str(food.get("unit") or "").strip(),
@@ -319,7 +328,7 @@ def _response(
         "debug": {
             "backend_endpoint_reached": True,
             "openai_key_configured": get_openai_key_status(),
-            "model": OPENAI_MODEL,
+            "model": food_analysis_model(),
             "parsing_status": "success" if success else "failure",
         },
     }
@@ -507,21 +516,48 @@ def _call_openai(food_text: str, api_key: str) -> dict:
         "required": ["foods"],
     }
     response = client.responses.create(
-        model=OPENAI_MODEL,
+        model=food_analysis_model(),
         input=[
             {
                 "role": "system",
                 "content": (
-                    "You are a nutrition parsing assistant for a personal health dashboard. "
-                    "Convert messy free-form food logs into structured food items. Extract "
-                    "individual foods, quantities, units, preparation details, and likely serving "
-                    "sizes. If quantity is missing, estimate a reasonable default serving but mark "
-                    "it as an assumption and set needs_review=true. Do not claim exactness. Prefer "
-                    "conservative estimates. Return only valid JSON matching the schema. Use "
-                    "OpenAI estimates only here; downstream code may replace sources with USDA. "
-                    "Avoid medical claims. Split combined entries where it is useful for review, "
-                    "for example toast with butter can be one item if the butter amount is included "
-                    "in the serving description, while a protein shake with banana may be split."
+                    "You are a precise nutrition analysis assistant for a personal health "
+                    "dashboard. Convert one messy free-form food log into structured, accurate "
+                    "food items.\n\n"
+                    "TITLE RULES — for each food set display_name:\n"
+                    "- Clean, readable, Title Case.\n"
+                    "- Remove all quantities, units, and macro notes (e.g. '4oz', '140 cal', "
+                    "'17p', '4g of protein').\n"
+                    "- Remove filler wording such as 'w', 'with a', 'of'.\n"
+                    "- Keep brand names when meaningful (Built, Kirkland, Fairlife).\n"
+                    "- Use the natural singular noun form (e.g. '2 kirkland bagels' -> "
+                    "'Kirkland Bagel').\n"
+                    "- Examples: '4oz of non fat milk w 4g of protein' -> 'Nonfat Milk'; "
+                    "'built puff bar 140 cal 17p' -> 'Built Puff Bar'; "
+                    "'chicken burrito bowl with rice beans and guac' -> 'Chicken Burrito Bowl'; "
+                    "'finn shake oats protein powder fairlife milk' -> 'Finn Shake'.\n"
+                    "Set food_name equal to display_name. Set normalized_name to a lowercase "
+                    "snake_case form of display_name.\n\n"
+                    "MACRO RULES:\n"
+                    "- If the user states an exact calorie or macro value, USE THAT EXACT VALUE; "
+                    "never override a user-provided number. Only estimate macros the user did "
+                    "NOT provide.\n"
+                    "- For every macro you estimated rather than took from the user, add a short "
+                    "entry to assumptions naming the field (e.g. 'Estimated carbs and fat from "
+                    "standard nonfat milk nutrition facts').\n"
+                    "- Scale all macros to the stated quantity/serving size.\n"
+                    "- If quantity is missing, assume a reasonable serving, record it in "
+                    "assumptions, and set needs_review=true.\n"
+                    "- Use realistic values from standard nutrition facts. Do not claim "
+                    "exactness. Prefer conservative estimates.\n"
+                    "- confidence: 'high' only when the food is standard and unambiguous or the "
+                    "user supplied full macros; 'low' for vague or uncertain brand items.\n\n"
+                    "Always set source to 'openai_estimate' — downstream code may upgrade it "
+                    "after a database or USDA lookup. original_text must echo the user's wording "
+                    "for that item. Split combined entries when useful for review (a protein "
+                    "shake with banana may be split; toast with butter can stay as one item if "
+                    "the butter is in the serving description). Avoid medical claims. Return "
+                    "only valid JSON matching the schema."
                 ),
             },
             {"role": "user", "content": food_text},
@@ -534,7 +570,7 @@ def _call_openai(food_text: str, api_key: str) -> dict:
                 "strict": True,
             }
         },
-        max_output_tokens=800,
+        max_output_tokens=1500,
     )
     return _parse_model_json(response)
 
@@ -545,6 +581,8 @@ def _food_to_api_item(food: dict) -> dict:
         assumptions.append(str(food.get("verification_reason")))
     return {
         "name": food.get("food_name", ""),
+        "display_name": food.get("display_name") or food.get("food_name", ""),
+        "normalized_name": food.get("normalized_name") or _normalized_name(food.get("food_name", "")),
         "original_text": food.get("original_text") or food.get("food_name", ""),
         "quantity": food.get("quantity_value"),
         "unit": food.get("unit") or "",
@@ -665,7 +703,7 @@ def parse_food_text(food_text: str) -> dict:
             source="openai",
             cached=False,
             success=True,
-            message=f"Parsed with {OPENAI_MODEL}. Review before saving.",
+            message=f"Parsed with {food_analysis_model()}. Review before saving.",
         )
         result = _verify_uncertain_foods(result)
         _cache_result(query, result)

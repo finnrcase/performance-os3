@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Activity,
   Apple,
   BarChart3,
   Check,
@@ -207,6 +206,8 @@ type NutritionAdherence = {
 
 type ParsedFood = {
   food_name: string;
+  display_name?: string;
+  normalized_name?: string;
   quantity: string;
   quantity_value?: number | null;
   unit?: string;
@@ -838,6 +839,8 @@ type FoodParseResponse = {
 type FoodAnalyzeResponse = {
   items: Array<{
     name: string;
+    display_name?: string;
+    normalized_name?: string;
     original_text: string;
     quantity: number | null;
     unit: string;
@@ -1089,7 +1092,7 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
   return (
     <div className="mb-4 flex items-start justify-between gap-4">
       <div>
-        {eyebrow ? <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300/80">{eyebrow}</p> : null}
+        {eyebrow ? <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-lime-300/80">{eyebrow}</p> : null}
         <h2 className="text-lg font-semibold text-white">{title}</h2>
       </div>
       {action ? <div>{action}</div> : null}
@@ -1244,7 +1247,7 @@ function macroIconAccent(label: string) {
   if (kind === "protein") return "border-teal-300/20 bg-teal-300/10 text-teal-300";
   if (kind === "carbs") return "border-blue-300/20 bg-blue-300/10 text-blue-300";
   if (kind === "fat") return "border-amber-300/20 bg-amber-300/10 text-amber-300";
-  return "border-cyan-300/20 bg-cyan-300/10 text-cyan-300";
+  return "border-lime-300/20 bg-lime-300/10 text-lime-300";
 }
 
 type MacroProgress = {
@@ -1507,11 +1510,11 @@ function FoodIconPicker({
               className={cx(
                 "flex min-h-16 flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-center text-xs font-semibold transition",
                 selected
-                  ? "border-cyan-300/60 bg-cyan-300/15 text-cyan-100"
-                  : "border-white/10 bg-zinc-950/45 text-zinc-300 hover:border-cyan-300/25 hover:bg-cyan-300/[0.06]",
+                  ? "border-lime-300/60 bg-lime-300/15 text-lime-100"
+                  : "border-white/10 bg-zinc-950/45 text-zinc-300 hover:border-lime-300/25 hover:bg-lime-300/[0.06]",
               )}
             >
-              <FoodIcon type={option.type} className="h-5 w-5 text-cyan-200" />
+              <FoodIcon type={option.type} className="h-5 w-5 text-lime-200" />
               <span>{option.label}</span>
             </button>
           );
@@ -1569,7 +1572,7 @@ function FoodLogList({
             <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex min-w-0 items-start gap-3">
                 {selectedIcon ? (
-                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-300/20 bg-cyan-300/10 text-cyan-200">
+                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-lime-300/20 bg-lime-300/10 text-lime-200">
                     <FoodIcon type={selectedIcon} className="h-5 w-5" />
                   </span>
                 ) : null}
@@ -1626,7 +1629,7 @@ function FoodLogList({
                     type="button"
                     onClick={() => onSaveIcon(entry)}
                     disabled={isSaving}
-                    className="inline-flex items-center gap-2 rounded-lg bg-cyan-300 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="inline-flex items-center gap-2 rounded-lg bg-lime-300 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <Check className="h-3.5 w-3.5" />
                     {isSaving ? "Saving..." : "Save"}
@@ -1749,7 +1752,7 @@ function EmptyState({
     <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
       <p className="font-medium text-white">{title}</p>
       <p className="mt-2 text-sm text-zinc-400">{description}</p>
-      <button onClick={onAction} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+      <button onClick={onAction} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
         <Plus className="h-4 w-4" />
         {action}
       </button>
@@ -1782,7 +1785,7 @@ function TextInput({
     <label className="space-y-2 text-sm text-zinc-400">
       <span>{label}</span>
       <input
-        className="h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-cyan-300/60"
+        className="h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-lime-300/60"
         value={value}
         type={type}
         placeholder={placeholder}
@@ -1806,7 +1809,7 @@ function SelectInput({
     <label className="space-y-2 text-sm text-zinc-400">
       <span>{label}</span>
       <select
-        className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-cyan-300/60"
+        className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >
@@ -1929,7 +1932,7 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
         </span>
       </div>
       <div className="mt-2 h-2 rounded-full bg-white/10">
-        <div className="h-2 rounded-full bg-cyan-300" style={{ width: `${target ? percent : 0}%` }} />
+        <div className="h-2 rounded-full bg-lime-300" style={{ width: `${target ? percent : 0}%` }} />
       </div>
       <p className="mt-1 text-xs text-zinc-500">
         {!target ? "Set macro targets." : over && over > 0 ? `+${Math.round(over)}${unit === "kcal" ? " kcal" : unit} over` : `${Math.round(left ?? 0)}${unit === "kcal" ? " kcal" : unit} left`}
@@ -2056,7 +2059,7 @@ function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ repor
       >
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300/80">Weekly</p>
+            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-lime-300/80">Weekly</p>
             <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>{report?.status ?? "learning"}</span>
           </div>
           <h2 className="mt-1 text-lg font-semibold text-white">Weekly Performance Report</h2>
@@ -2094,9 +2097,9 @@ function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ repor
                 <p className="text-xs font-medium uppercase tracking-[0.12em] text-amber-200/80">Watch</p>
                 <p className="mt-2 text-sm leading-6 text-amber-50">{report?.watch ?? "No clear weak signal yet."}</p>
               </div>
-              <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-3">
-                <p className="text-xs font-medium uppercase tracking-[0.12em] text-cyan-200/80">Next week</p>
-                <p className="mt-2 text-sm leading-6 text-cyan-50">{report?.recommendation ?? "Keep targets stable and build another week of clean logs."}</p>
+              <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-3">
+                <p className="text-xs font-medium uppercase tracking-[0.12em] text-lime-200/80">Next week</p>
+                <p className="mt-2 text-sm leading-6 text-lime-50">{report?.recommendation ?? "Keep targets stable and build another week of clean logs."}</p>
               </div>
             </div>
           </div>
@@ -2147,7 +2150,7 @@ function Dashboard({
   return (
     <div className="grid gap-4 xl:grid-cols-5">
       <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log food</button>} />
+        <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log food</button>} />
         {food?.has_targets ? (
           <div className="space-y-4">
             <DashboardProgressLine label="Calories" value={food.calories.eaten} target={food.calories.target} left={food.calories.left} over={food.calories.over} percent={food.calories.percent} unit="kcal" />
@@ -2199,7 +2202,7 @@ function Dashboard({
         {lift?.run_summary ? (
           <div className="mt-4 border-t border-white/10 pt-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
-            <p className="mt-1 text-sm font-semibold text-cyan-100">
+            <p className="mt-1 text-sm font-semibold text-lime-100">
               {lift.run_summary.distance_miles.toFixed(2)} mi{lift.run_summary.run_count > 1 ? " total" : ""} · {formatRunDuration(lift.run_summary.duration_minutes)} · {formatRunPace(lift.run_summary.average_pace_min_per_mile)}{lift.run_summary.run_count > 1 ? " avg" : ""}
             </p>
             {(lift.run_summary.calories_burned || lift.run_summary.average_heart_rate) ? (
@@ -2263,7 +2266,7 @@ function Dashboard({
             </span>
           </div>
           <p className="mt-3 text-sm leading-6 text-zinc-300">{recovery?.extra_run_readiness?.message ?? "Connect wearable data for run readiness."}</p>
-          <p className="mt-2 text-sm font-semibold text-cyan-200">{recovery?.extra_run_readiness?.recommended_run ?? "Connect wearable data"}</p>
+          <p className="mt-2 text-sm font-semibold text-lime-200">{recovery?.extra_run_readiness?.recommended_run ?? "Connect wearable data"}</p>
           {recovery?.extra_run_readiness?.reasoning?.length ? (
             <p className="mt-2 text-xs leading-5 text-zinc-500">{recovery.extra_run_readiness.reasoning[0]}</p>
           ) : null}
@@ -2294,8 +2297,8 @@ function Dashboard({
           </button>
         ) : null}
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Macro adherence</p>
+          <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Macro adherence</p>
             <p className="mt-2 text-2xl font-semibold text-white">{optimization?.macro_adherence.weekly_score !== null && optimization?.macro_adherence.weekly_score !== undefined ? `${Math.round(optimization.macro_adherence.weekly_score)}` : "--"}</p>
             <p className="mt-1 text-xs leading-5 text-zinc-400">{optimization?.macro_adherence.summary ?? "Log meals against targets to calculate adherence."}</p>
           </div>
@@ -2336,12 +2339,12 @@ function Dashboard({
                 <p className="mt-1 text-sm text-zinc-400">{prs.bench_press.reps} rep{prs.bench_press.reps === 1 ? "" : "s"} · {prs.bench_press.date} · {prs.bench_press.source}</p>
                 {prs.bench_press.reps > 1 ? <p className="mt-2 text-sm text-emerald-200">Est. 1RM {prs.bench_press.estimated_1rm} lb</p> : null}
                 {prs.bench_press.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.bench_press.notes}</p> : null}
-                {prs.bench_press.manual_override ? <p className="mt-2 inline-flex rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1 text-xs text-cyan-100">Manual override</p> : null}
+                {prs.bench_press.manual_override ? <p className="mt-2 inline-flex rounded-full border border-lime-300/20 bg-lime-300/10 px-2.5 py-1 text-xs text-lime-100">Manual override</p> : null}
               </>
             ) : (
               <p className="mt-3 text-sm text-zinc-500">Add bench PR</p>
             )}
-            <button onClick={onEditBenchPr} className="mt-4 rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+            <button onClick={onEditBenchPr} className="mt-4 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
               {prs?.bench_press ? "Edit Bench PR" : "Add Bench PR"}
             </button>
             {forms.benchPr.editing ? (
@@ -2361,12 +2364,12 @@ function Dashboard({
                 <p className="mt-2 text-2xl font-semibold text-white">{prs.mile_time.display}</p>
                 <p className="mt-1 text-sm text-zinc-400">{prs.mile_time.date} · {prs.mile_time.source}{prs.mile_time.estimated ? " · estimated" : ""}</p>
                 {prs.mile_time.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.mile_time.notes}</p> : null}
-                {prs.mile_time.manual_override ? <p className="mt-2 inline-flex rounded-full border border-cyan-300/20 bg-cyan-300/10 px-2.5 py-1 text-xs text-cyan-100">Manual override</p> : null}
+                {prs.mile_time.manual_override ? <p className="mt-2 inline-flex rounded-full border border-lime-300/20 bg-lime-300/10 px-2.5 py-1 text-xs text-lime-100">Manual override</p> : null}
               </>
             ) : (
               <p className="mt-3 text-sm text-zinc-500">Add mile PR</p>
             )}
-            <button onClick={onEditMilePr} className="mt-4 rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+            <button onClick={onEditMilePr} className="mt-4 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
               {prs?.mile_time ? "Edit Mile PR" : "Add Mile PR"}
             </button>
             {forms.milePr.editing ? (
@@ -2440,7 +2443,7 @@ function GoalsPage({
               <p><span className="text-zinc-500">Mode:</span> Conservative 2500 kcal baseline with training-day carb support when workload and recovery justify it.</p>
             </div>
           </div>
-          <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.045] p-4">
+          <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.045] p-4">
             <p className="text-sm text-zinc-400">Current active targets</p>
             <p className="mt-2 text-3xl font-semibold text-white">{targets ? `${targets.target_calories} kcal` : "No target"}</p>
             <p className="mt-3 text-sm text-zinc-300">
@@ -2475,7 +2478,7 @@ function GoalsPage({
                     : "The engine will combine weight, food, Hevy, Strava, performance, and recovery signals."}
                 </p>
               </div>
-              <span className="inline-flex w-fit rounded-full border border-cyan-300/20 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100">
+              <span className="inline-flex w-fit rounded-full border border-lime-300/20 bg-lime-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-lime-100">
                 {adaptiveRecommendation?.confidence ?? "low"} confidence
               </span>
             </div>
@@ -2496,8 +2499,8 @@ function GoalsPage({
               </div>
             </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.045] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-cyan-200/70">Day type</p>
+              <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.045] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-lime-200/70">Day type</p>
                 <p className="mt-2 text-sm font-semibold text-white">{adaptiveRecommendation?.dayType ?? "Learning"}</p>
                 <p className="mt-1 text-xs leading-5 text-zinc-400">{dayTypeAdjustment?.reason ?? "Workout and run context will tune daily carbs."}</p>
               </div>
@@ -2563,7 +2566,7 @@ function GoalsPage({
           subvalue={targets ? `Maintenance ${targets.maintenance_calories} - ${calorieDeltaLabel}` : "Save goals to calculate"}
           note={targets ? `Dynamic adjustment: ${targets.calorie_adjustment > 0 ? "+" : ""}${targets.calorie_adjustment} kcal/day. Macro math: ${targets.macro_calories ?? targets.target_calories} kcal (${targets.calorie_macro_delta ?? 0} delta).` : "Calories update from weight trend, training load, cardio, and recovery."}
           icon={Apple}
-          accent="border-cyan-400/20 bg-cyan-400/10 text-cyan-300"
+          accent="border-lime-400/20 bg-lime-400/10 text-lime-300"
         />
         <TargetDetailCard
           title="Protein"
@@ -2621,7 +2624,7 @@ function GoalsPage({
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Action</p>
-              <p className="mt-2 text-sm font-semibold text-cyan-100">{weightFeedback?.suggested_adjustment ?? "No bodyweight trend yet"}</p>
+              <p className="mt-2 text-sm font-semibold text-lime-100">{weightFeedback?.suggested_adjustment ?? "No bodyweight trend yet"}</p>
             </div>
           </div>
           <p className="mt-4 text-sm leading-6 text-zinc-400">{weightFeedback?.reason ?? "Enter at least two bodyweight entries to unlock trend feedback."}</p>
@@ -2636,7 +2639,7 @@ function GoalsPage({
         <SectionHeader eyebrow="Lean Bulk" title="Calorie optimization details" />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard title="7-Day Avg Weight" value={leanBulkDecision?.details.seven_day_avg_weight ? `${leanBulkDecision.details.seven_day_avg_weight}` : "Need data"} detail="Smooths water spikes" icon={Weight} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
-          <MetricCard title="14-Day Avg Weight" value={leanBulkDecision?.details.fourteen_day_avg_weight ? `${leanBulkDecision.details.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="border-cyan-400/20 bg-cyan-400/10 text-cyan-300" />
+          <MetricCard title="14-Day Avg Weight" value={leanBulkDecision?.details.fourteen_day_avg_weight ? `${leanBulkDecision.details.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
           <MetricCard title="Calorie Avg" value={leanBulkDecision?.details.calorie_average ? `${leanBulkDecision.details.calorie_average}` : "Need logs"} detail="Recent daily average" icon={Apple} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
           <MetricCard title="Protein Avg" value={leanBulkDecision?.details.protein_average ? `${leanBulkDecision.details.protein_average}g` : "Need logs"} detail={leanBulkDecision?.details.protein_target ? `Target ~${leanBulkDecision.details.protein_target}g` : "0.8-1.0g/lb guardrail"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
           <MetricCard title="Training Trend" value={leanBulkDecision?.details.training_trend ?? "Need data"} detail="Key lift direction" icon={Dumbbell} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -2708,7 +2711,7 @@ function GoalsPage({
               Apply suggested macros
             </button>
           </div>
-          <p className="mt-2 text-lg font-semibold text-cyan-100">
+          <p className="mt-2 text-lg font-semibold text-lime-100">
             {leanBulkDecision ? `${leanBulkDecision.recommendation} calories (${leanBulkDecision.calorie_change > 0 ? "+" : ""}${leanBulkDecision.calorie_change}/day) -> ${leanBulkDecision.new_target_calories} kcal` : "Need more data before adjusting calories."}
           </p>
           <ul className="mt-3 space-y-2 text-sm text-zinc-300">
@@ -2837,7 +2840,7 @@ function FoodPage({
     fat_grams: dayTypeMacros?.adjusted_targets?.fat ?? targets.fat_grams,
   } : null;
   const hasMacroTargets = Boolean(displayTargets && displayTargets.target_calories > 0 && displayTargets.protein_grams > 0 && displayTargets.carb_grams > 0 && displayTargets.fat_grams > 0);
-  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "bg-cyan-300");
+  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "bg-lime-300");
   const macroProgress = [
     buildMacroProgress("Protein", "g", selectedDateTotals.protein, displayTargets?.protein_grams ?? 0, "bg-teal-300"),
     buildMacroProgress("Carbs", "g", selectedDateTotals.carbs, displayTargets?.carb_grams ?? 0, "bg-blue-300"),
@@ -2928,7 +2931,7 @@ function FoodPage({
               key={mode}
               type="button"
               onClick={() => setManualFoodMode(mode)}
-              className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "bg-cyan-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.04]")}
+              className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.04]")}
             >
               {mode === "direct" ? "Direct macros" : "Serving-size scaling"}
             </button>
@@ -2977,7 +2980,7 @@ function FoodPage({
                 <p className="text-sm font-semibold text-white">Upload nutrition label</p>
                 <p className="mt-1 text-sm text-zinc-400">PDF, PNG, JPG, or JPEG. Extraction is a placeholder for now; manual fields stay editable.</p>
                 <input
-                  className="mt-3 block w-full text-sm text-zinc-300 file:mr-3 file:rounded-lg file:border-0 file:bg-cyan-300 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-zinc-950"
+                  className="mt-3 block w-full text-sm text-zinc-300 file:mr-3 file:rounded-lg file:border-0 file:bg-lime-300 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-zinc-950"
                   type="file"
                   accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
                   onChange={(event) => {
@@ -2995,7 +2998,7 @@ function FoodPage({
             </>
           )}
           {manualError ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{manualError}</p> : null}
-          <button disabled={manualSaving} className="h-11 rounded-lg bg-cyan-300 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+          <button disabled={manualSaving} className="h-11 rounded-lg bg-lime-300 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
             {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Save food entry"}
           </button>
           {manualFoodMode === "serving" ? (
@@ -3011,13 +3014,13 @@ function FoodPage({
           {hasMacroTargets ? (
             <div className="space-y-4">
               {dayTypeMacros ? (
-                <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-4">
+                <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <p className="text-sm font-semibold text-white">{dayTypeMacros.day_type}</p>
                       <p className="mt-1 text-sm leading-6 text-zinc-400">{dayTypeMacros.reason}</p>
                     </div>
-                    <span className="w-fit rounded-full border border-cyan-300/25 bg-cyan-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-cyan-100">
+                    <span className="w-fit rounded-full border border-lime-300/25 bg-lime-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-lime-100">
                       {dayTypeMacros.confidence} confidence
                     </span>
                   </div>
@@ -3088,7 +3091,7 @@ function FoodPage({
             }
           />
           <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
-            <MetricCard title="Calories" value={`${Math.round(selectedDateTotals.calories)}`} detail="selected day" icon={Apple} accent="border-cyan-400/20 bg-cyan-400/10 text-cyan-300" />
+            <MetricCard title="Calories" value={`${Math.round(selectedDateTotals.calories)}`} detail="selected day" icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
             <MetricCard title="Protein" value={`${Math.round(selectedDateTotals.protein)}g`} detail="selected day" icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
             <MetricCard title="Carbs" value={`${Math.round(selectedDateTotals.carbs)}g`} detail="selected day" icon={CarbsMoleculeIcon} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
             <MetricCard title="Fat" value={`${Math.round(selectedDateTotals.fat)}g`} detail="selected day" icon={FatMoleculeIcon} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
@@ -3115,7 +3118,7 @@ function FoodPage({
             {nutritionHistory.length ? (
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-4">
-                  <MetricCard title="7-day calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Target comparison pending"} icon={Apple} accent="border-cyan-400/20 bg-cyan-400/10 text-cyan-300" />
+                  <MetricCard title="7-day calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Target comparison pending"} icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
                   <MetricCard title="7-day protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Target comparison pending"} icon={Utensils} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
                   <MetricCard title="Days over target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent 7 logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                   <MetricCard title="Consistency" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories and macro adherence" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -3161,7 +3164,7 @@ function FoodPage({
             <label className="block space-y-2 text-sm text-zinc-400">
               <span>Food list</span>
               <textarea
-                className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-cyan-300/60"
+                className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-lime-300/60"
                 value={aiText}
                 maxLength={4000}
                 placeholder="Example: 3 eggs, 2 slices sourdough toast with butter, chicken burrito bowl, protein shake with banana"
@@ -3174,11 +3177,11 @@ function FoodPage({
             </button>
           </form>
           {shortcutSuggestion ? (
-            <div className="mt-4 rounded-lg border border-cyan-300/20 bg-cyan-300/10 p-4">
-              <p className="text-sm font-semibold text-cyan-100">Use saved {shortcutSuggestion.type} instead?</p>
+            <div className="mt-4 rounded-lg border border-lime-300/20 bg-lime-300/10 p-4">
+              <p className="text-sm font-semibold text-lime-100">Use saved {shortcutSuggestion.type} instead?</p>
               <p className="mt-1 text-sm text-zinc-300">{shortcutSuggestion.label} looks close to what you typed. Logging it avoids another OpenAI call.</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <button onClick={onUseSuggestion} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">Use saved shortcut</button>
+                <button onClick={onUseSuggestion} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Use saved shortcut</button>
                 <button onClick={onParseAnyway} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Parse new anyway</button>
               </div>
             </div>
@@ -3196,9 +3199,18 @@ function FoodPage({
               <p className="text-sm text-zinc-400">Review and edit before saving. Nothing is saved until you confirm these draft items.</p>
               {parsedFoods.map((food, index) => (
                 <div key={index} className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 sm:grid-cols-2">
-                  <div className="flex items-center justify-between gap-3 sm:col-span-2">
-                    <p className="text-sm font-semibold text-white">Draft item {index + 1}</p>
-                    <div className="flex gap-2">
+                  <div className="flex items-start justify-between gap-3 sm:col-span-2">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-semibold text-white">{food.food_name?.trim() || `Draft item ${index + 1}`}</p>
+                      {food.original_text && food.original_text.trim() && food.original_text.trim() !== food.food_name?.trim() ? (
+                        <p className="mt-0.5 truncate text-xs text-zinc-500">Original: &ldquo;{food.original_text}&rdquo;</p>
+                      ) : null}
+                      <p className="mt-1 text-xs text-zinc-400">
+                        {Math.round(Number(food.calories) || 0)} kcal · P {Number(food.protein) || 0}g · C {Number(food.carbs) || 0}g · F {Number(food.fat) || 0}g
+                        <span className="ml-1 text-zinc-500">· {food.source || "openai_estimate"} · {food.confidence || "medium"} confidence</span>
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
                       <button type="button" onClick={() => setParsedFoods((items) => [...items.slice(0, index + 1), { ...food }, ...items.slice(index + 1)])} className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-200">
                         Duplicate
                       </button>
@@ -3220,7 +3232,7 @@ function FoodPage({
                   <TextInput label="Sodium optional mg" type="number" min={0} step="any" value={food.sodium ?? ""} onChange={(value) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, sodium: value === "" ? null : Number(value) } : item))} />
                   <div className="space-y-2 text-sm text-zinc-400">
                     <span>Confidence</span>
-                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-cyan-300/60" value={food.confidence || "medium"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, confidence: event.target.value } : item))}>
+                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60" value={food.confidence || "medium"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, confidence: event.target.value } : item))}>
                       <option value="high">high</option>
                       <option value="medium">medium</option>
                       <option value="low">low</option>
@@ -3228,7 +3240,7 @@ function FoodPage({
                   </div>
                   <div className="space-y-2 text-sm text-zinc-400">
                     <span>Source</span>
-                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-cyan-300/60" value={food.source || "openai_estimate"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item))}>
+                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60" value={food.source || "openai_estimate"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item))}>
                       <option value="usda_fdc">USDA</option>
                       <option value="existing_database">Existing database</option>
                       <option value="openai_estimate">OpenAI estimate</option>
@@ -3246,7 +3258,7 @@ function FoodPage({
                       <p className="mt-1">{food.verification_reason || (food.source === "usda_fdc" ? "Matched nutrition database source context." : "Estimate only. Please review.")}</p>
                     )}
                     {food.source_url ? (
-                      <a className="mt-2 inline-flex text-cyan-200 underline decoration-cyan-200/40" href={food.source_url} target="_blank" rel="noreferrer">
+                      <a className="mt-2 inline-flex text-lime-200 underline decoration-lime-200/40" href={food.source_url} target="_blank" rel="noreferrer">
                         Source link
                       </a>
                     ) : null}
@@ -3260,7 +3272,7 @@ function FoodPage({
                 </p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                <button className="h-11 rounded-lg bg-cyan-300 px-4 text-sm font-semibold text-zinc-950">
+                <button className="h-11 rounded-lg bg-lime-300 px-4 text-sm font-semibold text-zinc-950">
                   Save all confirmed items
                 </button>
                 <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="h-11 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
@@ -3297,7 +3309,7 @@ function FoodPage({
                         <TextInput label="Fat" type="number" min={0} step="any" value={editingShortcut.fat} onChange={(value) => setEditingShortcut((item) => item ? { ...item, fat: Number(value) } : item)} />
                         <TextInput label="Notes" value={editingShortcut.notes ?? ""} onChange={(value) => setEditingShortcut((item) => item ? { ...item, notes: value } : item)} />
                         <div className="flex gap-2 sm:col-span-2">
-                          <button type="button" onClick={() => { if (editingShortcut) onUpdateShortcut(editingShortcut); setEditingShortcut(null); }} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">Save edits</button>
+                          <button type="button" onClick={() => { if (editingShortcut) onUpdateShortcut(editingShortcut); setEditingShortcut(null); }} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Save edits</button>
                           <button type="button" onClick={() => setEditingShortcut(null)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Cancel</button>
                         </div>
                       </div>
@@ -3309,7 +3321,7 @@ function FoodPage({
                           <p className="mt-2 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">Source: {shortcut.source || "manual"}</p>
                         </div>
                         <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => onLogShortcut(shortcut.shortcut_id)} className="rounded-lg bg-cyan-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log today</button>
+                          <button type="button" onClick={() => onLogShortcut(shortcut.shortcut_id)} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log today</button>
                           <button type="button" onClick={() => setEditingShortcut(shortcut)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Edit</button>
                           <button type="button" onClick={() => onDeleteShortcut(shortcut.shortcut_id)} className="rounded-lg border border-red-300/30 px-3 py-2 text-sm font-semibold text-red-100">Delete</button>
                         </div>
@@ -3338,7 +3350,7 @@ function FoodPage({
                                 type="button"
                                 onClick={() => void saveTemplateRename(template.template_name)}
                                 disabled={!templateRenameValue.trim() || pendingTemplateAction === `rename:${template.template_name}`}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-cyan-300 text-zinc-950 transition hover:bg-cyan-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-lime-300 text-zinc-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:opacity-50"
                                 aria-label="Save template name"
                               >
                                 <Check className="h-4 w-4" />
@@ -3360,7 +3372,7 @@ function FoodPage({
                             <button
                               type="button"
                               onClick={() => beginTemplateRename(template.template_name)}
-                              className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 text-zinc-400 transition hover:border-cyan-300/30 hover:bg-cyan-300/10 hover:text-cyan-100"
+                              className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 text-zinc-400 transition hover:border-lime-300/30 hover:bg-lime-300/10 hover:text-lime-100"
                               aria-label={`Rename ${template.template_name}`}
                             >
                               <Pencil className="h-3.5 w-3.5" />
@@ -3736,10 +3748,10 @@ function StrengthTrendsSection({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <SectionHeader eyebrow="Strength" title="Exercise trends" />
         <div className="inline-flex rounded-lg border border-white/10 bg-white/[0.04] p-1">
-          <button type="button" onClick={() => setTrendView("exercise")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "exercise" ? "bg-cyan-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
+          <button type="button" onClick={() => setTrendView("exercise")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "exercise" ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
             Exercise View
           </button>
-          <button type="button" onClick={() => setTrendView("muscle_group")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "muscle_group" ? "bg-cyan-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
+          <button type="button" onClick={() => setTrendView("muscle_group")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "muscle_group" ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
             Muscle Group View
           </button>
         </div>
@@ -4455,7 +4467,7 @@ function HistoryPage({
               type="button"
               onClick={handleCsvExport}
               disabled={exportLoading}
-              className="inline-flex items-center gap-2 rounded-lg border border-cyan-300/25 bg-cyan-300/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:border-cyan-200/40 hover:bg-cyan-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+              className="inline-flex items-center gap-2 rounded-lg border border-lime-300/25 bg-lime-300/10 px-3 py-2 text-sm font-semibold text-lime-100 transition hover:border-lime-200/40 hover:bg-lime-300/15 disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Download className="h-4 w-4" />
               {exportLoading ? "Exporting..." : "Export CSV"}
@@ -4468,7 +4480,7 @@ function HistoryPage({
             <select
               value={exportRange}
               onChange={(event) => setExportRange(event.target.value as CsvExportRange)}
-              className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+              className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
             >
               <option value="all">All time</option>
               <option value="7d">Last 7 days</option>
@@ -4485,7 +4497,7 @@ function HistoryPage({
                   type="date"
                   value={exportStartDate}
                   onChange={(event) => setExportStartDate(event.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
                 />
               </label>
               <label className="space-y-2 text-sm text-zinc-300">
@@ -4494,7 +4506,7 @@ function HistoryPage({
                   type="date"
                   value={exportEndDate}
                   onChange={(event) => setExportEndDate(event.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-cyan-300/50"
+                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
                 />
               </label>
             </>
@@ -4539,20 +4551,20 @@ function HistoryPage({
             </div>
           </div>
           {backupPreview ? (
-            <div className="mt-4 rounded-lg border border-cyan-300/25 bg-cyan-300/[0.05] p-4">
+            <div className="mt-4 rounded-lg border border-lime-300/25 bg-lime-300/[0.05] p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-white">Review backup before importing</p>
                   <p className="mt-1 text-xs text-zinc-400">{backupPreview.fileName}</p>
                 </div>
                 {backupPreview.dateRange ? (
-                  <p className="text-xs text-zinc-300">Date range: <span className="text-cyan-200">{backupPreview.dateRange.earliest} → {backupPreview.dateRange.latest}</span></p>
+                  <p className="text-xs text-zinc-300">Date range: <span className="text-lime-200">{backupPreview.dateRange.earliest} → {backupPreview.dateRange.latest}</span></p>
                 ) : null}
               </div>
               <div className="mt-4 rounded border border-white/5 bg-zinc-950/40 p-3">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Import mode</p>
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "skip" ? "border-cyan-300/40 bg-cyan-300/[0.06] text-cyan-100" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
+                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "skip" ? "border-lime-300/40 bg-lime-300/[0.06] text-lime-100" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
                     <input
                       type="radio"
                       name="backupImportMode"
@@ -4629,7 +4641,7 @@ function HistoryPage({
                   type="checkbox"
                   checked={backupSkipDocuments}
                   onChange={(event) => handleBackupSkipDocumentsChange(event.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-white/20 bg-zinc-950 text-cyan-300 focus:ring-cyan-300"
+                  className="mt-1 h-4 w-4 rounded border-white/20 bg-zinc-950 text-lime-300 focus:ring-lime-300"
                 />
                 <span>
                   <span className="font-medium">Skip importing settings &amp; documents</span>
@@ -4668,7 +4680,7 @@ function HistoryPage({
                   Dismiss
                 </button>
               </div>
-              <p className="mt-1 text-xs text-zinc-400">Mode: <span className="text-cyan-200">{backupSummary.import_mode === "update" ? "Update matching" : "Skip existing"}</span></p>
+              <p className="mt-1 text-xs text-zinc-400">Mode: <span className="text-lime-200">{backupSummary.import_mode === "update" ? "Update matching" : "Skip existing"}</span></p>
               <ul className="mt-3 grid gap-1 text-sm text-zinc-200 sm:grid-cols-2">
                 {Object.entries(backupSummary.datasets).map(([key, result]) => {
                   const label = BACKUP_DATASET_LABELS[key] ?? key;
@@ -4708,8 +4720,8 @@ function HistoryPage({
               <p className="mt-1 text-sm text-zinc-400">P {adaptiveRecommendation.proteinTarget}g · C {adaptiveRecommendation.carbsTarget}g · F {adaptiveRecommendation.fatTarget}g</p>
               <p className="mt-2 text-xs text-zinc-500">{adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}{adaptiveRecommendation.calorieAdjustment} kcal vs active baseline</p>
             </div>
-            <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.055] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Day type</p>
+            <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.055] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Day type</p>
               <p className="mt-2 text-lg font-semibold text-white">{adaptiveRecommendation.dayType ?? "Learning"}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">{adaptiveRecommendation.dayTypeAdjustment?.reason ?? "Training day adjustment appears with logged workload."}</p>
             </div>
@@ -4752,8 +4764,8 @@ function HistoryPage({
         <Card>
           <SectionHeader eyebrow="Optimization" title="Trend intelligence" />
           <div className="grid gap-3 lg:grid-cols-3">
-            <div className="rounded-lg border border-cyan-300/15 bg-cyan-300/[0.06] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-cyan-200/80">Macro adherence</p>
+            <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Macro adherence</p>
               <p className="mt-2 text-3xl font-semibold text-white">{optimization.macro_adherence.weekly_score !== null ? Math.round(optimization.macro_adherence.weekly_score) : "--"}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">{optimization.macro_adherence.summary}</p>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -4821,7 +4833,7 @@ function HistoryPage({
           {dailyNutritionTrend.length ? (
             <div className="space-y-4">
               <div className="grid gap-3 md:grid-cols-4">
-                <MetricCard title="7-day Calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Totals only"} icon={Apple} accent="border-cyan-400/20 bg-cyan-400/10 text-cyan-300" />
+                <MetricCard title="7-day Calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Totals only"} icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
                 <MetricCard title="7-day Protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Totals only"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
                 <MetricCard title="Over Target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                 <MetricCard title="Adherence" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories/macros vs targets" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -5073,14 +5085,14 @@ function AquariumEasterEgg() {
         aria-controls="settings-aquarium"
         aria-label={isOpen ? "Close Aquarium easter egg" : "Open Aquarium easter egg"}
         onClick={toggleAquarium}
-        className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-cyan-300/30 hover:bg-cyan-300/10 hover:text-cyan-100"
+        className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-lime-300/30 hover:bg-lime-300/10 hover:text-lime-100"
       >
         Aquarium
       </button>
       {isOpen ? (
         <div
           id="settings-aquarium"
-          className="aquarium-tile relative h-44 w-full max-w-xl overflow-hidden rounded-lg border border-cyan-200/15 bg-[#05131f] shadow-2xl shadow-cyan-950/25"
+          className="aquarium-tile relative h-44 w-full max-w-xl overflow-hidden rounded-lg border border-lime-200/15 bg-[#05131f] shadow-2xl shadow-lime-950/25"
         >
           <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(34,211,238,0.20),rgba(14,116,144,0.12)_45%,rgba(2,6,23,0.84)),radial-gradient(circle_at_20%_20%,rgba(125,211,252,0.20),transparent_28%),radial-gradient(circle_at_80%_12%,rgba(45,212,191,0.12),transparent_25%)]" />
           <div className="absolute inset-x-0 bottom-0 h-12 bg-[linear-gradient(180deg,transparent,rgba(8,47,73,0.50))]" />
@@ -5451,7 +5463,7 @@ function AquariumEasterEgg() {
 
 function healthStatusClass(status: string) {
   if (status === "connected") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
-  if (status === "syncing") return "border-cyan-300/20 bg-cyan-300/10 text-cyan-100";
+  if (status === "syncing") return "border-lime-300/20 bg-lime-300/10 text-lime-100";
   if (status === "error") return "border-red-400/25 bg-red-400/10 text-red-100";
   return "border-amber-300/20 bg-amber-300/10 text-amber-100";
 }
@@ -5547,13 +5559,13 @@ function SettingsPage({
               onChange={(value) => setForms((state) => ({ ...state, settings: { ...state.settings, [key]: value } }))}
             />
           ))}
-          <button className="h-11 rounded-lg bg-cyan-300 text-sm font-semibold text-zinc-950 md:col-span-2">Save settings locally</button>
+          <button className="h-11 rounded-lg bg-lime-300 text-sm font-semibold text-zinc-950 md:col-span-2">Save settings locally</button>
         </form>
       </Card>
       <div className="grid gap-4 lg:grid-cols-3">
         <Card>
           <SectionHeader eyebrow="Strava" title="OAuth connection" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-cyan-200">{settings?.statuses.strava ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.strava ?? "Not configured"}</span></p>
           <button onClick={onConnectStrava} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
             {settings?.statuses.strava === "Connected" || settings?.statuses.strava === "Disconnected" ? "Reconnect Strava" : "Connect Strava"}
           </button>
@@ -5561,7 +5573,7 @@ function SettingsPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="OpenAI" title="Food parser" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-cyan-200">{settings?.statuses.openai_api_key ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.openai_api_key ?? "Not configured"}</span></p>
           <button onClick={onTestOpenAI} className="mt-4 h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950">
             Test OpenAI Food Parser
           </button>
@@ -5569,7 +5581,7 @@ function SettingsPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Fitbit / Google Health" title="Wearable recovery" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-cyan-200">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
           <p className="mt-3 text-xs leading-5 text-zinc-500">Prepared for sleep, HRV, resting HR, and recovery trend ingestion. Full OAuth sync is not implemented yet.</p>
         </Card>
         <Card>
@@ -5584,7 +5596,7 @@ function SettingsPage({
           <Card key={key}>
             <p className="font-semibold text-white">{label}</p>
             <p className="mt-2 text-sm text-zinc-400">Saved value: {settings?.integrations[key] ?? "Not configured"}</p>
-            <p className="mt-3 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-cyan-200">{settings?.statuses[key] ?? "Not configured"}</p>
+            <p className="mt-3 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-lime-200">{settings?.statuses[key] ?? "Not configured"}</p>
           </Card>
         ))}
       </div>
@@ -5964,7 +5976,9 @@ export default function Home() {
   );
 
   const draftFromAnalyzeItem = (item: FoodAnalyzeResponse["items"][number]): ParsedFood => ({
-    food_name: item.name,
+    food_name: item.display_name || item.name,
+    display_name: item.display_name || item.name,
+    normalized_name: item.normalized_name,
     original_text: item.original_text,
     quantity: item.quantity === null || item.quantity === undefined ? "" : String(item.quantity),
     quantity_value: item.quantity,
@@ -6639,9 +6653,14 @@ export default function Home() {
       <div className="relative flex min-h-screen">
         <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
           <div className="mb-8 flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-300 text-zinc-950">
-              <Activity className="h-5 w-5" />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/POSLOGO.png"
+              alt="Performance OS logo"
+              width={40}
+              height={40}
+              className="h-10 w-10 shrink-0 rounded-lg object-contain"
+            />
             <div>
               <p className="font-semibold text-white">Performance OS</p>
               <p className="text-xs text-zinc-500">Local-first dashboard</p>
@@ -6654,7 +6673,7 @@ export default function Home() {
                 <button
                   key={item.id}
                   onClick={() => setActivePage(item.id)}
-                  className={cx("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition", activePage === item.id ? "bg-cyan-300 text-zinc-950" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
+                  className={cx("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition", activePage === item.id ? "bg-lime-300 text-zinc-950" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
                 >
                   <Icon className="h-4 w-4" />
                   {item.label}
@@ -6682,7 +6701,7 @@ export default function Home() {
             </div>
             <div className="mt-4 flex gap-2 overflow-x-auto pb-1 lg:hidden">
               {navigation.map((item) => (
-                <button key={item.id} onClick={() => setActivePage(item.id)} className={cx("whitespace-nowrap rounded-lg px-3 py-2 text-sm transition", activePage === item.id ? "bg-cyan-300 text-zinc-950" : "bg-white/[0.06] text-zinc-300")}>
+                <button key={item.id} onClick={() => setActivePage(item.id)} className={cx("whitespace-nowrap rounded-lg px-3 py-2 text-sm transition", activePage === item.id ? "bg-lime-300 text-zinc-950" : "bg-white/[0.06] text-zinc-300")}>
                   {item.label}
                 </button>
               ))}
