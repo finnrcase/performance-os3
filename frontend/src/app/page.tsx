@@ -4918,31 +4918,36 @@ function HistoryPage({
   );
 }
 
-const AQUARIUM_FISH_SLOTS = ["fish-orange", "fish-tropical", "fish-sleek", "fish-round", "fish-school"] as const;
-type AquariumFishSlot = (typeof AQUARIUM_FISH_SLOTS)[number];
+type SpecialFishDirection = "right" | "left";
+type SpecialFishInstance = {
+  id: number;
+  direction: SpecialFishDirection;
+  topPercent: number;
+};
 
-function pickSpecialAquariumFishSlot(): AquariumFishSlot | null {
-  if (Math.random() >= 0.1) return null;
-  return AQUARIUM_FISH_SLOTS[Math.floor(Math.random() * AQUARIUM_FISH_SLOTS.length)] ?? null;
-}
+const SPECIAL_FISH_INTERVAL_MS = 15_000;
+const SPECIAL_FISH_LIFETIME_MS = 12_000;
+const SPECIAL_FISH_INITIAL_DELAY_MS = 2_500;
+const SPECIAL_FISH_BUBBLE_MS = 2_000;
 
 function SpecialGirlfriendFish({
-  slot,
+  instance,
   showBubble,
   onClick,
 }: Readonly<{
-  slot: AquariumFishSlot;
+  instance: SpecialFishInstance;
   showBubble: boolean;
   onClick: () => void;
 }>) {
-  const swimsLeft = slot === "fish-tropical" || slot === "fish-round";
+  const swimsLeft = instance.direction === "left";
   return (
     <button
       type="button"
       data-fish-type="special_girlfriend_fish"
       aria-label={showBubble ? "Special aquarium fish says fussing" : "Special aquarium fish"}
       onClick={onClick}
-      className={cx("aquarium-fish special_girlfriend_fish", slot, swimsLeft && "swim-left")}
+      className={cx("aquarium-fish special_girlfriend_fish special-fish-cross", swimsLeft && "swim-left")}
+      style={{ top: `${instance.topPercent}%` }}
     >
       <span className={cx("special-fish-bubble", showBubble && "is-visible")} aria-hidden="true">
         *fussing*
@@ -4967,9 +4972,12 @@ function SpecialGirlfriendFish({
 
 function AquariumEasterEgg() {
   const [isOpen, setIsOpen] = useState(false);
-  const [specialFishSlot, setSpecialFishSlot] = useState<AquariumFishSlot | null>(null);
+  const [specialFish, setSpecialFish] = useState<SpecialFishInstance | null>(null);
   const [showSpecialBubble, setShowSpecialBubble] = useState(false);
   const specialBubbleTimeout = useRef<number | null>(null);
+  const specialFishActiveRef = useRef(false);
+  const specialFishIdRef = useRef(0);
+  const despawnTimeout = useRef<number | null>(null);
 
   const clearSpecialBubbleTimeout = useCallback(() => {
     if (specialBubbleTimeout.current !== null) {
@@ -4978,16 +4986,72 @@ function AquariumEasterEgg() {
     }
   }, []);
 
-  useEffect(() => () => clearSpecialBubbleTimeout(), [clearSpecialBubbleTimeout]);
+  const clearDespawnTimeout = useCallback(() => {
+    if (despawnTimeout.current !== null) {
+      window.clearTimeout(despawnTimeout.current);
+      despawnTimeout.current = null;
+    }
+  }, []);
+
+  useEffect(() => () => {
+    clearSpecialBubbleTimeout();
+    clearDespawnTimeout();
+  }, [clearSpecialBubbleTimeout, clearDespawnTimeout]);
+
+  // Periodically swim the special fish across the aquarium while it is open.
+  // Only one fish exists at a time; each spawn auto-despawns after its swim.
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    const trySpawn = () => {
+      if (specialFishActiveRef.current) {
+        return;
+      }
+      specialFishActiveRef.current = true;
+      specialFishIdRef.current += 1;
+      const id = specialFishIdRef.current;
+      setSpecialFish({
+        id,
+        direction: Math.random() < 0.5 ? "right" : "left",
+        topPercent: 22 + Math.random() * 48,
+      });
+      clearDespawnTimeout();
+      despawnTimeout.current = window.setTimeout(() => {
+        despawnTimeout.current = null;
+        specialFishActiveRef.current = false;
+        setSpecialFish((current) => (current?.id === id ? null : current));
+        setShowSpecialBubble(false);
+        clearSpecialBubbleTimeout();
+      }, SPECIAL_FISH_LIFETIME_MS);
+    };
+
+    const firstSpawn = window.setTimeout(trySpawn, SPECIAL_FISH_INITIAL_DELAY_MS);
+    const interval = window.setInterval(trySpawn, SPECIAL_FISH_INTERVAL_MS);
+
+    return () => {
+      window.clearTimeout(firstSpawn);
+      window.clearInterval(interval);
+      clearDespawnTimeout();
+      specialFishActiveRef.current = false;
+      setSpecialFish(null);
+    };
+  }, [isOpen, clearDespawnTimeout, clearSpecialBubbleTimeout]);
 
   const toggleAquarium = () => {
     if (isOpen) {
       clearSpecialBubbleTimeout();
+      clearDespawnTimeout();
+      specialFishActiveRef.current = false;
+      setSpecialFish(null);
       setShowSpecialBubble(false);
       setIsOpen(false);
       return;
     }
-    setSpecialFishSlot(pickSpecialAquariumFishSlot());
     setShowSpecialBubble(false);
     setIsOpen(true);
   };
@@ -4998,7 +5062,7 @@ function AquariumEasterEgg() {
     specialBubbleTimeout.current = window.setTimeout(() => {
       setShowSpecialBubble(false);
       specialBubbleTimeout.current = null;
-    }, 2000);
+    }, SPECIAL_FISH_BUBBLE_MS);
   };
 
   return (
@@ -5029,9 +5093,6 @@ function AquariumEasterEgg() {
           <span className="aquarium-seaweed seaweed-one" aria-hidden="true" />
           <span className="aquarium-seaweed seaweed-two" aria-hidden="true" />
           <span className="aquarium-coral" aria-hidden="true" />
-          {specialFishSlot === "fish-orange" ? (
-            <SpecialGirlfriendFish slot="fish-orange" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
-          ) : (
           <span className="aquarium-fish fish-orange" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 72 34" focusable="false">
               <path className="tail" d="M8 17L1 7C0 5 2 3 4 4L18 12V22L4 30C2 31 0 29 1 27L8 17Z" />
@@ -5042,10 +5103,6 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="55" cy="14" r="2" />
             </svg>
           </span>
-          )}
-          {specialFishSlot === "fish-tropical" ? (
-            <SpecialGirlfriendFish slot="fish-tropical" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
-          ) : (
           <span className="aquarium-fish fish-tropical swim-left" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 72 38" focusable="false">
               <path className="tail" d="M9 19L1 8C-1 5 2 2 5 4L20 13V25L5 34C2 36-1 33 1 30L9 19Z" />
@@ -5057,10 +5114,6 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="56" cy="17" r="2.1" />
             </svg>
           </span>
-          )}
-          {specialFishSlot === "fish-sleek" ? (
-            <SpecialGirlfriendFish slot="fish-sleek" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
-          ) : (
           <span className="aquarium-fish fish-sleek" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 86 28" focusable="false">
               <path className="tail" d="M10 14L1 5C-1 3 1 0 4 2L21 9V19L4 26C1 28-1 25 1 23L10 14Z" />
@@ -5071,10 +5124,6 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="68" cy="13" r="1.8" />
             </svg>
           </span>
-          )}
-          {specialFishSlot === "fish-round" ? (
-            <SpecialGirlfriendFish slot="fish-round" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
-          ) : (
           <span className="aquarium-fish fish-round swim-left" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 62 42" focusable="false">
               <path className="tail" d="M10 21L2 10C0 7 3 4 6 6L18 14V28L6 36C3 38 0 35 2 32L10 21Z" />
@@ -5086,10 +5135,6 @@ function AquariumEasterEgg() {
               <circle className="eye" cx="49" cy="17" r="2" />
             </svg>
           </span>
-          )}
-          {specialFishSlot === "fish-school" ? (
-            <SpecialGirlfriendFish slot="fish-school" showBubble={showSpecialBubble} onClick={showSpecialFishMessage} />
-          ) : (
           <span className="aquarium-fish fish-school" aria-hidden="true">
             <span className="school-cluster">
               {[0, 1, 2].map((index) => (
@@ -5101,7 +5146,14 @@ function AquariumEasterEgg() {
               ))}
             </span>
           </span>
-          )}
+          {specialFish ? (
+            <SpecialGirlfriendFish
+              key={specialFish.id}
+              instance={specialFish}
+              showBubble={showSpecialBubble}
+              onClick={showSpecialFishMessage}
+            />
+          ) : null}
           <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
           <style>{`
             .aquarium-fish {
@@ -5238,6 +5290,14 @@ function AquariumEasterEgg() {
               cursor: pointer;
               overflow: visible;
               filter: drop-shadow(0 0 12px rgba(244, 114, 182, 0.20));
+            }
+            /* One graceful swim across the aquarium, then it leaves and is unmounted. */
+            .special_girlfriend_fish.special-fish-cross {
+              --swim-speed: 12s;
+              --swim-delay: 0s;
+              --bob-speed: 5.2s;
+              animation-iteration-count: 1;
+              animation-fill-mode: forwards;
             }
             .special_girlfriend_fish:hover .special-fish-svg,
             .special_girlfriend_fish:focus-visible .special-fish-svg {

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ FOOD_CACHE_COLUMNS = [
     "query",
     "foods_json",
     "food_name",
+    "normalized_name",
     "quantity",
     "calories",
     "protein",
@@ -42,11 +44,49 @@ FOOD_CACHE_COLUMNS = [
     "verification_status",
     "source_url",
     "notes",
+    "last_used_at",
 ]
 
-# Low-cost model for structured food parsing.
-OPENAI_MODEL = "gpt-4.1-nano"
+# Model used for structured food analysis. Override with the FOOD_ANALYSIS_MODEL
+# env var to trade cost for accuracy; defaults to a high-accuracy model.
+FOOD_ANALYSIS_DEFAULT_MODEL = "gpt-4.1"
 CONFIDENCE_VALUES = {"low", "medium", "high"}
+
+_TITLE_MINOR_WORDS = {"of", "and", "with", "the", "a", "an", "in", "on", "to", "for"}
+_LEADING_QUANTITY_RE = re.compile(
+    r"^\s*\d+(?:\.\d+)?\s*"
+    r"(?:oz|ounces?|g|grams?|lbs?|kg|cups?|tbsp|tsp|ml|l|servings?|scoops?|slices?|pieces?|pcs?|x)?\s*"
+    r"(?:of\s+)?",
+    re.IGNORECASE,
+)
+
+
+def food_analysis_model() -> str:
+    """Return the configured OpenAI model for food text analysis."""
+    return os.getenv("FOOD_ANALYSIS_MODEL", "").strip() or FOOD_ANALYSIS_DEFAULT_MODEL
+
+
+def _clean_display_name(raw: str, fallback: str = "") -> str:
+    """Title-case a food name, stripping leading quantity/unit noise."""
+    text = _LEADING_QUANTITY_RE.sub("", str(raw or "").strip())
+    words = re.sub(r"\s+", " ", text).strip().split(" ")
+    cleaned: list[str] = []
+    for index, word in enumerate(words):
+        if not word:
+            continue
+        lowered = word.lower()
+        if index != 0 and lowered in _TITLE_MINOR_WORDS:
+            cleaned.append(lowered)
+        elif word.isupper() and len(word) <= 4:
+            cleaned.append(word)  # preserve short acronyms / brand stylings
+        else:
+            cleaned.append(word[:1].upper() + word[1:].lower())
+    return " ".join(cleaned) or str(fallback or "").strip()
+
+
+def _normalized_name(display_name: str) -> str:
+    """Lowercase snake_case key derived from a display name."""
+    return re.sub(r"[^a-z0-9]+", "_", str(display_name or "").strip().lower()).strip("_")
 
 
 def _normalize_query(food_text: str) -> str:
@@ -66,7 +106,7 @@ def _load_food_cache() -> pd.DataFrame:
     cache_df = cache_df[FOOD_CACHE_COLUMNS]
     for column in ["calories", "protein", "carbs", "fat"]:
         cache_df[column] = pd.to_numeric(cache_df[column], errors="coerce").fillna(0)
-    for column in ["query", "foods_json", "food_name", "quantity", "confidence", "verification_needed", "verification_reason", "source", "verification_status", "source_url", "notes"]:
+    for column in ["query", "foods_json", "food_name", "normalized_name", "quantity", "confidence", "verification_needed", "verification_reason", "source", "verification_status", "source_url", "notes", "last_used_at"]:
         cache_df[column] = cache_df[column].fillna("").astype(str)
     return cache_df
 
@@ -323,6 +363,7 @@ def _cache_result(query: str, result: dict) -> None:
         "query": query,
         "foods_json": json.dumps(foods),
         "food_name": first.get("food_name", ""),
+        "normalized_name": first.get("normalized_name", "") or _normalized_name(first.get("food_name", "")),
         "quantity": first.get("quantity", ""),
         "calories": first.get("calories", 0),
         "protein": first.get("protein", 0),
@@ -335,6 +376,7 @@ def _cache_result(query: str, result: dict) -> None:
         "verification_status": first.get("verification_status", ""),
         "source_url": first.get("source_url", ""),
         "notes": first.get("notes", ""),
+        "last_used_at": datetime.now(timezone.utc).isoformat(),
     }
     cache_df = pd.concat([cache_df, pd.DataFrame([cache_entry])], ignore_index=True)
     _save_food_cache(cache_df)
@@ -411,6 +453,8 @@ def _call_openai(food_text: str, api_key: str) -> dict:
                     "additionalProperties": False,
                     "properties": {
                         "food_name": {"type": "string"},
+                        "display_name": {"type": "string"},
+                        "normalized_name": {"type": "string"},
                         "original_text": {"type": "string"},
                         "quantity": {"type": "number"},
                         "unit": {"type": "string"},
@@ -434,6 +478,8 @@ def _call_openai(food_text: str, api_key: str) -> dict:
                     },
                     "required": [
                         "food_name",
+                        "display_name",
+                        "normalized_name",
                         "original_text",
                         "quantity",
                         "unit",
