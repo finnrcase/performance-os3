@@ -4971,9 +4971,62 @@ type SpecialFishInstance = {
 };
 
 const SPECIAL_FISH_INTERVAL_MS = 15_000;
-const SPECIAL_FISH_LIFETIME_MS = 12_000;
+// Lifetime must outlast the (slowed) 17s swim so she finishes crossing.
+const SPECIAL_FISH_LIFETIME_MS = 18_000;
 const SPECIAL_FISH_INITIAL_DELAY_MS = 2_500;
 const SPECIAL_FISH_BUBBLE_MS = 2_000;
+
+// Ambient yellow-fish school — an occasional group event, not constant.
+const SCHOOL_FISH_COUNT = 8;
+const YELLOW_SCHOOL_INTERVAL_MS = 11_000;     // how often a spawn is considered
+const YELLOW_SCHOOL_SPAWN_CHANCE = 0.45;      // probability per check, keeps it irregular
+const YELLOW_SCHOOL_LIFETIME_MS = 32_000;     // outlasts the slowest fish + entry stagger
+const YELLOW_SCHOOL_INITIAL_DELAY_MS = 6_000;
+
+type YellowSchoolInstance = {
+  id: number;
+  direction: SpecialFishDirection;
+};
+
+function YellowFishSchool({ instance }: Readonly<{ instance: YellowSchoolInstance }>) {
+  const swimsLeft = instance.direction === "left";
+  return (
+    <>
+      {Array.from({ length: SCHOOL_FISH_COUNT }).map((_, i) => {
+        // Deterministic per-index variation — organic loose formation with no
+        // per-render randomness (avoids rerender/animation jitter).
+        const topPercent = 11 + ((i * 37) % 70) / 10;       // ~11-16% band, clear of girlfriend path
+        const swimSpeed = 24 + ((i * 53) % 90) / 20;        // ~24-28s, slightly varied speeds
+        const swimDelay = ((i * 29) % 65) / 22;             // staggered entry → spacing differences
+        const fishWidth = 22 + (i % 3) * 1.8;               // subtle size differences, smaller than standard
+        const fishOpacity = 0.64 + (i % 3) * 0.08;
+        const bobSpeed = 3.5 + (i % 4) * 0.45;
+        return (
+          <span
+            key={i}
+            aria-hidden="true"
+            className={cx("aquarium-fish school-fish school-fish-cross", swimsLeft && "swim-left")}
+            style={{
+              top: `${topPercent}%`,
+              "--swim-speed": `${swimSpeed}s`,
+              "--swim-delay": `${swimDelay}s`,
+              "--bob-speed": `${bobSpeed}s`,
+              "--fish-width": `${fishWidth}px`,
+              "--fish-opacity": fishOpacity,
+            } as React.CSSProperties}
+          >
+            <svg className="fish-svg" viewBox="0 0 42 20" focusable="false">
+              <path className="tail" d="M6 10L1 4C0 3 1 1 3 2L11 7V13L3 18C1 19 0 17 1 16L6 10Z" />
+              <ellipse className="body" cx="24" cy="10" rx="14" ry="6.5" />
+              <path className="fin top-fin" d="M16 4C20 1 27 2 30 6C25 5 20 4 16 4Z" />
+              <circle className="eye" cx="34" cy="8" r="1.2" />
+            </svg>
+          </span>
+        );
+      })}
+    </>
+  );
+}
 
 function SpecialGirlfriendFish({
   instance,
@@ -5023,6 +5076,10 @@ function AquariumEasterEgg() {
   const specialFishActiveRef = useRef(false);
   const specialFishIdRef = useRef(0);
   const despawnTimeout = useRef<number | null>(null);
+  const [yellowSchool, setYellowSchool] = useState<YellowSchoolInstance | null>(null);
+  const schoolActiveRef = useRef(false);
+  const schoolIdRef = useRef(0);
+  const schoolDespawnTimeout = useRef<number | null>(null);
 
   const clearSpecialBubbleTimeout = useCallback(() => {
     if (specialBubbleTimeout.current !== null) {
@@ -5038,10 +5095,18 @@ function AquariumEasterEgg() {
     }
   }, []);
 
+  const clearSchoolDespawnTimeout = useCallback(() => {
+    if (schoolDespawnTimeout.current !== null) {
+      window.clearTimeout(schoolDespawnTimeout.current);
+      schoolDespawnTimeout.current = null;
+    }
+  }, []);
+
   useEffect(() => () => {
     clearSpecialBubbleTimeout();
     clearDespawnTimeout();
-  }, [clearSpecialBubbleTimeout, clearDespawnTimeout]);
+    clearSchoolDespawnTimeout();
+  }, [clearSpecialBubbleTimeout, clearDespawnTimeout, clearSchoolDespawnTimeout]);
 
   // Periodically swim the special fish across the aquarium while it is open.
   // Only one fish exists at a time; each spawn auto-despawns after its swim.
@@ -5086,6 +5151,44 @@ function AquariumEasterEgg() {
       setSpecialFish(null);
     };
   }, [isOpen, clearDespawnTimeout, clearSpecialBubbleTimeout]);
+
+  // Occasionally send a loose school of yellow fish across the aquarium.
+  // Each check has a chance to spawn, so the event feels random, not constant.
+  useEffect(() => {
+    if (!isOpen) {
+      return;
+    }
+    if (typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      return;
+    }
+
+    const trySpawnSchool = () => {
+      if (schoolActiveRef.current || Math.random() > YELLOW_SCHOOL_SPAWN_CHANCE) {
+        return;
+      }
+      schoolActiveRef.current = true;
+      schoolIdRef.current += 1;
+      const id = schoolIdRef.current;
+      setYellowSchool({ id, direction: Math.random() < 0.5 ? "right" : "left" });
+      clearSchoolDespawnTimeout();
+      schoolDespawnTimeout.current = window.setTimeout(() => {
+        schoolDespawnTimeout.current = null;
+        schoolActiveRef.current = false;
+        setYellowSchool((current) => (current?.id === id ? null : current));
+      }, YELLOW_SCHOOL_LIFETIME_MS);
+    };
+
+    const firstSchool = window.setTimeout(trySpawnSchool, YELLOW_SCHOOL_INITIAL_DELAY_MS);
+    const schoolInterval = window.setInterval(trySpawnSchool, YELLOW_SCHOOL_INTERVAL_MS);
+
+    return () => {
+      window.clearTimeout(firstSchool);
+      window.clearInterval(schoolInterval);
+      clearSchoolDespawnTimeout();
+      schoolActiveRef.current = false;
+      setYellowSchool(null);
+    };
+  }, [isOpen, clearSchoolDespawnTimeout]);
 
   const toggleAquarium = () => {
     if (isOpen) {
@@ -5191,6 +5294,7 @@ function AquariumEasterEgg() {
               ))}
             </span>
           </span>
+          {yellowSchool ? <YellowFishSchool key={yellowSchool.id} instance={yellowSchool} /> : null}
           {specialFish ? (
             <SpecialGirlfriendFish
               key={specialFish.id}
@@ -5336,11 +5440,28 @@ function AquariumEasterEgg() {
               overflow: visible;
               filter: drop-shadow(0 0 12px rgba(244, 114, 182, 0.20));
             }
-            /* One graceful swim across the aquarium, then it leaves and is unmounted. */
+            /* One graceful swim across the aquarium, then it leaves and is unmounted.
+               Slowed ~42% from the original 12s so the glasses and heart read clearly. */
             .special_girlfriend_fish.special-fish-cross {
-              --swim-speed: 12s;
+              --swim-speed: 17s;
               --swim-delay: 0s;
-              --bob-speed: 5.2s;
+              --bob-speed: 6.2s;
+              animation-iteration-count: 1;
+              animation-fill-mode: forwards;
+            }
+            /* Ambient yellow-fish school — small, soft-glow, one-shot crossing. */
+            .school-fish {
+              --fish-body: #fde047;
+              --fish-fin: #facc15;
+              --fish-detail: #fef9c3;
+              --fish-depth: 2;
+              filter: drop-shadow(0 0 7px rgba(250, 204, 21, 0.18));
+            }
+            .school-fish .body { fill: var(--fish-body); }
+            .school-fish .tail,
+            .school-fish .fin { fill: var(--fish-fin); }
+            .school-fish .eye { fill: #020617; stroke: rgba(255, 255, 255, 0.5); stroke-width: 0.5; }
+            .school-fish.school-fish-cross {
               animation-iteration-count: 1;
               animation-fill-mode: forwards;
             }
