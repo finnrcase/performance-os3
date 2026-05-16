@@ -5505,28 +5505,19 @@ function IntegrationHealthGrid({
   cards,
   onSyncHevy,
   onImportStrava,
-<<<<<<< HEAD
-=======
   onConnectWithings,
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
   onSyncWithings,
 }: Readonly<{
   cards: SettingsHealthCard[];
   onSyncHevy: () => void;
   onImportStrava: () => void;
-<<<<<<< HEAD
-=======
   onConnectWithings: () => void;
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
   onSyncWithings: () => void;
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
     if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
     if (card.action === "strava_import") return { label: "Sync", onClick: onImportStrava };
-<<<<<<< HEAD
-=======
     if (card.action === "withings_connect") return { label: "Connect", onClick: onConnectWithings };
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
     if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
     return null;
   };
@@ -5614,11 +5605,7 @@ function SettingsPage({
   const withingsConnected = withingsStatus === "Connected" || withingsStatus === "Disconnected";
   return (
     <div className="space-y-4">
-<<<<<<< HEAD
-      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onSyncWithings={onSyncWithings} /> : null}
-=======
       {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
         <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">

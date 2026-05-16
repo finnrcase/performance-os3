@@ -24,20 +24,9 @@ from src.integrations.strava_client import (
 )
 from src.integrations.withings_client import (
     WithingsIntegrationError,
-<<<<<<< HEAD
-    WithingsReconnectRequired,
-    build_withings_auth_url,
-    clear_withings_connection,
-    exchange_withings_code,
-    get_withings_connection_status,
-    load_withings_sync_state,
-    sync_withings_measurements,
-    withings_redirect_uri,
-=======
     get_withings_connection_status,
     load_withings_sync_state,
     refresh_withings_token_if_needed,
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
 )
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
@@ -178,49 +167,6 @@ def _strava_debug_status(settings: dict, latest_strava: str) -> dict:
     }
 
 
-<<<<<<< HEAD
-def _withings_redirect_uri(request: Request) -> str:
-    """Resolve the Withings OAuth redirect URI (callback hits this backend)."""
-    fallback = str(request.url_for("withings_callback"))
-    return withings_redirect_uri(fallback=fallback)
-
-
-def _withings_debug_status(settings: dict) -> dict:
-    tokens = settings.get("metadata", {}).get("withings_tokens", {})
-    sync_state = load_withings_sync_state()
-    expires_at = int(tokens.get("expires_at") or 0)
-    now = int(time.time())
-    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
-    token_expired = bool(connected and expires_at <= now)
-    token_expiring = bool(connected and not token_expired and expires_at <= now + 300)
-    return {
-        "connected": connected,
-        "userid": _masked_athlete_id(str(tokens.get("userid", "") or "")),
-        "token_expires_at": expires_at,
-        "token_status": "expired" if token_expired else "refresh soon" if token_expiring else "valid" if connected else "missing",
-        "scopes": str(tokens.get("scopes", "") or ""),
-        "last_synced_at": sync_state.get("last_synced_at", ""),
-        "latest_measurement_date": sync_state.get("latest_measurement_date", ""),
-        "last_imported_count": sync_state.get("last_imported_count", 0),
-        "last_updated_count": sync_state.get("last_updated_count", 0),
-        "last_fetched_count": sync_state.get("last_fetched_count", 0),
-        "last_error": sync_state.get("last_error", ""),
-    }
-
-
-def _latest_withings_measurement(body_df: pd.DataFrame) -> dict:
-    """Return the most recent Withings-sourced body measurement, if any."""
-    if body_df.empty or "source" not in body_df.columns:
-        return {}
-    rows = body_df[body_df["source"].astype(str) == "withings"]
-    if rows.empty:
-        return {}
-    latest = rows.sort_values("date").iloc[-1]
-    return {
-        "date": str(latest.get("date", "") or ""),
-        "weight": latest.get("bodyweight"),
-        "body_fat": latest.get("estimated_body_fat"),
-=======
 def _safe_component(
     *,
     configured: bool,
@@ -375,7 +321,6 @@ def _integration_components(settings: dict) -> dict:
             reconnect_required=False,
         ),
         "withings": withings_component,
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
     }
 
 
@@ -442,25 +387,6 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
         {
             "id": "withings",
             "title": "Withings",
-<<<<<<< HEAD
-            "status": (
-                "error" if withings_debug["last_error"]
-                else "connected" if withings_status == "Connected" and withings_debug["latest_measurement_date"]
-                else "warning"
-            ),
-            "label": withings_status,
-            "detail": withings_debug["last_error"] or (
-                f"Latest measurement {latest_withings['date']}"
-                + (f" · {latest_withings['weight']:.1f} lb" if latest_withings.get("weight") is not None and pd.notna(latest_withings.get("weight")) else "")
-                + (f" · {latest_withings['body_fat']:.1f}% body fat" if latest_withings.get("body_fat") is not None and pd.notna(latest_withings.get("body_fat")) else "")
-                if latest_withings.get("date")
-                else "Connected — run Sync Withings Now to pull scale measurements." if withings_status == "Connected"
-                else "Connect Withings to auto-sync weight and body composition."
-            ),
-            "last_synced_at": withings_debug["last_synced_at"],
-            "action": "withings_sync" if withings_status == "Connected" else "",
-            "metadata": withings_debug,
-=======
             "status": "error" if withings_error else "connected" if withings_status == "Connected" and withings_latest else "warning",
             "label": withings_status,
             "detail": withings_error or (_freshness_detail("Withings scale", withings_latest) if withings_latest else "Connect Withings, then sync scale measurements into body metrics."),
@@ -473,7 +399,6 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
                 "latest_activity_date": withings_latest,
                 "last_error": withings_error,
             },
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         },
         {
             "id": "openai",
@@ -518,16 +443,9 @@ def _settings_response(settings: dict) -> dict:
         "fitbit_client_id": integration_status("fitbit_client_id", settings),
         "fitbit_client_secret": integration_status("fitbit_client_secret", settings),
         "fitbit_google_health": fitbit_google_health_status(settings),
-<<<<<<< HEAD
-        "withings": get_withings_connection_status(),
-        "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
-        "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
-        "withings_redirect_uri": "Configured" if _configured_from_env("WITHINGS_REDIRECT_URI") else "Auto from backend URL",
-=======
         "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
         "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
         "withings": get_withings_connection_status(),
->>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         "openai_api_key": "Configured" if openai_configured else "Not configured",
         "apple_health_export_file": integration_status("apple_health_export_file", settings),
     }
