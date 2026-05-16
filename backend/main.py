@@ -89,9 +89,18 @@ app.add_middleware(
 def health() -> dict:
     """Health check used by local development and deployment probes."""
     warnings = production_storage_warnings()
+    environment = (
+        "production"
+        if os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("VERCEL") or os.getenv("RENDER") or os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"}
+        else "local"
+        if os.getenv("ENVIRONMENT", "").lower() in {"local", "development", "dev"} or (PROJECT_ROOT / ".env").exists()
+        else "unknown"
+    )
     return {
         "status": "ok" if not warnings else "warning",
         "service": "performance-os-api",
+        "environment": environment,
+        "version": app.version,
         "storage": "postgres" if use_database() else "local_files",
         "revision": (
             os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()

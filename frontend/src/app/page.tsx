@@ -2,6 +2,7 @@
 
 import {
   Apple,
+  AlertTriangle,
   BarChart3,
   Check,
   ChevronDown,
@@ -19,6 +20,7 @@ import {
   Utensils,
   Weight,
   X,
+  CircleMinus,
 } from "lucide-react";
 import {
   Area,
@@ -37,17 +39,10 @@ import {
   YAxis,
 } from "recharts";
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-
-const API_BASE =
-  (process.env.NEXT_PUBLIC_API_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "")
-    .replace(/\/$/, "") ||
-  (process.env.NODE_ENV === "development" ? "http://localhost:8001" : "");
+import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 
 function apiUrl(path: string) {
-  if (!API_BASE) {
-    throw new Error("NEXT_PUBLIC_API_URL is required in production so the frontend can reach the FastAPI backend.");
-  }
-  return `${API_BASE}${path}`;
+  return publicApiUrl(path);
 }
 let hevyAutoSyncStarted = false;
 
@@ -669,6 +664,22 @@ type SettingsHealthCard = {
   };
 };
 
+type DiagnosticStatus = "green" | "yellow" | "red" | "gray" | string;
+
+type DiagnosticComponent = {
+  configured: boolean;
+  status: DiagnosticStatus;
+  message: string;
+  required_env_vars: string[];
+  missing_env_vars: string[];
+  last_successful_sync?: string;
+  latest_record?: string;
+  reconnect_required?: boolean;
+  user_action_required?: boolean;
+  user_action_message?: string;
+  details?: Record<string, unknown>;
+};
+
 type HevyPreviewWorkout = {
   workout_id: string;
   title: string;
@@ -802,6 +813,18 @@ type DashboardData = {
 };
 
 type SettingsData = {
+  overall_status?: "ok" | "degraded" | "error" | string;
+  environment?: string;
+  checked_at?: string;
+  backend?: DiagnosticComponent;
+  database?: DiagnosticComponent;
+  openai?: DiagnosticComponent;
+  strava?: DiagnosticComponent;
+  hevy?: DiagnosticComponent;
+  withings?: DiagnosticComponent;
+  frontend?: DiagnosticComponent;
+  other_integrations?: Record<string, DiagnosticComponent>;
+  required_user_actions?: string[];
   integrations: Record<string, string>;
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
@@ -5638,9 +5661,91 @@ function AquariumEasterEgg() {
 
 function healthStatusClass(status: string) {
   if (status === "connected") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
+  if (status === "green") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
   if (status === "syncing") return "border-lime-300/20 bg-lime-300/10 text-lime-100";
+  if (status === "yellow") return "border-amber-300/20 bg-amber-300/10 text-amber-100";
   if (status === "error") return "border-red-400/25 bg-red-400/10 text-red-100";
+  if (status === "red") return "border-red-400/25 bg-red-400/10 text-red-100";
+  if (status === "gray") return "border-zinc-500/30 bg-zinc-500/10 text-zinc-300";
   return "border-amber-300/20 bg-amber-300/10 text-amber-100";
+}
+
+function diagnosticIcon(status: DiagnosticStatus) {
+  if (status === "green") return Check;
+  if (status === "red") return X;
+  if (status === "gray") return CircleMinus;
+  return AlertTriangle;
+}
+
+function DiagnosticStatusDashboard({ settings }: Readonly<{ settings: SettingsData | null }>) {
+  if (!settings) return null;
+  const primary: Array<[string, string, DiagnosticComponent | undefined]> = [
+    ["backend", "Backend", settings.backend],
+    ["database", "Supabase Postgres", settings.database],
+    ["frontend", "Frontend API", settings.frontend],
+    ["openai", "OpenAI", settings.openai],
+    ["strava", "Strava", settings.strava],
+    ["hevy", "Hevy", settings.hevy],
+    ["withings", "Withings", settings.withings],
+  ];
+  const other = Object.entries(settings.other_integrations ?? {}).map(([key, value]) => [key, key.replaceAll("_", " / "), value] as const);
+  const cards = [...primary, ...other].filter(([, , component]) => Boolean(component));
+  const checkedAt = settings.checked_at ? relativeSyncTime(settings.checked_at) : "";
+  return (
+    <Card>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <SectionHeader eyebrow="Diagnostics" title="API and integration health" />
+        <div className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", healthStatusClass(settings.overall_status === "ok" ? "green" : settings.overall_status === "error" ? "red" : "yellow"))}>
+          {settings.overall_status ?? "unknown"}
+        </div>
+      </div>
+      <div className="mt-1 flex flex-wrap gap-2 text-xs text-zinc-500">
+        <span>Environment: <span className="text-zinc-300">{settings.environment ?? "unknown"}</span></span>
+        {checkedAt ? <span>Checked {checkedAt}</span> : null}
+      </div>
+      <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+        {cards.map(([id, title, component]) => {
+          if (!component) return null;
+          const Icon = diagnosticIcon(component.status);
+          const missing = component.missing_env_vars?.length ? component.missing_env_vars.join(", ") : "";
+          return (
+            <div key={id} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <div className="flex items-start gap-3">
+                <span className={cx("mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border", healthStatusClass(component.status))}>
+                  <Icon className="h-4 w-4" />
+                </span>
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="text-sm font-semibold text-white">{title}</p>
+                    <span className={cx("rounded-full border px-2 py-0.5 text-[10px] font-semibold capitalize", healthStatusClass(component.status))}>
+                      {component.status}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{component.message}</p>
+                  {component.user_action_required && component.user_action_message ? (
+                    <p className="mt-2 text-xs leading-5 text-amber-100">{component.user_action_message}</p>
+                  ) : null}
+                  <div className="mt-2 grid gap-1 text-[11px] leading-5 text-zinc-500">
+                    {missing ? <p>Missing env: <span className="text-zinc-300">{missing}</span></p> : null}
+                    {component.last_successful_sync ? <p>Last sync: <span className="text-zinc-300">{relativeSyncTime(component.last_successful_sync)}</span></p> : null}
+                    {component.latest_record ? <p>Latest record: <span className="text-zinc-300">{component.latest_record}</span></p> : null}
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {settings.required_user_actions?.length ? (
+        <div className="mt-4 rounded-lg border border-amber-300/20 bg-amber-300/10 p-3">
+          <p className="text-sm font-semibold text-amber-100">Required actions</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-xs leading-5 text-amber-50">
+            {settings.required_user_actions.map((action) => <li key={action}>{action}</li>)}
+          </ul>
+        </div>
+      ) : null}
+    </Card>
+  );
 }
 
 function IntegrationHealthGrid({
@@ -5729,6 +5834,7 @@ function SettingsPage({
   onTestOpenAI,
   onSyncHevy,
   onImportStrava,
+  onClearWithings,
 }: Readonly<{
   settings: SettingsData | null;
   forms: FormState;
@@ -5740,20 +5846,25 @@ function SettingsPage({
   onTestOpenAI: () => void;
   onSyncHevy: () => void;
   onImportStrava: () => void;
+  onClearWithings: () => void;
 }>) {
+  const withingsConnected = settings?.statuses.withings === "Connected";
   return (
     <div className="space-y-4">
+      <DiagnosticStatusDashboard settings={settings} />
+      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+      {false ? (
       <Card>
         <SectionHeader eyebrow="Diagnostics" title="Backend connection" />
         <p className="text-sm text-zinc-400">
           Active backend base URL:{" "}
-          <span className="font-mono text-lime-200">{API_BASE || "(none — using Vercel /api proxy)"}</span>
+          <span className="font-mono text-lime-200">{publicApiBaseLabel()}</span>
         </p>
         <p className="mt-1 text-xs text-zinc-500">
           Resolved from NEXT_PUBLIC_API_URL. Requests time out after {Math.round(DEFAULT_API_TIMEOUT_MS / 1000)}s.
         </p>
       </Card>
-      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+      ) : null}
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
         <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
@@ -5801,6 +5912,9 @@ function SettingsPage({
             </button>
             <button onClick={onSyncWithings} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
               Sync Withings Now
+            </button>
+            <button onClick={onClearWithings} disabled={!withingsConnected} className="h-11 rounded-lg border border-red-300/20 px-4 text-sm font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50">
+              Disconnect
             </button>
           </div>
         </Card>
@@ -6065,7 +6179,7 @@ export default function Home() {
       if (result.status === "rejected") {
         const step = steps[index];
         const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        console.error(`[startup] ${step.key} failed — backend ${API_BASE || "(Vercel proxy /api)"} — ${reason}`);
+        console.error(`[startup] ${step.key} failed - backend ${publicApiBaseLabel()} - ${reason}`);
         failures.push(`${step.label}: ${reason}`);
         if (step.required) {
           requiredFailures.push(step.label);
@@ -6889,6 +7003,18 @@ export default function Home() {
             setApiError(error instanceof Error ? error.message : "Withings sync failed.");
           }
         }}
+        onClearWithings={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const updated = await apiSend<SettingsData>("/api/integrations/withings/disconnect", "POST", {});
+            setSettings(updated);
+            setMessage("Withings disconnected. Reconnect from Settings when ready.");
+            await refreshAll();
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to disconnect Withings.");
+          }
+        }}
         onTestOpenAI={async () => {
           setApiError(null);
           setMessage(null);
@@ -6949,7 +7075,7 @@ export default function Home() {
           </nav>
           <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/[0.04] p-4">
             <p className="text-sm font-medium text-white">Backend</p>
-            <p className="mt-1 text-sm text-zinc-400">{API_BASE || "Vercel proxy /api"}</p>
+            <p className="mt-1 text-sm text-zinc-400">{publicApiBaseLabel()}</p>
           </div>
         </aside>
 

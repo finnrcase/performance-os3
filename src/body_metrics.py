@@ -23,9 +23,28 @@ BODY_METRICS_COLUMNS = [
     "fat_mass",
     "muscle_mass",
     "hydration",
+    "bone_mass",
     "bmi",
+    "source",
+    "source_id",
+    "raw_payload",
     "notes",
 ]
+
+# Columns added for Withings body-composition syncing. Older rows lack them and
+# are backfilled on load; manual entries simply leave them blank.
+BODY_METRICS_NUMERIC_COLUMNS = [
+    "bodyweight",
+    "waist",
+    "estimated_body_fat",
+    "lean_mass",
+    "fat_mass",
+    "muscle_mass",
+    "hydration",
+    "bone_mass",
+    "bmi",
+]
+BODY_METRICS_STRING_COLUMNS = ["source", "source_id", "raw_payload", "notes"]
 
 BODY_METRICS_PATH = processed_data_path("body_metrics.csv")
 
@@ -45,11 +64,12 @@ def load_body_metrics() -> pd.DataFrame:
 
     metrics_df = metrics_df[BODY_METRICS_COLUMNS]
 
-    for column in ["bodyweight", "waist", "estimated_body_fat", "lean_mass", "fat_mass", "muscle_mass", "hydration", "bmi"]:
+    for column in BODY_METRICS_NUMERIC_COLUMNS:
         metrics_df[column] = pd.to_numeric(metrics_df[column], errors="coerce")
 
     metrics_df["date"] = metrics_df["date"].astype(str)
-    metrics_df["notes"] = metrics_df["notes"].fillna("").astype(str)
+    for column in BODY_METRICS_STRING_COLUMNS:
+        metrics_df[column] = metrics_df[column].fillna("").astype(str)
 
     return metrics_df
 
@@ -84,7 +104,11 @@ def add_body_metric_entry(
         "fat_mass": np.nan if fat_mass is None else float(fat_mass),
         "muscle_mass": np.nan if muscle_mass is None else float(muscle_mass),
         "hydration": np.nan if hydration is None else float(hydration),
+        "bone_mass": np.nan,
         "bmi": np.nan if bmi is None else float(bmi),
+        "source": "manual",
+        "source_id": "",
+        "raw_payload": "",
         "notes": str(notes).strip(),
     }
 
@@ -93,6 +117,53 @@ def add_body_metric_entry(
     save_body_metrics(metrics_df)
 
     return metrics_df
+
+def upsert_withings_measurements(rows: list[dict]) -> dict:
+    """Insert or update Withings body-composition rows in body_metrics.
+
+    Dedup identity is ``source="withings"`` + ``source_id`` (the Withings
+    measure-group id). Re-syncing the same measurement updates the existing row
+    rather than creating a duplicate. Returns ``{"created", "updated"}`` counts.
+    """
+    metrics_df = load_body_metrics()
+    created = 0
+    updated = 0
+
+    for row in rows:
+        source_id = str(row.get("source_id", "") or "").strip()
+        if not source_id:
+            continue
+        existing = metrics_df.index[
+            (metrics_df["source"].astype(str) == "withings")
+            & (metrics_df["source_id"].astype(str) == source_id)
+        ]
+        entry = {
+            "date": str(row.get("date", "")),
+            "bodyweight": row.get("bodyweight"),
+            "waist": row.get("waist"),
+            "estimated_body_fat": row.get("estimated_body_fat"),
+            "lean_mass": row.get("lean_mass"),
+            "fat_mass": row.get("fat_mass"),
+            "muscle_mass": row.get("muscle_mass"),
+            "hydration": row.get("hydration"),
+            "bone_mass": row.get("bone_mass"),
+            "bmi": row.get("bmi"),
+            "source": "withings",
+            "source_id": source_id,
+            "raw_payload": row.get("raw_payload", "") or "",
+            "notes": str(row.get("notes", "") or ""),
+        }
+        if len(existing):
+            for column, value in entry.items():
+                metrics_df.loc[existing[0], column] = value
+            updated += 1
+        else:
+            metrics_df = pd.concat([metrics_df, pd.DataFrame([entry])], ignore_index=True)
+            created += 1
+
+    metrics_df = metrics_df.sort_values("date", kind="stable").reset_index(drop=True)
+    save_body_metrics(metrics_df)
+    return {"created": created, "updated": updated}
 
 
 class BodyMetricsTracker:

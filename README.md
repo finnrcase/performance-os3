@@ -150,7 +150,7 @@ STRAVA_CLIENT_SECRET=...
 STRAVA_ACCESS_TOKEN=
 STRAVA_REFRESH_TOKEN=
 STRAVA_EXPIRES_AT=
-STRAVA_REDIRECT_URI=https://performance-os-rho.vercel.app/api/strava/callback
+STRAVA_REDIRECT_URI=https://api-production-b3ff.up.railway.app/api/strava/callback
 NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 HEVY_API_KEY=...
 HEVY_WEBHOOK_SECRET=...
@@ -177,14 +177,14 @@ Production ownership rules:
 For local Strava OAuth, set the Strava app callback and backend env to:
 
 ```bash
-STRAVA_REDIRECT_URI=http://localhost:3000/api/strava/callback
+STRAVA_REDIRECT_URI=http://localhost:8001/api/strava/callback
 NEXT_PUBLIC_APP_URL=http://localhost:3000
 ```
 
-The frontend `/api/strava/callback` route forwards the OAuth code to the
-FastAPI backend, where tokens are exchanged and stored server-side. In
-production, the same Vercel callback URL must be entered exactly in the Strava
-developer dashboard.
+The FastAPI backend owns Strava OAuth code exchange, token refresh, and token
+storage. In production, use the Railway callback URL above and add
+`api-production-b3ff.up.railway.app` as the Strava authorization callback domain
+in the Strava developer dashboard.
 
 For Withings OAuth, set the Withings app callback and backend env to:
 
@@ -215,6 +215,35 @@ Initialize the schema:
 ```bash
 python scripts/init_database.py
 ```
+
+### Integration Diagnostics
+
+The backend exposes a secret-safe diagnostic report:
+
+```bash
+curl https://api-production-b3ff.up.railway.app/api/integrations/status
+```
+
+The response includes `overall_status`, `environment`, `backend`, `database`,
+`frontend`, `openai`, `strava`, `hevy`, `withings`, `other_integrations`,
+`required_user_actions`, and `checked_at`. It reports whether required env vars
+exist but never returns API keys, OAuth tokens, refresh tokens, client secrets,
+or database URLs.
+
+Local CLI check:
+
+```bash
+python backend/scripts/check_integrations.py
+```
+
+Deployed backend check:
+
+```bash
+python backend/scripts/check_integrations.py --base-url https://api-production-b3ff.up.railway.app
+```
+
+Use `--no-external-checks` locally to skip live OpenAI and Hevy calls while still
+checking config, database, OAuth token state, storage, and source-code routing.
 
 Move local history into production:
 

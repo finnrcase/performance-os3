@@ -42,20 +42,6 @@ def _withings_redirect_uri(request: Request) -> str:
     configured = os.getenv("WITHINGS_REDIRECT_URI", "").strip() or _read_dotenv_value("WITHINGS_REDIRECT_URI").strip()
     if configured:
         return configured
-    origin = request.headers.get("origin", "").strip().rstrip("/")
-    if not origin:
-        referer = request.headers.get("referer", "").strip()
-        if referer:
-            parsed = urlparse(referer)
-            origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
-    app_url = (
-        os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
-        or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
-        or _read_dotenv_value("NEXT_PUBLIC_APP_URL").strip().rstrip("/")
-        or origin
-    )
-    if app_url:
-        return f"{app_url}/api/withings/callback"
     return str(request.url_for("withings_callback"))
 
 
@@ -131,8 +117,7 @@ def get_withings_auth_url(request: Request) -> dict:
     }
 
 
-@router.api_route("/api/withings/callback", methods=["GET", "POST"], name="withings_callback")
-def withings_callback(
+def _finish_withings_oauth_callback(
     request: Request,
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
@@ -141,7 +126,7 @@ def withings_callback(
     # with no OAuth params. Answer those — and any param-less request — with a
     # plain 200 so the provider check passes; do not redirect or crash.
     if not code and not error:
-        return JSONResponse({"status": "ok"})
+        return JSONResponse({"status": "ok", "provider": "withings", "message": "callback reachable"})
     if error:
         message = f"Withings authorization failed: {error}"
         logger.error("Withings OAuth callback failed: %s", error)
@@ -155,6 +140,45 @@ def withings_callback(
         logger.exception("Withings OAuth callback token exchange failed.")
         return RedirectResponse(_frontend_return_url(request, "error", str(exc)), status_code=303)
     return RedirectResponse(_frontend_return_url(request, "connected", "Withings connected."), status_code=303)
+
+
+@router.get("/api/withings/callback", name="withings_callback")
+def withings_callback_get(
+    request: Request,
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> Response:
+    if not code and not error:
+        return JSONResponse({"status": "ok", "provider": "withings", "message": "callback reachable"})
+    return _finish_withings_oauth_callback(request, code=code, error=error)
+
+
+@router.post("/api/withings/callback")
+def withings_callback_post(
+    request: Request,
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> Response:
+    if not code and not error:
+        return JSONResponse({"status": "ok", "provider": "withings"})
+    return _finish_withings_oauth_callback(request, code=code, error=error)
+
+
+@router.head("/api/withings/callback")
+def withings_callback_head() -> Response:
+    return Response(status_code=200, headers={"Allow": "GET, POST, HEAD, OPTIONS"})
+
+
+@router.options("/api/withings/callback")
+def withings_callback_options() -> Response:
+    return Response(
+        status_code=204,
+        headers={
+            "Allow": "GET, POST, HEAD, OPTIONS",
+            "Access-Control-Allow-Methods": "GET, POST, HEAD, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+        },
+    )
 
 
 @router.get("/api/withings/status")

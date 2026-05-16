@@ -23,10 +23,14 @@ class ProductionConfigTest(unittest.TestCase):
             },
             clear=False,
         ):
-            response = self.client.get("/api/integrations/status")
+            response = self.client.get("/api/integrations/status?external_checks=false")
 
         self.assertEqual(response.status_code, 200)
         payload = response.json()
+        self.assertIn(payload["overall_status"], {"ok", "degraded", "error"})
+        self.assertIn("checked_at", payload)
+        self.assertEqual(payload["openai"]["required_env_vars"], ["OPENAI_API_KEY"])
+        self.assertIn("DATABASE_URL", payload["database"]["required_env_vars"])
         self.assertEqual(payload["services"]["openai"]["status"], "ok")
         self.assertEqual(payload["services"]["hevy"]["status"], "ok")
         self.assertEqual(payload["services"]["strava"]["status"], "ok")

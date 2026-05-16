@@ -100,6 +100,20 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertIn("https://account.withings.com/oauth2_user/authorize2", data["auth_url"])
         self.assertIn("client_id=client-id", data["auth_url"])
 
+    def test_callback_validation_methods_accept_empty_provider_checks(self):
+        get_response = self.client.get("/api/withings/callback")
+        post_response = self.client.post("/api/withings/callback")
+        head_response = self.client.head("/api/withings/callback")
+        options_response = self.client.options("/api/withings/callback")
+
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.json()["provider"], "withings")
+        self.assertIn("callback reachable", get_response.json()["message"])
+        self.assertEqual(post_response.status_code, 200)
+        self.assertEqual(post_response.json(), {"status": "ok", "provider": "withings"})
+        self.assertEqual(head_response.status_code, 200)
+        self.assertIn(options_response.status_code, {200, 204})
+
     def test_sync_route_returns_error_when_not_connected(self):
         with patch(
             "backend.routes.withings.sync_withings_measurements",

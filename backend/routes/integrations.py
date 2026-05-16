@@ -25,6 +25,7 @@ from src.integrations.withings_client import (
     get_withings_connection_status,
     load_withings_sync_state,
 )
+from src.integration_health import build_integration_status_report
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
 from src.storage import production_storage_warnings, use_database
@@ -112,20 +113,6 @@ def _strava_redirect_uri(request: Request) -> str:
     configured = os.getenv("STRAVA_REDIRECT_URI", "").strip() or _read_dotenv_value("STRAVA_REDIRECT_URI").strip()
     if configured:
         return configured
-    origin = request.headers.get("origin", "").strip().rstrip("/")
-    if not origin:
-        referer = request.headers.get("referer", "").strip()
-        if referer:
-            parsed = urlparse(referer)
-            origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
-    app_url = (
-        os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
-        or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
-        or _read_dotenv_value("NEXT_PUBLIC_APP_URL").strip().rstrip("/")
-        or origin
-    )
-    if app_url:
-        return f"{app_url}/api/strava/callback"
     return str(request.url_for("strava_callback"))
 
 
@@ -465,10 +452,12 @@ def update_settings(payload: SettingsPayload) -> dict:
 
 
 @router.get("/api/integrations/status")
-def get_integration_statuses() -> dict:
-    """Return local integration configuration statuses."""
+def get_integration_statuses(external_checks: bool = Query(default=True)) -> dict:
+    """Return a secret-safe integration diagnostics report plus legacy settings data."""
     settings = load_settings()
-    return _settings_response(settings)
+    response = _settings_response(settings)
+    response.update(build_integration_status_report(settings=settings, run_external_checks=external_checks))
+    return response
 
 
 @router.get("/api/integrations/strava/auth-url")
