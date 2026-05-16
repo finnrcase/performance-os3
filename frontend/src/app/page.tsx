@@ -1054,11 +1054,19 @@ async function fetchWithTimeout(
 }
 
 async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetchWithTimeout(apiUrl(path), { cache: "no-store" });
+  const url = apiUrl(path);
+  const response = await fetchWithTimeout(url, { cache: "no-store" });
   if (!response.ok) {
+    console.warn(`[apiGet] ${url} -> HTTP ${response.status}`);
     throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
   }
-  return response.json() as Promise<T>;
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    console.warn(`[apiGet] ${url} -> HTTP ${response.status} but body is not valid JSON (${text.length} chars)`);
+    throw new Error(`${path} returned invalid JSON (HTTP ${response.status})`);
+  }
 }
 
 async function apiErrorMessage(response: Response) {
@@ -5295,6 +5303,7 @@ function AquariumEasterEgg() {
             </span>
           </span>
           {yellowSchool ? <YellowFishSchool key={yellowSchool.id} instance={yellowSchool} /> : null}
+          {yellowSchool ? <YellowFishSchool key={yellowSchool.id} instance={yellowSchool} /> : null}
           {specialFish ? (
             <SpecialGirlfriendFish
               key={specialFish.id}
@@ -5423,6 +5432,18 @@ function AquariumEasterEgg() {
             .school-1 { left: 0; top: 4px; }
             .school-2 { left: 24px; top: 0; opacity: 0.75; transform: scale(0.82); }
             .school-3 { left: 45px; top: 12px; opacity: 0.68; transform: scale(0.7); }
+            /* Ambient yellow-fish school — each fish carries its own --swim-speed,
+               --swim-delay, top and size inline for a loose, organic formation. */
+            .school-fish {
+              --fish-body: #fde047;
+              --fish-fin: #facc15;
+              --fish-depth: 2;
+              filter: drop-shadow(0 0 7px rgba(250, 204, 21, 0.20));
+            }
+            .school-fish.school-fish-cross {
+              animation-iteration-count: 1;
+              animation-fill-mode: forwards;
+            }
             .fish-tropical .stripe-one { stroke: rgba(15, 23, 42, 0.62); }
             .fish-tropical .stripe-two { stroke: rgba(15, 23, 42, 0.42); }
             .fish-sleek .stripe {
@@ -5943,9 +5964,13 @@ export default function Home() {
         },
       },
       {
+        // Settings/integrations status is NOT core dashboard data — it only
+        // powers the Integrations page. It can also be slow (the backend does
+        // live OAuth token refreshes), so a failure here is a soft warning,
+        // never the red "core data failed / backend offline" banner.
         key: "settings",
         label: "Settings",
-        required: true,
+        required: false,
         run: async () => setSettings(await apiGet<SettingsData>("/api/integrations/status")),
       },
       {
@@ -6051,8 +6076,12 @@ export default function Home() {
       let hint: string;
       if (joined.includes("401") || joined.includes("403") || joined.includes("unauthor") || joined.includes("forbidden")) {
         hint = "Your session may have expired — please log in again.";
+      } else if (joined.includes("invalid json") || joined.includes("unexpected token")) {
+        hint = "The backend responded but the data could not be read (invalid response). Click Retry.";
       } else if (joined.includes("timed out") || joined.includes("timeout") || joined.includes("abort")) {
         hint = "The backend is taking too long to respond (it may be waking up). Wait a moment and click Retry.";
+      } else if (joined.includes("failed to fetch") || joined.includes("networkerror") || joined.includes("load failed")) {
+        hint = "Could not reach the backend (network or CORS error).";
       } else {
         hint = "The backend may be offline or unreachable.";
       }

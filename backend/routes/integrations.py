@@ -13,7 +13,6 @@ from src.body_metrics import load_body_metrics
 from src.integrations.hevy_client import load_hevy_sync_state
 from src.integrations.strava_client import (
     StravaIntegrationError,
-    StravaReconnectRequired,
     build_strava_auth_url,
     clear_strava_connection,
     exchange_strava_code,
@@ -23,10 +22,8 @@ from src.integrations.strava_client import (
     refresh_strava_token_if_needed,
 )
 from src.integrations.withings_client import (
-    WithingsIntegrationError,
     get_withings_connection_status,
     load_withings_sync_state,
-    refresh_withings_token_if_needed,
 )
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
@@ -200,34 +197,21 @@ def _integration_components(settings: dict) -> dict:
     integrations = settings.get("integrations", {})
     strava_client_configured = bool(integrations.get("strava_client_id") and integrations.get("strava_client_secret")) or (_configured_from_env("STRAVA_CLIENT_ID") and _configured_from_env("STRAVA_CLIENT_SECRET"))
     if strava_status == "Connected":
-        try:
-            refresh_strava_token_if_needed()
-            strava_component = _safe_component(
-                configured=True,
-                status="ok",
-                message="Strava OAuth tokens are available to the backend.",
-                last_synced_at=strava_debug["last_synced_at"],
-                latest_record=strava_debug["latest_activity_date"],
-                reconnect_required=False,
-            )
-        except StravaReconnectRequired as exc:
-            strava_component = _safe_component(
-                configured=strava_client_configured,
-                status="reconnect_required",
-                message=str(exc),
-                last_synced_at=strava_debug["last_synced_at"],
-                latest_record=strava_debug["latest_activity_date"],
-                reconnect_required=True,
-            )
-        except StravaIntegrationError as exc:
-            strava_component = _safe_component(
-                configured=strava_client_configured,
-                status="error",
-                message=str(exc),
-                last_synced_at=strava_debug["last_synced_at"],
-                latest_record=strava_debug["latest_activity_date"],
-                reconnect_required=True,
-            )
+        # Status only — report the stored token state. Tokens are refreshed
+        # lazily when the user actually syncs, never on a status read.
+        strava_token_expired = str(strava_debug.get("token_status", "") or "") == "expired"
+        strava_component = _safe_component(
+            configured=True,
+            status="reconnect_required" if strava_token_expired else "ok",
+            message=(
+                "Strava access token has expired. It refreshes automatically on the next Strava sync, or reconnect now."
+                if strava_token_expired
+                else "Strava is connected. Tokens refresh automatically when you sync."
+            ),
+            last_synced_at=strava_debug["last_synced_at"],
+            latest_record=strava_debug["latest_activity_date"],
+            reconnect_required=strava_token_expired,
+        )
     elif strava_status in {"Ready to connect", "Disconnected"}:
         strava_component = _safe_component(
             configured=strava_client_configured,
@@ -259,25 +243,16 @@ def _integration_components(settings: dict) -> dict:
         or (_configured_from_env("WITHINGS_CLIENT_ID") and _configured_from_env("WITHINGS_CLIENT_SECRET"))
     )
     if withings_status == "Connected":
-        try:
-            refresh_withings_token_if_needed()
-            withings_component = _safe_component(
-                configured=True,
-                status="ok" if not withings_error else "error",
-                message=withings_error or "Withings OAuth tokens are available to the backend.",
-                last_synced_at=withings_last_sync,
-                latest_record=withings_latest,
-                reconnect_required=False,
-            )
-        except WithingsIntegrationError as exc:
-            withings_component = _safe_component(
-                configured=withings_client_configured,
-                status="reconnect_required",
-                message=str(exc),
-                last_synced_at=withings_last_sync,
-                latest_record=withings_latest,
-                reconnect_required=True,
-            )
+        # Status only — no external token refresh on a status read. The
+        # Withings token is refreshed lazily inside the sync endpoint.
+        withings_component = _safe_component(
+            configured=True,
+            status="error" if withings_error else "ok",
+            message=withings_error or "Withings is connected. Tokens refresh automatically when you sync.",
+            last_synced_at=withings_last_sync,
+            latest_record=withings_latest,
+            reconnect_required=False,
+        )
     elif withings_status == "Ready to connect":
         withings_component = _safe_component(
             configured=withings_client_configured,
