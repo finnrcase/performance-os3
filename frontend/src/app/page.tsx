@@ -1030,7 +1030,7 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
-const DEFAULT_API_TIMEOUT_MS = 15_000;
+const DEFAULT_API_TIMEOUT_MS = 30_000;
 const UPLOAD_API_TIMEOUT_MS = 60_000;
 
 async function fetchWithTimeout(
@@ -5597,6 +5597,16 @@ function SettingsPage({
 }>) {
   return (
     <div className="space-y-4">
+      <Card>
+        <SectionHeader eyebrow="Diagnostics" title="Backend connection" />
+        <p className="text-sm text-zinc-400">
+          Active backend base URL:{" "}
+          <span className="font-mono text-lime-200">{API_BASE || "(none — using Vercel /api proxy)"}</span>
+        </p>
+        <p className="mt-1 text-xs text-zinc-500">
+          Resolved from NEXT_PUBLIC_API_URL. Requests time out after {Math.round(DEFAULT_API_TIMEOUT_MS / 1000)}s.
+        </p>
+      </Card>
       {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
@@ -5900,21 +5910,32 @@ export default function Home() {
 
     const failures: string[] = [];
     const requiredFailures: string[] = [];
+    const requiredReasons: string[] = [];
     results.forEach((result, index) => {
       if (result.status === "rejected") {
         const step = steps[index];
         const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        console.error(`[startup] ${step.key} failed: ${reason}`);
+        console.error(`[startup] ${step.key} failed — backend ${API_BASE || "(Vercel proxy /api)"} — ${reason}`);
         failures.push(`${step.label}: ${reason}`);
         if (step.required) {
           requiredFailures.push(step.label);
+          requiredReasons.push(reason.toLowerCase());
         }
       }
     });
 
     setLoadFailures(failures);
     if (requiredFailures.length > 0) {
-      setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. The backend may be offline.`);
+      const joined = requiredReasons.join(" | ");
+      let hint: string;
+      if (joined.includes("401") || joined.includes("403") || joined.includes("unauthor") || joined.includes("forbidden")) {
+        hint = "Your session may have expired — please log in again.";
+      } else if (joined.includes("timed out") || joined.includes("timeout") || joined.includes("abort")) {
+        hint = "The backend is taking too long to respond (it may be waking up). Wait a moment and click Retry.";
+      } else {
+        hint = "The backend may be offline or unreachable.";
+      }
+      setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. ${hint}`);
     } else if (failures.length > 0) {
       setApiError(null);
     }

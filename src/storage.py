@@ -75,9 +75,18 @@ def _clean_record(record: dict[str, Any]) -> dict[str, Any]:
     return {key: _json_default(value) for key, value in record.items()}
 
 
-def ensure_database_schema() -> None:
-    """Create durable JSONB-backed tables for every app dataset."""
+# Set once the schema has been created in this process. Without this guard,
+# every load_/save_ call would re-run 36 DDL statements against Postgres,
+# adding tens of seconds of latency to data-heavy routes like /api/dashboard.
+_schema_ready = False
+
+
+def ensure_database_schema(force: bool = False) -> None:
+    """Create durable JSONB-backed tables for every app dataset (once per process)."""
+    global _schema_ready
     if not use_database():
+        return
+    if _schema_ready and not force:
         return
 
     with _connect() as conn:
@@ -96,6 +105,7 @@ def ensure_database_schema() -> None:
                 )
                 cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_row_order_idx ON {table} (row_order)")
         conn.commit()
+    _schema_ready = True
 
 
 def _table_for_dataframe(dataset: str) -> str:
@@ -146,8 +156,11 @@ def save_dataframe(dataset: str, path: Path, df: pd.DataFrame, columns: list[str
         with _connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(f"TRUNCATE TABLE {table}")
-                for index, record in enumerate(records):
-                    cur.execute(f"INSERT INTO {table} (row_order, data) VALUES (%s, %s::jsonb)", (index, json.dumps(record)))
+                if records:
+                    cur.executemany(
+                        f"INSERT INTO {table} (row_order, data) VALUES (%s, %s::jsonb)",
+                        [(index, json.dumps(record)) for index, record in enumerate(records)],
+                    )
             conn.commit()
         return
 
