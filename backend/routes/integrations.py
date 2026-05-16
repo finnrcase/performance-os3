@@ -1,6 +1,5 @@
 import os
 import logging
-import time
 from urllib.parse import urlencode, urlparse
 
 import pandas as pd
@@ -9,19 +8,23 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
 from src.config import INTEGRATION_FIELDS, fitbit_google_health_status, integration_status, load_settings, mask_secret, save_settings
+from src.ai.food_parser import get_openai_key_status
 from src.body_metrics import load_body_metrics
 from src.integrations.hevy_client import load_hevy_sync_state
 from src.integrations.strava_client import (
     StravaIntegrationError,
+    StravaReconnectRequired,
     build_strava_auth_url,
     clear_strava_connection,
     exchange_strava_code,
     get_strava_connection_status,
+    get_strava_safe_token_metadata,
     load_strava_sync_state,
     refresh_strava_token_if_needed,
 )
 from src.integrations.withings_client import (
     WithingsIntegrationError,
+<<<<<<< HEAD
     WithingsReconnectRequired,
     build_withings_auth_url,
     clear_withings_connection,
@@ -30,6 +33,11 @@ from src.integrations.withings_client import (
     load_withings_sync_state,
     sync_withings_measurements,
     withings_redirect_uri,
+=======
+    get_withings_connection_status,
+    load_withings_sync_state,
+    refresh_withings_token_if_needed,
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
 )
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
@@ -153,19 +161,14 @@ def _frontend_return_url(request: Request, status: str, message: str = "", key: 
 
 
 def _strava_debug_status(settings: dict, latest_strava: str) -> dict:
-    tokens = settings.get("metadata", {}).get("strava_tokens", {})
+    token_metadata = get_strava_safe_token_metadata()
     sync_state = load_strava_sync_state()
-    expires_at = int(tokens.get("expires_at") or 0)
-    now = int(time.time())
-    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
-    token_expired = bool(connected and expires_at <= now)
-    token_expiring = bool(connected and not token_expired and expires_at <= now + 300)
     return {
-        "connected": connected,
-        "athlete_id": _masked_athlete_id(str(tokens.get("athlete_id", "") or "")),
-        "token_expires_at": expires_at,
-        "token_status": "expired" if token_expired else "refresh soon" if token_expiring else "valid" if connected else "missing",
-        "scopes": str(tokens.get("scopes", "") or ""),
+        "connected": token_metadata["connected"],
+        "athlete_id": _masked_athlete_id(str(token_metadata.get("athlete_id", "") or "")),
+        "token_expires_at": token_metadata["token_expires_at"],
+        "token_status": token_metadata["token_status"],
+        "scopes": str(token_metadata.get("scopes", "") or ""),
         "last_synced_at": sync_state.get("last_synced_at", ""),
         "latest_activity_date": sync_state.get("latest_activity_date", "") or latest_strava,
         "last_imported_count": sync_state.get("last_imported_count", 0),
@@ -175,6 +178,7 @@ def _strava_debug_status(settings: dict, latest_strava: str) -> dict:
     }
 
 
+<<<<<<< HEAD
 def _withings_redirect_uri(request: Request) -> str:
     """Resolve the Withings OAuth redirect URI (callback hits this backend)."""
     fallback = str(request.url_for("withings_callback"))
@@ -216,6 +220,162 @@ def _latest_withings_measurement(body_df: pd.DataFrame) -> dict:
         "date": str(latest.get("date", "") or ""),
         "weight": latest.get("bodyweight"),
         "body_fat": latest.get("estimated_body_fat"),
+=======
+def _safe_component(
+    *,
+    configured: bool,
+    status: str,
+    message: str,
+    last_synced_at: str = "",
+    latest_record: str = "",
+    reconnect_required: bool = False,
+) -> dict:
+    return {
+        "configured": bool(configured),
+        "status": status,
+        "message": message,
+        "last_synced_at": last_synced_at,
+        "latest_record": latest_record,
+        "reconnect_required": bool(reconnect_required),
+    }
+
+
+def _integration_components(settings: dict) -> dict:
+    training_df = load_training_log()
+    latest_strava = _latest_date(training_df, "strava")
+    latest_hevy = _latest_date(training_df, "hevy")
+    hevy_state = load_hevy_sync_state()
+    hevy_error = str(hevy_state.get("last_error", "") or "")
+    hevy_last_sync = str(hevy_state.get("last_sync_at", "") or "")
+    hevy_configured = bool(settings.get("integrations", {}).get("hevy_api_key")) or _configured_from_env("HEVY_API_KEY")
+
+    strava_status = get_strava_connection_status()
+    strava_debug = _strava_debug_status(settings, latest_strava)
+    integrations = settings.get("integrations", {})
+    strava_client_configured = bool(integrations.get("strava_client_id") and integrations.get("strava_client_secret")) or (_configured_from_env("STRAVA_CLIENT_ID") and _configured_from_env("STRAVA_CLIENT_SECRET"))
+    if strava_status == "Connected":
+        try:
+            refresh_strava_token_if_needed()
+            strava_component = _safe_component(
+                configured=True,
+                status="ok",
+                message="Strava OAuth tokens are available to the backend.",
+                last_synced_at=strava_debug["last_synced_at"],
+                latest_record=strava_debug["latest_activity_date"],
+                reconnect_required=False,
+            )
+        except StravaReconnectRequired as exc:
+            strava_component = _safe_component(
+                configured=strava_client_configured,
+                status="reconnect_required",
+                message=str(exc),
+                last_synced_at=strava_debug["last_synced_at"],
+                latest_record=strava_debug["latest_activity_date"],
+                reconnect_required=True,
+            )
+        except StravaIntegrationError as exc:
+            strava_component = _safe_component(
+                configured=strava_client_configured,
+                status="error",
+                message=str(exc),
+                last_synced_at=strava_debug["last_synced_at"],
+                latest_record=strava_debug["latest_activity_date"],
+                reconnect_required=True,
+            )
+    elif strava_status in {"Ready to connect", "Disconnected"}:
+        strava_component = _safe_component(
+            configured=strava_client_configured,
+            status="reconnect_required",
+            message="Strava client credentials are configured, but OAuth tokens are missing or invalid. Reconnect Strava.",
+            last_synced_at=strava_debug["last_synced_at"],
+            latest_record=strava_debug["latest_activity_date"],
+            reconnect_required=True,
+        )
+    else:
+        strava_component = _safe_component(
+            configured=False,
+            status="unconfigured",
+            message="Set STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET on the Railway backend.",
+            latest_record=latest_strava,
+            reconnect_required=False,
+        )
+
+    database_warnings = production_storage_warnings()
+    body_df = load_body_metrics()
+    latest_weight = _latest_date(body_df)
+    withings_status = get_withings_connection_status()
+    withings_sync = load_withings_sync_state()
+    withings_error = str(withings_sync.get("last_error", "") or "")
+    withings_latest = str(withings_sync.get("latest_measure_date", "") or "") or latest_weight
+    withings_last_sync = str(withings_sync.get("last_synced_at", "") or "")
+    withings_client_configured = (
+        bool(integrations.get("withings_client_id") and integrations.get("withings_client_secret"))
+        or (_configured_from_env("WITHINGS_CLIENT_ID") and _configured_from_env("WITHINGS_CLIENT_SECRET"))
+    )
+    if withings_status == "Connected":
+        try:
+            refresh_withings_token_if_needed()
+            withings_component = _safe_component(
+                configured=True,
+                status="ok" if not withings_error else "error",
+                message=withings_error or "Withings OAuth tokens are available to the backend.",
+                last_synced_at=withings_last_sync,
+                latest_record=withings_latest,
+                reconnect_required=False,
+            )
+        except WithingsIntegrationError as exc:
+            withings_component = _safe_component(
+                configured=withings_client_configured,
+                status="reconnect_required",
+                message=str(exc),
+                last_synced_at=withings_last_sync,
+                latest_record=withings_latest,
+                reconnect_required=True,
+            )
+    elif withings_status == "Ready to connect":
+        withings_component = _safe_component(
+            configured=withings_client_configured,
+            status="reconnect_required",
+            message="Withings client credentials are configured, but OAuth tokens are missing. Connect Withings.",
+            last_synced_at=withings_last_sync,
+            latest_record=withings_latest,
+            reconnect_required=True,
+        )
+    else:
+        withings_component = _safe_component(
+            configured=False,
+            status="unconfigured",
+            message="Set WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, and WITHINGS_REDIRECT_URI on the Railway backend.",
+            latest_record=withings_latest,
+            reconnect_required=False,
+        )
+    return {
+        "backend": _safe_component(
+            configured=True,
+            status="ok",
+            message="FastAPI backend is responding.",
+        ),
+        "database": _safe_component(
+            configured=use_database(),
+            status="ok" if use_database() else "error" if database_warnings else "unconfigured",
+            message="DATABASE_URL is configured and Postgres storage is active." if use_database() else (database_warnings[0] if database_warnings else "DATABASE_URL is not configured; using local file storage."),
+        ),
+        "openai": _safe_component(
+            configured=get_openai_key_status(),
+            status="ok" if get_openai_key_status() else "unconfigured",
+            message="OPENAI_API_KEY is configured on the backend." if get_openai_key_status() else "Set OPENAI_API_KEY on the Railway backend.",
+        ),
+        "strava": strava_component,
+        "hevy": _safe_component(
+            configured=hevy_configured,
+            status="error" if hevy_error else "ok" if hevy_configured else "unconfigured",
+            message=hevy_error or ("HEVY_API_KEY is configured on the backend." if hevy_configured else "Set HEVY_API_KEY on the Railway backend."),
+            last_synced_at=hevy_last_sync,
+            latest_record=latest_hevy,
+            reconnect_required=False,
+        ),
+        "withings": withings_component,
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
     }
 
 
@@ -239,6 +399,11 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     latest_food = _latest_date(nutrition_df)
     latest_recovery = _latest_date(recovery_df) or _latest_date(sleep_df)
     storage_warnings = production_storage_warnings()
+    withings_status = get_withings_connection_status()
+    withings_sync = load_withings_sync_state()
+    withings_error = str(withings_sync.get("last_error", "") or "")
+    withings_latest = str(withings_sync.get("latest_measure_date", "") or "")
+    withings_last_sync = str(withings_sync.get("last_synced_at", "") or "")
 
     cards = [
         {
@@ -277,6 +442,7 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
         {
             "id": "withings",
             "title": "Withings",
+<<<<<<< HEAD
             "status": (
                 "error" if withings_debug["last_error"]
                 else "connected" if withings_status == "Connected" and withings_debug["latest_measurement_date"]
@@ -294,6 +460,20 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
             "last_synced_at": withings_debug["last_synced_at"],
             "action": "withings_sync" if withings_status == "Connected" else "",
             "metadata": withings_debug,
+=======
+            "status": "error" if withings_error else "connected" if withings_status == "Connected" and withings_latest else "warning",
+            "label": withings_status,
+            "detail": withings_error or (_freshness_detail("Withings scale", withings_latest) if withings_latest else "Connect Withings, then sync scale measurements into body metrics."),
+            "last_synced_at": withings_last_sync or withings_latest,
+            "action": "withings_sync" if withings_status == "Connected" else "withings_connect" if withings_status == "Ready to connect" else "",
+            "metadata": {
+                "connected": withings_status == "Connected",
+                "last_imported_count": withings_sync.get("last_imported_count", 0),
+                "last_fetched_count": withings_sync.get("last_fetched_groups", 0),
+                "latest_activity_date": withings_latest,
+                "last_error": withings_error,
+            },
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         },
         {
             "id": "openai",
@@ -327,9 +507,10 @@ def _settings_response(settings: dict) -> dict:
         key: mask_secret(integrations.get(key, ""))
         for key in INTEGRATION_FIELDS
     }
-    openai_configured = bool(integrations.get("openai_api_key")) or _configured_from_env("OPENAI_API_KEY")
+    openai_configured = get_openai_key_status()
+    hevy_configured = bool(integrations.get("hevy_api_key")) or _configured_from_env("HEVY_API_KEY")
     statuses = {
-        "hevy_api_key": integration_status("hevy_api_key", settings),
+        "hevy_api_key": "Configured" if hevy_configured else integration_status("hevy_api_key", settings),
         "strava": get_strava_connection_status(),
         "strava_client_id": "Configured" if _configured_from_env("STRAVA_CLIENT_ID") else integration_status("strava_client_id", settings),
         "strava_client_secret": "Configured" if _configured_from_env("STRAVA_CLIENT_SECRET") else integration_status("strava_client_secret", settings),
@@ -337,14 +518,25 @@ def _settings_response(settings: dict) -> dict:
         "fitbit_client_id": integration_status("fitbit_client_id", settings),
         "fitbit_client_secret": integration_status("fitbit_client_secret", settings),
         "fitbit_google_health": fitbit_google_health_status(settings),
+<<<<<<< HEAD
         "withings": get_withings_connection_status(),
         "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
         "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
         "withings_redirect_uri": "Configured" if _configured_from_env("WITHINGS_REDIRECT_URI") else "Auto from backend URL",
+=======
+        "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
+        "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
+        "withings": get_withings_connection_status(),
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         "openai_api_key": "Configured" if openai_configured else "Not configured",
         "apple_health_export_file": integration_status("apple_health_export_file", settings),
     }
-    return {"integrations": masked, "statuses": statuses, "health": _integration_health(settings, statuses)}
+    return {
+        "integrations": masked,
+        "statuses": statuses,
+        "health": _integration_health(settings, statuses),
+        "services": _integration_components(settings),
+    }
 
 
 @router.get("/api/settings")

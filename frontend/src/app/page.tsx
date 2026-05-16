@@ -39,12 +39,15 @@ import {
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_URL ??
-  process.env.NEXT_PUBLIC_API_BASE_URL ??
+  (process.env.NEXT_PUBLIC_API_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "")
+    .replace(/\/$/, "") ||
   (process.env.NODE_ENV === "development" ? "http://localhost:8001" : "");
 
 function apiUrl(path: string) {
-  return API_BASE ? `${API_BASE}${path}` : path;
+  if (!API_BASE) {
+    throw new Error("NEXT_PUBLIC_API_URL is required in production so the frontend can reach the FastAPI backend.");
+  }
+  return `${API_BASE}${path}`;
 }
 let hevyAutoSyncStarted = false;
 
@@ -237,6 +240,11 @@ type BodyMetricEntry = {
   bodyweight: number;
   waist: number | null;
   estimated_body_fat: number | null;
+  lean_mass?: number | null;
+  fat_mass?: number | null;
+  muscle_mass?: number | null;
+  hydration?: number | null;
+  bmi?: number | null;
   notes: string;
 };
 
@@ -699,6 +707,15 @@ type HevySyncResult = {
   last_synced_at: string;
 };
 
+type WithingsSyncResult = {
+  status: string;
+  message?: string;
+  imported_measurements: number;
+  fetched_groups: number;
+  latest_measure_date: string;
+  last_synced_at: string;
+};
+
 type DashboardData = {
   date: string;
   food: {
@@ -788,6 +805,7 @@ type SettingsData = {
   integrations: Record<string, string>;
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
+  services?: Record<string, { configured: boolean; status: string; message: string; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean }>;
 };
 
 type FormState = {
@@ -1038,9 +1056,24 @@ async function fetchWithTimeout(
 async function apiGet<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(apiUrl(path), { cache: "no-store" });
   if (!response.ok) {
-    throw new Error(`${path} returned ${response.status}`);
+    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
   }
   return response.json() as Promise<T>;
+}
+
+async function apiErrorMessage(response: Response) {
+  const text = await response.text();
+  if (!text) return response.statusText || "Request failed.";
+  try {
+    const parsed = JSON.parse(text);
+    const detail = parsed?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail?.message) return String(detail.message);
+    if (parsed?.message) return String(parsed.message);
+  } catch {
+    return text;
+  }
+  return text;
 }
 
 async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
@@ -1051,8 +1084,7 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${path} returned ${response.status}: ${text}`);
+    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
   }
   return response.json() as Promise<T>;
 }
@@ -1060,8 +1092,7 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
 async function apiDelete<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(apiUrl(path), { method: "DELETE", credentials: "include" });
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${path} returned ${response.status}: ${text}`);
+    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
   }
   return response.json() as Promise<T>;
 }
@@ -5474,16 +5505,28 @@ function IntegrationHealthGrid({
   cards,
   onSyncHevy,
   onImportStrava,
+<<<<<<< HEAD
+=======
+  onConnectWithings,
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
   onSyncWithings,
 }: Readonly<{
   cards: SettingsHealthCard[];
   onSyncHevy: () => void;
   onImportStrava: () => void;
+<<<<<<< HEAD
+=======
+  onConnectWithings: () => void;
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
   onSyncWithings: () => void;
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
     if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
     if (card.action === "strava_import") return { label: "Sync", onClick: onImportStrava };
+<<<<<<< HEAD
+=======
+    if (card.action === "withings_connect") return { label: "Connect", onClick: onConnectWithings };
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
     if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
     return null;
   };
@@ -5544,6 +5587,8 @@ function SettingsPage({
   setForms,
   onSubmit,
   onConnectStrava,
+  onConnectWithings,
+  onSyncWithings,
   onTestOpenAI,
   onSyncHevy,
   onImportStrava,
@@ -5556,6 +5601,8 @@ function SettingsPage({
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onSubmit: (event: FormEvent) => void;
   onConnectStrava: () => void;
+  onConnectWithings: () => void;
+  onSyncWithings: () => void;
   onTestOpenAI: () => void;
   onSyncHevy: () => void;
   onImportStrava: () => void;
@@ -5567,7 +5614,11 @@ function SettingsPage({
   const withingsConnected = withingsStatus === "Connected" || withingsStatus === "Disconnected";
   return (
     <div className="space-y-4">
+<<<<<<< HEAD
       {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onSyncWithings={onSyncWithings} /> : null}
+=======
+      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
         <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
@@ -5605,6 +5656,18 @@ function SettingsPage({
           <SectionHeader eyebrow="Fitbit / Google Health" title="Wearable recovery" />
           <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
           <p className="mt-3 text-xs leading-5 text-zinc-500">Prepared for sleep, HRV, resting HR, and recovery trend ingestion. Full OAuth sync is not implemented yet.</p>
+        </Card>
+        <Card>
+          <SectionHeader eyebrow="Withings" title="Scale measurements" />
+          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.withings ?? "Not configured"}</span></p>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button onClick={onConnectWithings} className="h-11 rounded-lg bg-sky-300 px-4 text-sm font-semibold text-zinc-950">
+              {settings?.statuses.withings === "Connected" ? "Reconnect Withings" : "Connect Withings"}
+            </button>
+            <button onClick={onSyncWithings} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+              Sync Withings Now
+            </button>
+          </div>
         </Card>
         <Card>
           <SectionHeader eyebrow="Apple Health" title="Local upload only" />
@@ -5773,7 +5836,7 @@ export default function Home() {
         key: "settings",
         label: "Settings",
         required: true,
-        run: async () => setSettings(await apiGet<SettingsData>("/api/settings")),
+        run: async () => setSettings(await apiGet<SettingsData>("/api/integrations/status")),
       },
       {
         key: "nutrition_logs",
@@ -6643,6 +6706,33 @@ export default function Home() {
             window.location.href = result.auth_url;
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "Unable to connect Strava.");
+          }
+        }}
+        onConnectWithings={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/integrations/withings/auth-url");
+            if (result.status !== "ok" || !result.auth_url) {
+              throw new Error(result.message ?? "Unable to generate Withings authorization URL.");
+            }
+            window.location.href = result.auth_url;
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to connect Withings.");
+          }
+        }}
+        onSyncWithings={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiSend<WithingsSyncResult>("/api/withings/sync", "POST", {});
+            if (result.status === "error") {
+              throw new Error(result.message ?? "Withings sync failed.");
+            }
+            setMessage(`Withings sync complete: ${result.imported_measurements} scale measurement(s) imported.`);
+            await refreshAll();
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Withings sync failed.");
           }
         }}
         onTestOpenAI={async () => {

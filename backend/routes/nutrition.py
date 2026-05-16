@@ -297,6 +297,14 @@ def get_daily_nutrition_history(days: int = 30) -> dict:
 def parse_food(payload: FoodParseRequest) -> dict:
     """Parse natural-language food text into editable food entries."""
     parsed = parse_food_text(payload.text)
+    if parsed.get("error_code") == "missing_api_key":
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "openai_not_configured",
+                "message": "OPENAI_API_KEY is not configured on the backend. Set it in Railway and redeploy.",
+            },
+        )
     return {
         "foods": parsed.get("foods", []),
         "total": parsed.get("total", {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}),

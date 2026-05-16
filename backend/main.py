@@ -16,7 +16,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
-from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training
+from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training, withings
 from backend.routes.utils import dataframe_records
 from src.analytics.food_history import (
     build_daily_nutrition_summary,
@@ -93,6 +93,13 @@ def health() -> dict:
         "status": "ok" if not warnings else "warning",
         "service": "performance-os-api",
         "storage": "postgres" if use_database() else "local_files",
+        "revision": (
+            os.getenv("RAILWAY_GIT_COMMIT_SHA", "").strip()
+            or os.getenv("VERCEL_GIT_COMMIT_SHA", "").strip()
+            or os.getenv("GIT_COMMIT_SHA", "").strip()
+            or os.getenv("COMMIT_SHA", "").strip()
+            or os.getenv("SOURCE_VERSION", "").strip()
+        ),
         "warnings": warnings,
     }
 
@@ -645,6 +652,7 @@ app.include_router(personal_records.router)
 app.include_router(recovery.router)
 app.include_router(body_metrics.router)
 app.include_router(integrations.router)
+app.include_router(withings.router)
 app.include_router(goals.router)
 app.include_router(data_export.router)
 app.include_router(data_export.import_router)

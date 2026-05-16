@@ -22,11 +22,16 @@ BODY_METRICS_COLUMNS = [
     "lean_mass",
     "fat_mass",
     "muscle_mass",
+<<<<<<< HEAD
     "bone_mass",
     "bmi",
     "source",
     "source_id",
     "raw_payload",
+=======
+    "hydration",
+    "bmi",
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
     "notes",
 ]
 
@@ -62,7 +67,11 @@ def load_body_metrics() -> pd.DataFrame:
 
     metrics_df = metrics_df[BODY_METRICS_COLUMNS]
 
+<<<<<<< HEAD
     for column in BODY_METRICS_NUMERIC_COLUMNS:
+=======
+    for column in ["bodyweight", "waist", "estimated_body_fat", "lean_mass", "fat_mass", "muscle_mass", "hydration", "bmi"]:
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         metrics_df[column] = pd.to_numeric(metrics_df[column], errors="coerce")
 
     metrics_df["date"] = metrics_df["date"].astype(str)
@@ -82,6 +91,11 @@ def add_body_metric_entry(
     bodyweight,
     waist=None,
     estimated_body_fat=None,
+    lean_mass=None,
+    fat_mass=None,
+    muscle_mass=None,
+    hydration=None,
+    bmi=None,
     notes="",
 ) -> pd.DataFrame:
     """Add a manual body metric entry and return the updated table."""
@@ -93,7 +107,15 @@ def add_body_metric_entry(
         "estimated_body_fat": (
             np.nan if estimated_body_fat is None else float(estimated_body_fat)
         ),
+<<<<<<< HEAD
         "source": "manual",
+=======
+        "lean_mass": np.nan if lean_mass is None else float(lean_mass),
+        "fat_mass": np.nan if fat_mass is None else float(fat_mass),
+        "muscle_mass": np.nan if muscle_mass is None else float(muscle_mass),
+        "hydration": np.nan if hydration is None else float(hydration),
+        "bmi": np.nan if bmi is None else float(bmi),
+>>>>>>> 37f5b2f02b51addf01efddb5467c5294101bd93a
         "notes": str(notes).strip(),
     }
 
