@@ -156,7 +156,7 @@ HEVY_API_KEY=...
 HEVY_WEBHOOK_SECRET=...
 WITHINGS_CLIENT_ID=...
 WITHINGS_CLIENT_SECRET=...
-WITHINGS_REDIRECT_URI=https://performance-os-rho.vercel.app/api/withings/callback
+WITHINGS_REDIRECT_URI=https://api-production-b3ff.up.railway.app/api/withings/callback
 CORS_ALLOW_ORIGINS=https://performance-os-rho.vercel.app
 FRONTEND_ORIGIN=https://performance-os-rho.vercel.app
 ```
@@ -189,10 +189,13 @@ developer dashboard.
 For Withings OAuth, set the Withings app callback and backend env to:
 
 ```bash
-WITHINGS_REDIRECT_URI=https://your-vercel-app.vercel.app/api/withings/callback
+WITHINGS_REDIRECT_URI=https://api-production-b3ff.up.railway.app/api/withings/callback
 ```
 
-The frontend `/api/withings/callback` route forwards the OAuth code to FastAPI.
+Withings rejects normal `localhost` and IP callback URLs, so local OAuth testing
+needs either the deployed Railway callback above or a public HTTPS tunnel whose
+callback URL is configured in the Withings developer console. The frontend asks
+FastAPI for a Withings authorization URL and never receives the client secret.
 After connecting, use `POST /api/withings/sync` or the Settings button to import
 Withings scale measurements into the body metrics table.
 

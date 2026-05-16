@@ -23,8 +23,12 @@ WITHINGS_AUTH_URL = "https://account.withings.com/oauth2_user/authorize2"
 WITHINGS_SCOPE = "user.metrics"
 KG_TO_LB = 2.2046226218
 WEIGHT_TYPE = 1
+HEIGHT_TYPE = 4
+FAT_FREE_MASS_KG_TYPE = 5
 FAT_RATIO_TYPE = 6
 FAT_MASS_KG_TYPE = 8
+MUSCLE_MASS_KG_TYPE = 76
+HYDRATION_KG_TYPE = 77
 
 
 class WithingsIntegrationError(RuntimeError):
@@ -93,7 +97,20 @@ def _signature(params: dict[str, Any], client_secret: str) -> str:
     return hmac.new(client_secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
-def _post_form(path: str, params: dict[str, Any], access_token: str = "") -> dict:
+def _friendly_withings_message(message: str, context: str) -> str:
+    cleaned = str(message or "").strip() or "Unknown Withings error."
+    lowered = cleaned.lower()
+    if "redirect_uri_mismatch" in lowered or "redirect uri" in lowered or "callback" in lowered:
+        return (
+            "Withings redirect URI mismatch. The WITHINGS_REDIRECT_URI used by the backend must exactly match "
+            f"the callback URL configured in the Withings developer console. Withings said: {cleaned}"
+        )
+    if "invalid_grant" in lowered or "expired" in lowered or "refresh_token" in lowered:
+        return f"Withings refresh token is missing or expired. Reconnect Withings. Withings said: {cleaned}"
+    return f"{context}: {cleaned}"
+
+
+def _post_form(path: str, params: dict[str, Any], access_token: str = "", context: str = "Withings API fetch failed") -> dict:
     data = urlencode(params).encode("utf-8")
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     if access_token:
@@ -103,12 +120,12 @@ def _post_form(path: str, params: dict[str, Any], access_token: str = "") -> dic
         with urlopen(request, timeout=30) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
-        raise WithingsIntegrationError(f"Withings API request failed: {exc}") from exc
+        raise WithingsIntegrationError(f"{context}: {exc}") from exc
 
     status = int(payload.get("status", 0) or 0)
     if status != 0:
         message = payload.get("error") or payload.get("body", {}).get("error") or f"Withings API returned status {status}."
-        raise WithingsIntegrationError(str(message))
+        raise WithingsIntegrationError(_friendly_withings_message(str(message), context))
     return payload
 
 
@@ -121,7 +138,7 @@ def _get_nonce() -> str:
         "timestamp": int(time.time()),
     }
     params["signature"] = _signature(params, client_secret)
-    payload = _post_form("/v2/signature", params)
+    payload = _post_form("/v2/signature", params, context="Withings token exchange failed")
     nonce = str(payload.get("body", {}).get("nonce", "") or "")
     if not nonce:
         raise WithingsIntegrationError("Withings nonce response did not include a nonce.")
@@ -132,10 +149,10 @@ def _request_token(params: dict[str, Any]) -> dict:
     client_secret = _client_secret()
     params = {**params, "action": "requesttoken", "client_id": _client_id(), "nonce": _get_nonce()}
     params["signature"] = _signature(params, client_secret)
-    payload = _post_form("/v2/oauth2", params)
+    payload = _post_form("/v2/oauth2", params, context="Withings token exchange failed")
     body = payload.get("body", {})
     if not body.get("access_token") or not body.get("refresh_token"):
-        raise WithingsIntegrationError("Withings token response did not include access and refresh tokens.")
+        raise WithingsIntegrationError("Withings token exchange failed: response did not include access and refresh tokens.")
     return body
 
 
@@ -177,7 +194,7 @@ def refresh_withings_token_if_needed(force: bool = False) -> dict:
     settings = load_settings()
     tokens = settings.get("metadata", {}).get("withings_tokens", {})
     if not tokens.get("refresh_token"):
-        raise WithingsIntegrationError("Withings is not connected. Connect Withings before syncing.")
+        raise WithingsIntegrationError("Withings refresh token is missing or expired. Reconnect Withings before syncing.")
     expires_at = int(tokens.get("expires_at") or 0)
     if not force and tokens.get("access_token") and expires_at > int(time.time()) + 120:
         return tokens
@@ -208,6 +225,10 @@ def _measure_value(measure: dict) -> float | None:
         return None
 
 
+def _kg_to_lb(value: float | None) -> float | None:
+    return round(value * KG_TO_LB, 2) if value is not None else None
+
+
 def _measure_groups_to_rows(measure_groups: list[dict]) -> list[dict]:
     rows = []
     for group in measure_groups:
@@ -221,10 +242,19 @@ def _measure_groups_to_rows(measure_groups: list[dict]) -> list[dict]:
         if not weight_kg:
             continue
         measured_at = datetime.fromtimestamp(int(group.get("date", 0) or 0), tz=timezone.utc)
+        height_m = measures.get(HEIGHT_TYPE)
+        fat_free_mass_kg = measures.get(FAT_FREE_MASS_KG_TYPE)
         fat_ratio = measures.get(FAT_RATIO_TYPE)
         fat_mass_kg = measures.get(FAT_MASS_KG_TYPE)
+        muscle_mass_kg = measures.get(MUSCLE_MASS_KG_TYPE)
+        hydration_kg = measures.get(HYDRATION_KG_TYPE)
         if fat_ratio is None and fat_mass_kg is not None and weight_kg:
             fat_ratio = fat_mass_kg / weight_kg * 100
+        if fat_mass_kg is None and fat_ratio is not None and weight_kg:
+            fat_mass_kg = weight_kg * fat_ratio / 100
+        if fat_free_mass_kg is None and fat_mass_kg is not None:
+            fat_free_mass_kg = weight_kg - fat_mass_kg
+        bmi = weight_kg / (height_m * height_m) if height_m and height_m > 0 else None
         notes = [
             "source=withings",
             f"withings_measure_group_id={group.get('grpid', '')}",
@@ -233,12 +263,25 @@ def _measure_groups_to_rows(measure_groups: list[dict]) -> list[dict]:
         ]
         if fat_mass_kg is not None:
             notes.append(f"fat_mass_kg={fat_mass_kg:.3f}")
+        if fat_free_mass_kg is not None:
+            notes.append(f"lean_mass_kg={fat_free_mass_kg:.3f}")
+        if muscle_mass_kg is not None:
+            notes.append(f"muscle_mass_kg={muscle_mass_kg:.3f}")
+        if hydration_kg is not None:
+            notes.append(f"hydration_kg={hydration_kg:.3f}")
+        if bmi is not None:
+            notes.append(f"bmi={bmi:.2f}")
         rows.append(
             {
                 "date": measured_at.date().isoformat(),
                 "bodyweight": round(weight_kg * KG_TO_LB, 2),
                 "waist": pd.NA,
                 "estimated_body_fat": round(float(fat_ratio), 2) if fat_ratio is not None else pd.NA,
+                "lean_mass": _kg_to_lb(fat_free_mass_kg) if fat_free_mass_kg is not None else pd.NA,
+                "fat_mass": _kg_to_lb(fat_mass_kg) if fat_mass_kg is not None else pd.NA,
+                "muscle_mass": _kg_to_lb(muscle_mass_kg) if muscle_mass_kg is not None else pd.NA,
+                "hydration": _kg_to_lb(hydration_kg) if hydration_kg is not None else pd.NA,
+                "bmi": round(float(bmi), 2) if bmi is not None else pd.NA,
                 "notes": " | ".join(notes),
             }
         )
@@ -281,8 +324,26 @@ def sync_withings_measurements(days: int | None = None) -> dict:
     start_ts = end_ts - max(1, lookback_days) * 86400
     payload = _post_form(
         "/measure",
-        {"action": "getmeas", "category": 1, "startdate": start_ts, "enddate": end_ts},
+        {
+            "action": "getmeas",
+            "category": 1,
+            "meastypes": ",".join(
+                str(value)
+                for value in [
+                    WEIGHT_TYPE,
+                    HEIGHT_TYPE,
+                    FAT_FREE_MASS_KG_TYPE,
+                    FAT_RATIO_TYPE,
+                    FAT_MASS_KG_TYPE,
+                    MUSCLE_MASS_KG_TYPE,
+                    HYDRATION_KG_TYPE,
+                ]
+            ),
+            "startdate": start_ts,
+            "enddate": end_ts,
+        },
         access_token=str(tokens.get("access_token", "")),
+        context="Withings API fetch failed",
     )
     measure_groups = payload.get("body", {}).get("measuregrps", []) or []
     rows = _measure_groups_to_rows(measure_groups)

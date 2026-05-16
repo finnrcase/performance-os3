@@ -240,6 +240,11 @@ type BodyMetricEntry = {
   bodyweight: number;
   waist: number | null;
   estimated_body_fat: number | null;
+  lean_mass?: number | null;
+  fat_mass?: number | null;
+  muscle_mass?: number | null;
+  hydration?: number | null;
+  bmi?: number | null;
   notes: string;
 };
 
@@ -6671,8 +6676,18 @@ export default function Home() {
             setApiError(error instanceof Error ? error.message : "Unable to connect Strava.");
           }
         }}
-        onConnectWithings={() => {
-          window.location.href = "/api/withings/connect";
+        onConnectWithings={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/integrations/withings/auth-url");
+            if (result.status !== "ok" || !result.auth_url) {
+              throw new Error(result.message ?? "Unable to generate Withings authorization URL.");
+            }
+            window.location.href = result.auth_url;
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to connect Withings.");
+          }
         }}
         onSyncWithings={async () => {
           setApiError(null);

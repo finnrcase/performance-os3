@@ -1,10 +1,8 @@
 export function backendApiBaseUrl() {
-  const configured = (process.env.NEXT_PUBLIC_API_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
-  if (configured) {
-    return configured;
+  const value = process.env.BACKEND_API_URL ?? process.env.NEXT_PUBLIC_API_URL ?? process.env.NEXT_PUBLIC_API_BASE_URL ?? "";
+  const cleaned = value.replace(/\/$/, "");
+  if (!cleaned) {
+    throw new Error("BACKEND_API_URL or NEXT_PUBLIC_API_URL is required for OAuth callback forwarding.");
   }
-  if (process.env.NODE_ENV === "development") {
-    return "http://localhost:8001";
-  }
-  throw new Error("NEXT_PUBLIC_API_URL must be set to the Railway backend URL in production.");
+  return cleaned;
 }

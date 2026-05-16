@@ -175,8 +175,12 @@ def _clean_body_composition(body_metrics_df: pd.DataFrame | None, user_goals: di
     df.loc[df["body_fat_percent"] <= 1, "body_fat_percent"] = df["body_fat_percent"] * 100
     valid_body_fat = df["body_fat_percent"].between(3, 60)
     df.loc[~valid_body_fat, "body_fat_percent"] = pd.NA
-    df["lean_mass"] = df["bodyweight"] * (1 - (df["body_fat_percent"] / 100))
-    df["fat_mass"] = df["bodyweight"] * (df["body_fat_percent"] / 100)
+    lean_mass_column = _first_column(df, ["lean_mass", "fat_free_mass"])
+    fat_mass_column = _first_column(df, ["fat_mass"])
+    measured_lean = pd.to_numeric(df[lean_mass_column], errors="coerce") if lean_mass_column else pd.Series(float("nan"), index=df.index, dtype="float64")
+    measured_fat = pd.to_numeric(df[fat_mass_column], errors="coerce") if fat_mass_column else pd.Series(float("nan"), index=df.index, dtype="float64")
+    df["lean_mass"] = measured_lean.combine_first(df["bodyweight"] * (1 - (df["body_fat_percent"] / 100)))
+    df["fat_mass"] = measured_fat.combine_first(df["bodyweight"] * (df["body_fat_percent"] / 100))
     return df[["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass"]].sort_values("date")
 
 

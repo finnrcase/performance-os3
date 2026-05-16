@@ -19,8 +19,12 @@ WITHINGS_MEASURE_RESPONSE = {
                 "date": 1_715_769_600,
                 "measures": [
                     {"type": 1, "value": 82500, "unit": -3},
+                    {"type": 4, "value": 180, "unit": -2},
+                    {"type": 5, "value": 67031, "unit": -3},
                     {"type": 6, "value": 1875, "unit": -2},
                     {"type": 8, "value": 15469, "unit": -3},
+                    {"type": 76, "value": 62000, "unit": -3},
+                    {"type": 77, "value": 45000, "unit": -3},
                 ],
             }
         ]
@@ -51,6 +55,11 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertAlmostEqual(float(saved["bodyweight"].iloc[0]), 181.88, places=2)
         self.assertAlmostEqual(float(saved["estimated_body_fat"].iloc[0]), 18.75, places=2)
+        self.assertAlmostEqual(float(saved["fat_mass"].iloc[0]), 34.1, places=2)
+        self.assertAlmostEqual(float(saved["lean_mass"].iloc[0]), 147.78, places=2)
+        self.assertAlmostEqual(float(saved["muscle_mass"].iloc[0]), 136.69, places=2)
+        self.assertAlmostEqual(float(saved["hydration"].iloc[0]), 99.21, places=2)
+        self.assertAlmostEqual(float(saved["bmi"].iloc[0]), 25.46, places=2)
         self.assertIn("source=withings", saved["notes"].iloc[0])
         self.assertIn("withings_measure_group_id=123", saved["notes"].iloc[0])
 
@@ -71,6 +80,25 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertIn("https://account.withings.com/oauth2_user/authorize2", location)
         self.assertIn("client_id=client-id", location)
         self.assertIn("scope=user.metrics", location)
+
+    def test_auth_url_route_returns_backend_generated_withings_authorization_url(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "WITHINGS_CLIENT_ID": "client-id",
+                "WITHINGS_CLIENT_SECRET": "secret",
+                "WITHINGS_REDIRECT_URI": "https://api-production-b3ff.up.railway.app/api/withings/callback",
+            },
+            clear=False,
+        ):
+            response = self.client.get("/api/integrations/withings/auth-url")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["redirect_uri"], "https://api-production-b3ff.up.railway.app/api/withings/callback")
+        self.assertIn("https://account.withings.com/oauth2_user/authorize2", data["auth_url"])
+        self.assertIn("client_id=client-id", data["auth_url"])
 
     def test_sync_route_returns_error_when_not_connected(self):
         with patch(

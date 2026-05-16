@@ -59,6 +59,25 @@ def _withings_redirect_uri(request: Request) -> str:
     return str(request.url_for("withings_callback"))
 
 
+def _production_like() -> bool:
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("VERCEL")
+        or os.getenv("RENDER")
+        or os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"}
+    )
+
+
+def _redirect_uri_configuration_error(redirect_uri: str) -> str:
+    if not redirect_uri:
+        return "WITHINGS_REDIRECT_URI is not configured and the backend could not derive a callback URL."
+    parsed = urlparse(redirect_uri)
+    host = parsed.hostname or ""
+    if _production_like() and host in {"localhost", "127.0.0.1", "::1"}:
+        return "WITHINGS_REDIRECT_URI is still localhost. Set it to your deployed callback URL."
+    return ""
+
+
 def _frontend_return_url(request: Request, status: str, message: str = "") -> str:
     app_url = (
         os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
@@ -79,17 +98,37 @@ def _frontend_return_url(request: Request, status: str, message: str = "") -> st
 @router.get("/api/withings/connect")
 def connect_withings(request: Request):
     redirect_uri = _withings_redirect_uri(request)
-    production_like = os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("VERCEL") or os.getenv("RENDER") or os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"}
-    if production_like and "localhost" in redirect_uri:
+    redirect_error = _redirect_uri_configuration_error(redirect_uri)
+    if redirect_error:
         return {
             "status": "error",
-            "message": "WITHINGS_REDIRECT_URI is still localhost. Set it to your deployed callback URL.",
+            "message": redirect_error,
         }
     try:
+        logger.info("Withings OAuth start requested with redirect_uri=%s", redirect_uri)
         auth_url = build_withings_auth_url(redirect_uri=redirect_uri, state="performance-os")
     except WithingsIntegrationError as exc:
         return {"status": "error", "message": str(exc)}
     return RedirectResponse(auth_url, status_code=303)
+
+
+@router.get("/api/integrations/withings/auth-url")
+def get_withings_auth_url(request: Request) -> dict:
+    redirect_uri = _withings_redirect_uri(request)
+    redirect_error = _redirect_uri_configuration_error(redirect_uri)
+    if redirect_error:
+        return {"status": "error", "message": redirect_error, "auth_url": "", "redirect_uri": redirect_uri}
+    try:
+        logger.info("Withings OAuth URL requested with redirect_uri=%s", redirect_uri)
+        auth_url = build_withings_auth_url(redirect_uri=redirect_uri, state="performance-os")
+    except WithingsIntegrationError as exc:
+        return {"status": "error", "message": str(exc), "auth_url": "", "redirect_uri": redirect_uri}
+    return {
+        "status": "ok",
+        "auth_url": auth_url,
+        "redirect_uri": redirect_uri,
+        "message": "Use this exact redirect URI in the Withings developer console.",
+    }
 
 
 @router.get("/api/withings/callback", name="withings_callback")
@@ -106,7 +145,9 @@ def withings_callback(
         logger.error("Withings OAuth callback missing code.")
         return RedirectResponse(_frontend_return_url(request, "error", "Missing authorization code."), status_code=303)
     try:
-        exchange_withings_code(code, _withings_redirect_uri(request))
+        redirect_uri = _withings_redirect_uri(request)
+        logger.info("Withings OAuth callback exchanging code with redirect_uri=%s", redirect_uri)
+        exchange_withings_code(code, redirect_uri)
         logger.info("Withings OAuth callback connected.")
     except WithingsIntegrationError as exc:
         logger.exception("Withings OAuth callback token exchange failed.")

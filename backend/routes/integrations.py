@@ -22,7 +22,12 @@ from src.integrations.strava_client import (
     load_strava_sync_state,
     refresh_strava_token_if_needed,
 )
-from src.integrations.withings_client import get_withings_connection_status, load_withings_sync_state
+from src.integrations.withings_client import (
+    WithingsIntegrationError,
+    get_withings_connection_status,
+    load_withings_sync_state,
+    refresh_withings_token_if_needed,
+)
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
 from src.storage import production_storage_warnings, use_database
@@ -242,6 +247,54 @@ def _integration_components(settings: dict) -> dict:
         )
 
     database_warnings = production_storage_warnings()
+    body_df = load_body_metrics()
+    latest_weight = _latest_date(body_df)
+    withings_status = get_withings_connection_status()
+    withings_sync = load_withings_sync_state()
+    withings_error = str(withings_sync.get("last_error", "") or "")
+    withings_latest = str(withings_sync.get("latest_measure_date", "") or "") or latest_weight
+    withings_last_sync = str(withings_sync.get("last_synced_at", "") or "")
+    withings_client_configured = (
+        bool(integrations.get("withings_client_id") and integrations.get("withings_client_secret"))
+        or (_configured_from_env("WITHINGS_CLIENT_ID") and _configured_from_env("WITHINGS_CLIENT_SECRET"))
+    )
+    if withings_status == "Connected":
+        try:
+            refresh_withings_token_if_needed()
+            withings_component = _safe_component(
+                configured=True,
+                status="ok" if not withings_error else "error",
+                message=withings_error or "Withings OAuth tokens are available to the backend.",
+                last_synced_at=withings_last_sync,
+                latest_record=withings_latest,
+                reconnect_required=False,
+            )
+        except WithingsIntegrationError as exc:
+            withings_component = _safe_component(
+                configured=withings_client_configured,
+                status="reconnect_required",
+                message=str(exc),
+                last_synced_at=withings_last_sync,
+                latest_record=withings_latest,
+                reconnect_required=True,
+            )
+    elif withings_status == "Ready to connect":
+        withings_component = _safe_component(
+            configured=withings_client_configured,
+            status="reconnect_required",
+            message="Withings client credentials are configured, but OAuth tokens are missing. Connect Withings.",
+            last_synced_at=withings_last_sync,
+            latest_record=withings_latest,
+            reconnect_required=True,
+        )
+    else:
+        withings_component = _safe_component(
+            configured=False,
+            status="unconfigured",
+            message="Set WITHINGS_CLIENT_ID, WITHINGS_CLIENT_SECRET, and WITHINGS_REDIRECT_URI on the Railway backend.",
+            latest_record=withings_latest,
+            reconnect_required=False,
+        )
     return {
         "backend": _safe_component(
             configured=True,
@@ -267,6 +320,7 @@ def _integration_components(settings: dict) -> dict:
             latest_record=latest_hevy,
             reconnect_required=False,
         ),
+        "withings": withings_component,
     }
 
 
