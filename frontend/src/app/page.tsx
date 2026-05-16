@@ -5583,9 +5583,6 @@ function SettingsPage({
   onTestOpenAI,
   onSyncHevy,
   onImportStrava,
-  onConnectWithings,
-  onSyncWithings,
-  onClearWithings,
 }: Readonly<{
   settings: SettingsData | null;
   forms: FormState;
@@ -5597,12 +5594,7 @@ function SettingsPage({
   onTestOpenAI: () => void;
   onSyncHevy: () => void;
   onImportStrava: () => void;
-  onConnectWithings: () => void;
-  onSyncWithings: () => void;
-  onClearWithings: () => void;
 }>) {
-  const withingsStatus = settings?.statuses.withings ?? "Not configured";
-  const withingsConnected = withingsStatus === "Connected" || withingsStatus === "Disconnected";
   return (
     <div className="space-y-4">
       {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
