@@ -3,7 +3,7 @@ import os
 from urllib.parse import urlencode, urlparse
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from backend.routes.utils import dataframe_records
 from src.body_metrics import load_body_metrics
@@ -131,19 +131,21 @@ def get_withings_auth_url(request: Request) -> dict:
     }
 
 
-@router.get("/api/withings/callback", name="withings_callback")
+@router.api_route("/api/withings/callback", methods=["GET", "POST"], name="withings_callback")
 def withings_callback(
     request: Request,
     code: str | None = Query(default=None),
     error: str | None = Query(default=None),
-) -> RedirectResponse:
+) -> Response:
+    # Withings registration validation probes hit this URL (often via POST)
+    # with no OAuth params. Answer those — and any param-less request — with a
+    # plain 200 so the provider check passes; do not redirect or crash.
+    if not code and not error:
+        return JSONResponse({"status": "ok"})
     if error:
         message = f"Withings authorization failed: {error}"
         logger.error("Withings OAuth callback failed: %s", error)
         return RedirectResponse(_frontend_return_url(request, "error", message), status_code=303)
-    if not code:
-        logger.error("Withings OAuth callback missing code.")
-        return RedirectResponse(_frontend_return_url(request, "error", "Missing authorization code."), status_code=303)
     try:
         redirect_uri = _withings_redirect_uri(request)
         logger.info("Withings OAuth callback exchanging code with redirect_uri=%s", redirect_uri)
