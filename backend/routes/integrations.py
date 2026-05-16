@@ -312,6 +312,18 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     strava_status = statuses.get("strava", "Not configured")
     latest_strava = _latest_date(training_df, "strava")
     strava_debug = _strava_debug_status(settings, latest_strava)
+    # Decide which button the Strava card shows: Sync when connected with a
+    # usable token, Connect when credentials exist but OAuth never ran, and
+    # Reconnect when the token is missing/expired.
+    strava_token_status = str(strava_debug.get("token_status", "") or "")
+    if strava_status == "Not configured":
+        strava_action = ""
+    elif strava_status == "Connected" and strava_token_status != "expired":
+        strava_action = "strava_import"
+    elif strava_status == "Ready to connect":
+        strava_action = "strava_connect"
+    else:
+        strava_action = "strava_reconnect"
     latest_weight = _latest_date(body_df)
     latest_food = _latest_date(nutrition_df)
     latest_recovery = _latest_date(recovery_df) or _latest_date(sleep_df)
@@ -346,7 +358,7 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
             "label": strava_status,
             "detail": strava_debug["last_error"] or (_freshness_detail("Strava run", latest_strava) if strava_status == "Connected" else "OAuth is required before run sync works."),
             "last_synced_at": strava_debug["last_synced_at"] or latest_strava,
-            "action": "strava_import" if strava_status == "Connected" else "",
+            "action": strava_action,
             "metadata": strava_debug,
         },
         {
