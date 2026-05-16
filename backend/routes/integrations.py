@@ -20,6 +20,17 @@ from src.integrations.strava_client import (
     load_strava_sync_state,
     refresh_strava_token_if_needed,
 )
+from src.integrations.withings_client import (
+    WithingsIntegrationError,
+    WithingsReconnectRequired,
+    build_withings_auth_url,
+    clear_withings_connection,
+    exchange_withings_code,
+    get_withings_connection_status,
+    load_withings_sync_state,
+    sync_withings_measurements,
+    withings_redirect_uri,
+)
 from src.nutrition import load_nutrition_log
 from src.recovery import load_recovery_log, load_sleep_entries
 from src.storage import production_storage_warnings, use_database
@@ -124,7 +135,7 @@ def _strava_redirect_uri(request: Request) -> str:
     return str(request.url_for("strava_callback"))
 
 
-def _frontend_return_url(request: Request, status: str, message: str = "") -> str:
+def _frontend_return_url(request: Request, status: str, message: str = "", key: str = "strava") -> str:
     app_url = (
         os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
         or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
@@ -137,7 +148,7 @@ def _frontend_return_url(request: Request, status: str, message: str = "") -> st
             app_url = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme and parsed.netloc else ""
     if not app_url:
         app_url = str(request.base_url).rstrip("/")
-    query = urlencode({"strava": status, "message": message})
+    query = urlencode({key: status, "message": message})
     return f"{app_url}/?{query}"
 
 
@@ -164,6 +175,50 @@ def _strava_debug_status(settings: dict, latest_strava: str) -> dict:
     }
 
 
+def _withings_redirect_uri(request: Request) -> str:
+    """Resolve the Withings OAuth redirect URI (callback hits this backend)."""
+    fallback = str(request.url_for("withings_callback"))
+    return withings_redirect_uri(fallback=fallback)
+
+
+def _withings_debug_status(settings: dict) -> dict:
+    tokens = settings.get("metadata", {}).get("withings_tokens", {})
+    sync_state = load_withings_sync_state()
+    expires_at = int(tokens.get("expires_at") or 0)
+    now = int(time.time())
+    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    token_expired = bool(connected and expires_at <= now)
+    token_expiring = bool(connected and not token_expired and expires_at <= now + 300)
+    return {
+        "connected": connected,
+        "userid": _masked_athlete_id(str(tokens.get("userid", "") or "")),
+        "token_expires_at": expires_at,
+        "token_status": "expired" if token_expired else "refresh soon" if token_expiring else "valid" if connected else "missing",
+        "scopes": str(tokens.get("scopes", "") or ""),
+        "last_synced_at": sync_state.get("last_synced_at", ""),
+        "latest_measurement_date": sync_state.get("latest_measurement_date", ""),
+        "last_imported_count": sync_state.get("last_imported_count", 0),
+        "last_updated_count": sync_state.get("last_updated_count", 0),
+        "last_fetched_count": sync_state.get("last_fetched_count", 0),
+        "last_error": sync_state.get("last_error", ""),
+    }
+
+
+def _latest_withings_measurement(body_df: pd.DataFrame) -> dict:
+    """Return the most recent Withings-sourced body measurement, if any."""
+    if body_df.empty or "source" not in body_df.columns:
+        return {}
+    rows = body_df[body_df["source"].astype(str) == "withings"]
+    if rows.empty:
+        return {}
+    latest = rows.sort_values("date").iloc[-1]
+    return {
+        "date": str(latest.get("date", "") or ""),
+        "weight": latest.get("bodyweight"),
+        "body_fat": latest.get("estimated_body_fat"),
+    }
+
+
 def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     training_df = load_training_log()
     body_df = load_body_metrics()
@@ -177,6 +232,9 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     strava_status = statuses.get("strava", "Not configured")
     latest_strava = _latest_date(training_df, "strava")
     strava_debug = _strava_debug_status(settings, latest_strava)
+    withings_status = statuses.get("withings", "Not configured")
+    withings_debug = _withings_debug_status(settings)
+    latest_withings = _latest_withings_measurement(body_df)
     latest_weight = _latest_date(body_df)
     latest_food = _latest_date(nutrition_df)
     latest_recovery = _latest_date(recovery_df) or _latest_date(sleep_df)
@@ -219,9 +277,23 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
         {
             "id": "withings",
             "title": "Withings",
-            "status": "warning",
-            "label": "Configured" if settings.get("integrations", {}).get("withings_client_id") and settings.get("integrations", {}).get("withings_client_secret") else "Not configured",
-            "detail": "Body composition sync is planned; use manual bodyweight logs for now.",
+            "status": (
+                "error" if withings_debug["last_error"]
+                else "connected" if withings_status == "Connected" and withings_debug["latest_measurement_date"]
+                else "warning"
+            ),
+            "label": withings_status,
+            "detail": withings_debug["last_error"] or (
+                f"Latest measurement {latest_withings['date']}"
+                + (f" · {latest_withings['weight']:.1f} lb" if latest_withings.get("weight") is not None and pd.notna(latest_withings.get("weight")) else "")
+                + (f" · {latest_withings['body_fat']:.1f}% body fat" if latest_withings.get("body_fat") is not None and pd.notna(latest_withings.get("body_fat")) else "")
+                if latest_withings.get("date")
+                else "Connected — run Sync Withings Now to pull scale measurements." if withings_status == "Connected"
+                else "Connect Withings to auto-sync weight and body composition."
+            ),
+            "last_synced_at": withings_debug["last_synced_at"],
+            "action": "withings_sync" if withings_status == "Connected" else "",
+            "metadata": withings_debug,
         },
         {
             "id": "openai",
@@ -265,8 +337,10 @@ def _settings_response(settings: dict) -> dict:
         "fitbit_client_id": integration_status("fitbit_client_id", settings),
         "fitbit_client_secret": integration_status("fitbit_client_secret", settings),
         "fitbit_google_health": fitbit_google_health_status(settings),
-        "withings_client_id": integration_status("withings_client_id", settings),
-        "withings_client_secret": integration_status("withings_client_secret", settings),
+        "withings": get_withings_connection_status(),
+        "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
+        "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
+        "withings_redirect_uri": "Configured" if _configured_from_env("WITHINGS_REDIRECT_URI") else "Auto from backend URL",
         "openai_api_key": "Configured" if openai_configured else "Not configured",
         "apple_health_export_file": integration_status("apple_health_export_file", settings),
     }
@@ -362,4 +436,69 @@ def refresh_strava_token() -> dict:
 @router.post("/api/integrations/strava/disconnect")
 def disconnect_strava() -> dict:
     clear_strava_connection("Strava disconnected. Reconnect from Settings.")
+    return _settings_response(load_settings())
+
+
+@router.get("/api/withings/connect")
+def withings_connect(request: Request, reconnect: bool = Query(default=False)) -> RedirectResponse:
+    """Start the Withings OAuth flow by redirecting to the authorization page."""
+    if reconnect:
+        clear_withings_connection("Reconnect requested from Settings.", mark_error=False)
+    redirect_uri = _withings_redirect_uri(request)
+    try:
+        auth_url = build_withings_auth_url(redirect_uri=redirect_uri)
+    except WithingsIntegrationError as exc:
+        logger.error("Withings OAuth start failed: %s", exc)
+        return RedirectResponse(_frontend_return_url(request, "error", str(exc), key="withings"), status_code=303)
+    logger.info("Withings OAuth start; redirect_uri=%s", redirect_uri)
+    return RedirectResponse(auth_url, status_code=303)
+
+
+@router.get("/api/withings/callback", name="withings_callback")
+def withings_callback(
+    request: Request,
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> RedirectResponse:
+    """Exchange the Withings OAuth callback code and store tokens server-side."""
+    if error:
+        logger.error("Withings OAuth callback failed: %s", error)
+        return RedirectResponse(
+            _frontend_return_url(request, "error", f"Withings authorization failed: {error}", key="withings"),
+            status_code=303,
+        )
+    if not code:
+        return RedirectResponse(
+            _frontend_return_url(request, "error", "Missing authorization code.", key="withings"),
+            status_code=303,
+        )
+    try:
+        exchange_withings_code(code, _withings_redirect_uri(request))
+    except WithingsIntegrationError as exc:
+        logger.exception("Withings token exchange failed.")
+        return RedirectResponse(_frontend_return_url(request, "error", str(exc), key="withings"), status_code=303)
+    return RedirectResponse(
+        _frontend_return_url(request, "connected", "Withings connected.", key="withings"),
+        status_code=303,
+    )
+
+
+@router.post("/api/withings/sync")
+def withings_sync(
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+) -> dict:
+    """Pull recent Withings body measurements into body_metrics."""
+    try:
+        result = sync_withings_measurements(start_date=start_date, end_date=end_date)
+    except WithingsReconnectRequired as exc:
+        return {"status": "reconnect_required", "message": str(exc)}
+    except WithingsIntegrationError as exc:
+        return {"status": "error", "message": str(exc)}
+    return result
+
+
+@router.post("/api/integrations/withings/disconnect")
+def disconnect_withings() -> dict:
+    clear_withings_connection("Withings disconnected. Reconnect from Settings.")
     return _settings_response(load_settings())

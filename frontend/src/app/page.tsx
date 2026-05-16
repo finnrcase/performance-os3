@@ -649,12 +649,14 @@ type SettingsHealthCard = {
   metadata?: {
     connected?: boolean;
     athlete_id?: string;
+    userid?: string;
     token_status?: string;
     scopes?: string;
     last_imported_count?: number;
     last_updated_count?: number;
     last_fetched_count?: number;
     latest_activity_date?: string;
+    latest_measurement_date?: string;
     last_error?: string;
   };
 };
@@ -5472,14 +5474,17 @@ function IntegrationHealthGrid({
   cards,
   onSyncHevy,
   onImportStrava,
+  onSyncWithings,
 }: Readonly<{
   cards: SettingsHealthCard[];
   onSyncHevy: () => void;
   onImportStrava: () => void;
+  onSyncWithings: () => void;
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
     if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
     if (card.action === "strava_import") return { label: "Sync", onClick: onImportStrava };
+    if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
     return null;
   };
   return (
@@ -5516,6 +5521,15 @@ function IntegrationHealthGrid({
                   {card.metadata.latest_activity_date ? <p>Latest activity: <span className="text-zinc-300">{card.metadata.latest_activity_date}</span></p> : null}
                 </div>
               ) : null}
+              {card.id === "withings" && card.metadata ? (
+                <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
+                  <p>User: <span className="text-zinc-300">{card.metadata.userid || "Not connected"}</span></p>
+                  <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
+                  <p>Scopes: <span className="text-zinc-300">{card.metadata.scopes || "Not granted"}</span></p>
+                  <p>Fetched: <span className="text-zinc-300">{card.metadata.last_fetched_count ?? 0}</span> · Imported: <span className="text-zinc-300">{card.metadata.last_imported_count ?? 0}</span> · Updated: <span className="text-zinc-300">{card.metadata.last_updated_count ?? 0}</span></p>
+                  {card.metadata.latest_measurement_date ? <p>Latest measurement: <span className="text-zinc-300">{card.metadata.latest_measurement_date}</span></p> : null}
+                </div>
+              ) : null}
             </div>
           );
         })}
@@ -5533,6 +5547,9 @@ function SettingsPage({
   onTestOpenAI,
   onSyncHevy,
   onImportStrava,
+  onConnectWithings,
+  onSyncWithings,
+  onClearWithings,
 }: Readonly<{
   settings: SettingsData | null;
   forms: FormState;
@@ -5542,10 +5559,15 @@ function SettingsPage({
   onTestOpenAI: () => void;
   onSyncHevy: () => void;
   onImportStrava: () => void;
+  onConnectWithings: () => void;
+  onSyncWithings: () => void;
+  onClearWithings: () => void;
 }>) {
+  const withingsStatus = settings?.statuses.withings ?? "Not configured";
+  const withingsConnected = withingsStatus === "Connected" || withingsStatus === "Disconnected";
   return (
     <div className="space-y-4">
-      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} /> : null}
+      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onSyncWithings={onSyncWithings} /> : null}
       <Card>
         <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
         <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
