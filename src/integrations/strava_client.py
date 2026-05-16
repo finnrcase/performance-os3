@@ -78,10 +78,41 @@ def _get_strava_credentials() -> tuple[str, str]:
     return client_id, client_secret
 
 
+def _env_strava_tokens() -> dict:
+    """Read optional production Strava OAuth tokens from backend env vars."""
+    expires_at = (
+        os.getenv("STRAVA_EXPIRES_AT", "").strip()
+        or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip()
+        or _read_dotenv_value("STRAVA_EXPIRES_AT").strip()
+        or _read_dotenv_value("STRAVA_TOKEN_EXPIRES_AT").strip()
+    )
+    try:
+        expires_at_int = int(expires_at or 0)
+    except ValueError:
+        expires_at_int = 0
+    return {
+        "access_token": os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or _read_dotenv_value("STRAVA_ACCESS_TOKEN").strip(),
+        "refresh_token": os.getenv("STRAVA_REFRESH_TOKEN", "").strip() or _read_dotenv_value("STRAVA_REFRESH_TOKEN").strip(),
+        "expires_at": expires_at_int,
+        "athlete_id": os.getenv("STRAVA_ATHLETE_ID", "").strip() or _read_dotenv_value("STRAVA_ATHLETE_ID").strip(),
+        "scopes": os.getenv("STRAVA_SCOPES", "").strip() or _read_dotenv_value("STRAVA_SCOPES").strip() or "read,activity:read_all",
+    }
+
+
+def _effective_strava_tokens(settings: dict | None = None) -> dict:
+    """Prefer persisted DB tokens, but allow backend env tokens as a bootstrap."""
+    current_settings = settings or load_settings()
+    saved_tokens = current_settings.get("metadata", {}).get("strava_tokens", {})
+    if saved_tokens.get("access_token") or saved_tokens.get("refresh_token"):
+        return saved_tokens
+    env_tokens = _env_strava_tokens()
+    return env_tokens if env_tokens.get("access_token") or env_tokens.get("refresh_token") else saved_tokens
+
+
 def get_strava_connection_status() -> str:
     """Return a frontend-safe Strava connection status."""
     settings = load_settings()
-    tokens = settings.get("metadata", {}).get("strava_tokens", {})
+    tokens = _effective_strava_tokens(settings)
     sync_state = settings.get("metadata", {}).get("strava_sync", {})
     if sync_state.get("needs_reconnect"):
         return "Disconnected"
@@ -101,6 +132,24 @@ def get_strava_connection_status() -> str:
     if client_id and client_secret:
         return "Ready to connect"
     return "Not configured"
+
+
+def get_strava_safe_token_metadata() -> dict:
+    """Return frontend-safe Strava token metadata from DB or backend env tokens."""
+    settings = load_settings()
+    tokens = _effective_strava_tokens(settings)
+    expires_at = int(tokens.get("expires_at") or 0)
+    now = int(time.time())
+    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    token_expired = bool(connected and expires_at and expires_at <= now)
+    token_expiring = bool(connected and expires_at and not token_expired and expires_at <= now + 300)
+    return {
+        "connected": connected,
+        "athlete_id": str(tokens.get("athlete_id", "") or ""),
+        "token_expires_at": expires_at,
+        "token_status": "expired" if token_expired else "refresh soon" if token_expiring else "valid" if connected else "missing",
+        "scopes": str(tokens.get("scopes", "") or ""),
+    }
 
 
 def build_strava_auth_url(redirect_uri: str, state: str | None = None, force_approval: bool = False) -> str:
@@ -207,7 +256,7 @@ def exchange_strava_code(code: str) -> dict:
 def refresh_strava_token_if_needed(force: bool = False) -> str:
     """Refresh the saved Strava access token when expired or near expiry."""
     settings = load_settings()
-    tokens = settings.get("metadata", {}).get("strava_tokens", {})
+    tokens = _effective_strava_tokens(settings)
     access_token = str(tokens.get("access_token", "")).strip()
     refresh_token = str(tokens.get("refresh_token", "")).strip()
     expires_at = int(tokens.get("expires_at") or 0)
@@ -219,7 +268,7 @@ def refresh_strava_token_if_needed(force: bool = False) -> str:
             raise StravaReconnectRequired("Saved Strava access token has no refresh token. Reconnect Strava.")
         raise StravaReconnectRequired("Strava is not connected yet. Connect Strava from Settings.")
 
-    if not force and access_token and expires_at > now + 300:
+    if not force and access_token and (expires_at == 0 or expires_at > now + 300):
         return access_token
 
     client_id, client_secret = _get_strava_credentials()
@@ -247,7 +296,7 @@ def _get_access_token(access_token: str | None = None) -> str:
     token = (access_token or "").strip()
     if not token:
         settings = load_settings()
-        saved_tokens = settings.get("metadata", {}).get("strava_tokens", {})
+        saved_tokens = _effective_strava_tokens(settings)
         has_saved_oauth = bool(saved_tokens.get("access_token") or saved_tokens.get("refresh_token"))
         try:
             token = refresh_strava_token_if_needed()

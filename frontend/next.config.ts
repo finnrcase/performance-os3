@@ -1,6 +1,6 @@
 import type { NextConfig } from "next";
 
-const backendApiUrl = process.env.BACKEND_API_URL?.replace(/\/$/, "");
+const backendApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? process.env.BACKEND_API_URL ?? "").replace(/\/$/, "");
 
 const nextConfig: NextConfig = {
   async rewrites() {

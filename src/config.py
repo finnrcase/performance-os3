@@ -40,6 +40,24 @@ STRAVA_SYNC_FIELDS = {
     "needs_reconnect": False,
 }
 
+WITHINGS_TOKEN_FIELDS = {
+    "access_token": "",
+    "refresh_token": "",
+    "expires_at": 0,
+    "userid": "",
+    "scopes": "",
+    "token_type": "",
+}
+
+WITHINGS_SYNC_FIELDS = {
+    "last_synced_at": "",
+    "last_error": "",
+    "last_imported_count": 0,
+    "last_fetched_groups": 0,
+    "latest_measure_date": "",
+    "needs_reconnect": False,
+}
+
 
 def default_settings() -> dict:
     """Return the default local settings shape."""
@@ -49,6 +67,8 @@ def default_settings() -> dict:
             "version": 1,
             "strava_tokens": STRAVA_TOKEN_FIELDS.copy(),
             "strava_sync": STRAVA_SYNC_FIELDS.copy(),
+            "withings_tokens": WITHINGS_TOKEN_FIELDS.copy(),
+            "withings_sync": WITHINGS_SYNC_FIELDS.copy(),
         },
     }
 
@@ -76,6 +96,16 @@ def load_settings() -> dict:
         key: saved_sync.get(key, default)
         for key, default in STRAVA_SYNC_FIELDS.items()
     }
+    saved_withings_tokens = saved.get("metadata", {}).get("withings_tokens", {})
+    settings["metadata"]["withings_tokens"] = {
+        key: saved_withings_tokens.get(key, default)
+        for key, default in WITHINGS_TOKEN_FIELDS.items()
+    }
+    saved_withings_sync = saved.get("metadata", {}).get("withings_sync", {})
+    settings["metadata"]["withings_sync"] = {
+        key: saved_withings_sync.get(key, default)
+        for key, default in WITHINGS_SYNC_FIELDS.items()
+    }
     return settings
 
 
@@ -98,6 +128,16 @@ def save_settings(settings: dict) -> None:
     normalized["metadata"]["strava_sync"] = {
         key: sync.get(key, default)
         for key, default in STRAVA_SYNC_FIELDS.items()
+    }
+    withings_tokens = settings.get("metadata", {}).get("withings_tokens", {})
+    normalized["metadata"]["withings_tokens"] = {
+        key: withings_tokens.get(key, default)
+        for key, default in WITHINGS_TOKEN_FIELDS.items()
+    }
+    withings_sync = settings.get("metadata", {}).get("withings_sync", {})
+    normalized["metadata"]["withings_sync"] = {
+        key: withings_sync.get(key, default)
+        for key, default in WITHINGS_SYNC_FIELDS.items()
     }
     save_document("user_settings", SETTINGS_PATH, normalized)
 
@@ -122,6 +162,13 @@ def integration_status(key: str, settings: dict) -> str:
         if tokens.get("access_token") and tokens.get("refresh_token"):
             return "Connected"
         if integrations.get("strava_client_id") and integrations.get("strava_client_secret"):
+            return "Ready to connect"
+        return "Not configured"
+    if key == "withings_connection":
+        tokens = settings.get("metadata", {}).get("withings_tokens", {})
+        if tokens.get("access_token") and tokens.get("refresh_token"):
+            return "Connected"
+        if integrations.get("withings_client_id") and integrations.get("withings_client_secret"):
             return "Ready to connect"
         return "Not configured"
     if key in {"fitbit_client_id", "fitbit_client_secret", "withings_client_id", "withings_client_secret"}:

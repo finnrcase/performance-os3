@@ -87,17 +87,17 @@ Set these Vercel environment variables:
 ```bash
 APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
-BACKEND_API_URL=https://your-backend-url.example.com
-NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
+NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
+NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 ```
 
 `APP_PASSWORD` is the password entered on the Performance OS login page.
 `SESSION_SECRET` signs the private access cookie after a successful login. Both
 are server-side only and must not use the `NEXT_PUBLIC_` prefix.
 
-`BACKEND_API_URL` is server-side only and is used by `frontend/next.config.ts`
-to proxy `/api/*` requests to FastAPI. You may set `NEXT_PUBLIC_API_URL` if you
-want the browser to call the backend directly, but the proxy is preferred.
+`NEXT_PUBLIC_API_URL` is the public Railway backend URL used by the browser and
+by OAuth callback forwarding routes. `BACKEND_API_URL` is still accepted as a
+server-side rewrite fallback, but production should set `NEXT_PUBLIC_API_URL`.
 
 Do not put backend API keys or OAuth secrets in the Vercel frontend project.
 Keep `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `HEVY_API_KEY`, and similar keys
@@ -141,19 +141,38 @@ Set backend environment variables as needed:
 
 ```bash
 DATABASE_URL=postgres://...
+APP_PASSWORD=your-private-password
 OPENAI_API_KEY=...
 USDA_FDC_API_KEY=...
 STRAVA_CLIENT_ID=...
 STRAVA_CLIENT_SECRET=...
-STRAVA_REDIRECT_URI=https://your-vercel-app.vercel.app/api/strava/callback
-NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
+# Optional bootstrap tokens. OAuth tokens are stored server-side after reconnect.
+STRAVA_ACCESS_TOKEN=
+STRAVA_REFRESH_TOKEN=
+STRAVA_EXPIRES_AT=
+STRAVA_REDIRECT_URI=https://performance-os-rho.vercel.app/api/strava/callback
+NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 HEVY_API_KEY=...
 HEVY_WEBHOOK_SECRET=...
 WITHINGS_CLIENT_ID=...
 WITHINGS_CLIENT_SECRET=...
-CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
-FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
+WITHINGS_REDIRECT_URI=https://performance-os-rho.vercel.app/api/withings/callback
+CORS_ALLOW_ORIGINS=https://performance-os-rho.vercel.app
+FRONTEND_ORIGIN=https://performance-os-rho.vercel.app
 ```
+
+Production ownership rules:
+
+- Vercel gets only frontend/session config: `APP_PASSWORD`,
+  `SESSION_SECRET`, `NEXT_PUBLIC_API_URL`, and `NEXT_PUBLIC_APP_URL`.
+- Railway gets all backend secrets and integrations: `DATABASE_URL`,
+  `OPENAI_API_KEY`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
+  `STRAVA_ACCESS_TOKEN`, `STRAVA_REFRESH_TOKEN`, `HEVY_API_KEY`, and webhook or
+  OAuth secrets.
+- Do not put `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`,
+  `HEVY_API_KEY`, or database credentials in Vercel.
+- After changing Railway or Vercel environment variables, redeploy both
+  services so the running processes pick up the new config.
 
 For local Strava OAuth, set the Strava app callback and backend env to:
 
@@ -166,6 +185,16 @@ The frontend `/api/strava/callback` route forwards the OAuth code to the
 FastAPI backend, where tokens are exchanged and stored server-side. In
 production, the same Vercel callback URL must be entered exactly in the Strava
 developer dashboard.
+
+For Withings OAuth, set the Withings app callback and backend env to:
+
+```bash
+WITHINGS_REDIRECT_URI=https://your-vercel-app.vercel.app/api/withings/callback
+```
+
+The frontend `/api/withings/callback` route forwards the OAuth code to FastAPI.
+After connecting, use `POST /api/withings/sync` or the Settings button to import
+Withings scale measurements into the body metrics table.
 
 Railway can use `railway.json`. Render can use `render.yaml`. A `Procfile` is also included for platforms that support it.
 
@@ -199,8 +228,8 @@ browser storage, or mock data for important production records.
 - Next.js route handlers under `frontend/src/app/api/access/*` run on Vercel.
 - Application data routes such as `/api/dashboard`, `/api/food/*`,
   `/api/training/*`, and `/api/recovery/*` are served by FastAPI.
-- In production, the Vercel frontend proxies those data routes to
-  `BACKEND_API_URL`, so the browser can use the same public Vercel origin.
+- In production, the browser calls the Railway backend from
+  `NEXT_PUBLIC_API_URL`. `BACKEND_API_URL` remains only as a rewrite fallback.
 - The FastAPI backend allows Vercel preview URLs via CORS and should also be
   configured with `CORS_ALLOW_ORIGINS` for your production domain.
 

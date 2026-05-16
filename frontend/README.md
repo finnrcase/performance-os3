@@ -31,9 +31,7 @@ The frontend expects the local FastAPI backend at:
 http://localhost:8001
 ```
 
-You can override this with `NEXT_PUBLIC_API_BASE_URL`.
-
-For current builds, prefer:
+You can override this with:
 
 ```bash
 NEXT_PUBLIC_API_URL=http://localhost:8001
@@ -41,16 +39,15 @@ NEXT_PUBLIC_API_URL=http://localhost:8001
 
 `NEXT_PUBLIC_API_BASE_URL` is still supported as a local fallback.
 
-In production, prefer the server-side proxy:
+In production, set:
 
 ```bash
-BACKEND_API_URL=https://your-performance-os-api.example.com
+NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
 ```
 
-When `BACKEND_API_URL` is set on Vercel, `next.config.ts` proxies `/api/*`
-requests to the FastAPI backend. That keeps the browser on the Vercel origin
-and avoids exposing the backend URL unless you choose to set
-`NEXT_PUBLIC_API_URL`.
+`BACKEND_API_URL` is still accepted as a server-side rewrite fallback, but the
+production frontend should use `NEXT_PUBLIC_API_URL` so browser calls and OAuth
+callback forwarding both target the Railway FastAPI backend.
 
 ## Private Access Gate
 
@@ -89,17 +86,19 @@ Set these frontend environment variables:
 ```bash
 APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
-BACKEND_API_URL=https://your-performance-os-api.example.com
-NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
+NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
+NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 ```
 
 Optional:
 
 ```bash
-NEXT_PUBLIC_API_URL=https://your-performance-os-api.example.com
+BACKEND_API_URL=https://api-production-b3ff.up.railway.app
 ```
 
-Only use `NEXT_PUBLIC_API_URL` when you want direct browser-to-backend calls.
+Production should use `NEXT_PUBLIC_API_URL` so the Vercel frontend calls the
+Railway FastAPI backend directly. `BACKEND_API_URL` is only a server-side
+rewrite fallback.
 Do not add backend secrets such as `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, or
 `HEVY_API_KEY` to Vercel. Those belong on the FastAPI backend host.
 
@@ -107,15 +106,21 @@ The FastAPI backend must have its own production env vars, including:
 
 ```bash
 DATABASE_URL=postgres://...
+APP_PASSWORD=your-private-password
 OPENAI_API_KEY=...
 HEVY_API_KEY=...
 STRAVA_CLIENT_ID=...
 STRAVA_CLIENT_SECRET=...
-STRAVA_REDIRECT_URI=https://your-vercel-app.vercel.app/api/strava/callback
-NEXT_PUBLIC_APP_URL=https://your-vercel-app.vercel.app
-CORS_ALLOW_ORIGINS=https://your-vercel-app.vercel.app
-FRONTEND_ORIGIN=https://your-vercel-app.vercel.app
+STRAVA_ACCESS_TOKEN=
+STRAVA_REFRESH_TOKEN=
+STRAVA_EXPIRES_AT=
+STRAVA_REDIRECT_URI=https://performance-os-rho.vercel.app/api/strava/callback
+NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
+CORS_ALLOW_ORIGINS=https://performance-os-rho.vercel.app
+FRONTEND_ORIGIN=https://performance-os-rho.vercel.app
 ```
+
+After changing Railway or Vercel env vars, redeploy both services.
 
 For local Strava testing, use this exact callback in the Strava developer app
 and backend env:
