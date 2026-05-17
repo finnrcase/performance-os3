@@ -1060,24 +1060,82 @@ function cx(...classes: Array<string | false | null | undefined>) {
 
 const DEFAULT_API_TIMEOUT_MS = 30_000;
 const UPLOAD_API_TIMEOUT_MS = 60_000;
+// Exponential backoff for HTTP 429 (server-side rate limiting): 1s, 3s, 8s,
+// then give up. A server 429 means the request was rejected, not processed,
+// so retrying it — including POSTs — is safe.
+const RATE_LIMIT_BACKOFF_MS = [1_000, 3_000, 8_000];
+
+// Lets the module-level fetch layer tell React when requests are being
+// retried because of rate limiting, without a global store.
+type RateLimitListener = (active: boolean) => void;
+const rateLimitListeners = new Set<RateLimitListener>();
+let activeRateLimitedRequests = 0;
+
+function subscribeRateLimit(listener: RateLimitListener): () => void {
+  rateLimitListeners.add(listener);
+  return () => {
+    rateLimitListeners.delete(listener);
+  };
+}
+
+function adjustRateLimited(delta: number) {
+  activeRateLimitedRequests = Math.max(0, activeRateLimitedRequests + delta);
+  const active = activeRateLimitedRequests > 0;
+  rateLimitListeners.forEach((listener) => listener(active));
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function retryAfterMs(header: string | null): number | null {
+  if (!header) return null;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1000, 15_000); // cap so a huge Retry-After can't hang the UI
+  }
+  return null;
+}
 
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
   timeoutMs: number = DEFAULT_API_TIMEOUT_MS,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : "request";
+  let flaggedRateLimited = false;
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") {
-      const target = typeof input === "string" ? input : input instanceof URL ? input.toString() : "request";
-      throw new Error(`${target} timed out after ${timeoutMs}ms`);
+    for (let attempt = 0; ; attempt += 1) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(input, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          throw new Error(`${target} timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      } finally {
+        clearTimeout(timer);
+      }
+
+      // Retry only on 429 (server temporarily rate limiting), with backoff.
+      if (response.status !== 429 || attempt >= RATE_LIMIT_BACKOFF_MS.length) {
+        return response;
+      }
+      if (!flaggedRateLimited) {
+        flaggedRateLimited = true;
+        adjustRateLimited(1);
+      }
+      const delay = retryAfterMs(response.headers.get("Retry-After")) ?? RATE_LIMIT_BACKOFF_MS[attempt];
+      console.warn(`[rate-limit] ${target} -> HTTP 429; retrying in ${delay}ms (attempt ${attempt + 1}/${RATE_LIMIT_BACKOFF_MS.length})`);
+      await sleep(delay);
     }
-    throw error;
   } finally {
-    clearTimeout(timer);
+    if (flaggedRateLimited) {
+      adjustRateLimited(-1);
+    }
   }
 }
 
