@@ -1,5 +1,6 @@
 import os
 import logging
+import re
 from urllib.parse import urlencode, urlparse
 
 import pandas as pd
@@ -111,9 +112,12 @@ def _masked_athlete_id(value: str) -> str:
 
 def _strava_redirect_uri(request: Request) -> str:
     configured = os.getenv("STRAVA_REDIRECT_URI", "").strip() or _read_dotenv_value("STRAVA_REDIRECT_URI").strip()
-    if configured:
-        return configured
-    return str(request.url_for("strava_callback"))
+    if not configured:
+        configured = str(request.url_for("strava_callback"))
+    # Strava redirect URIs are case-sensitive. Normalize the callback path so a
+    # mis-cased env var (e.g. /api/Strava/callback) still produces the valid
+    # lowercase /api/strava/callback and passes Strava's redirect_uri check.
+    return re.sub(r"/api/strava/callback", "/api/strava/callback", configured, flags=re.IGNORECASE)
 
 
 def _frontend_return_url(request: Request, status: str, message: str = "") -> str:
