@@ -3749,9 +3749,48 @@ type MislogSuggestion = {
   later: WorkoutGroup;
 };
 
-// Detect a likely date mis-log: a day with 2+ workouts whose previous day has
-// none, where the two sessions look different (a repeated identical session is
-// not a confident candidate). The earlier-logged workout is the move target.
+type WorkoutKind = "running" | "cardio" | "lifting" | "hybrid" | "unknown";
+
+const RUN_KEYWORDS = [
+  "run", "running", "jog", "easy run", "tempo", "interval", "sprint",
+  "mile", "zone 2", "zone2", "treadmill", "5k", "10k", "outdoor run",
+];
+const CARDIO_KEYWORDS = ["cardio", "bike", "cycling", "spin", "row", "elliptical", "swim", "stairmaster"];
+
+// Classify a workout as running / cardio / lifting / hybrid from its title,
+// exercises, muscle groups and source. Strava only imports runs here, so a
+// Strava-sourced workout is always a run.
+function classifyWorkout(group: WorkoutGroup): WorkoutKind {
+  const haystack = [group.workout_type || "", ...(group.exercise_names || []), ...(group.muscle_groups || [])]
+    .join(" ")
+    .toLowerCase();
+  const source = (group.source || "").toLowerCase();
+  const isRun = source.includes("strava") || RUN_KEYWORDS.some((keyword) => haystack.includes(keyword));
+  const isCardio = CARDIO_KEYWORDS.some((keyword) => haystack.includes(keyword));
+  // A lift carries set/rep/weight volume; a pure run/cardio session does not.
+  const isLift = haystack.includes("strength") || haystack.includes("lift") || (Number(group.total_volume) || 0) > 0;
+  if (isRun && isLift) return "hybrid";
+  if (isRun) return "running";
+  if (isCardio && isLift) return "hybrid";
+  if (isCardio) return "cardio";
+  if (isLift) return "lifting";
+  return "unknown";
+}
+
+function workoutKindLabel(group: WorkoutGroup): string {
+  const kind = classifyWorkout(group);
+  if (kind === "running") {
+    return (group.source || "").toLowerCase().includes("strava") ? "Strava run" : "Hevy run";
+  }
+  if (kind === "cardio") return "Cardio";
+  if (kind === "hybrid") return "Lift + cardio";
+  if (kind === "lifting") return "Lift";
+  return "Workout";
+}
+
+// Detect a likely date mis-log: a day with 2+ *lifting* sessions whose previous
+// day has none. A run logged alongside a lift is a valid two-a-day and is not a
+// candidate. A repeated identical lifting session is also not flagged.
 function detectMisloggedWorkout(workouts: WorkoutGroup[]): MislogSuggestion | null {
   const byDate = new Map<string, WorkoutGroup[]>();
   for (const workout of workouts) {
@@ -3766,8 +3805,12 @@ function detectMisloggedWorkout(workouts: WorkoutGroup[]): MislogSuggestion | nu
     if (group.length < 2) continue;
     const previousDay = previousDayISO(date);
     if (!previousDay || byDate.has(previousDay)) continue;
-    const earlier = group[0];
-    const later = group[1];
+    // Only same-day lifting sessions are mis-log candidates — a run + lift is
+    // legitimate two-a-day training, not an accidental duplicate.
+    const lifts = group.filter((workout) => classifyWorkout(workout) === "lifting");
+    if (lifts.length < 2) continue;
+    const earlier = lifts[0];
+    const later = lifts[1];
     const sameType = (earlier.workout_type || "").trim().toLowerCase() === (later.workout_type || "").trim().toLowerCase();
     const sameMuscles = [...earlier.muscle_groups].sort().join("|") === [...later.muscle_groups].sort().join("|");
     if (sameType && sameMuscles) continue;
@@ -3858,6 +3901,18 @@ function WorkoutHistory({
                 <p className="mt-1 text-sm text-zinc-400">{workout.workout_type || "Workout"} - {workout.exercise_names.slice(0, 5).join(", ") || "No exercises"}</p>
               </div>
               <div className="grid grid-cols-2 gap-2 text-xs sm:flex sm:flex-wrap">
+                {(() => {
+                  const kind = classifyWorkout(workout);
+                  const isRunLike = kind === "running" || kind === "cardio";
+                  return (
+                    <span className={cx(
+                      "rounded-full border px-2 py-1 font-semibold",
+                      isRunLike ? "border-sky-300/30 bg-sky-300/10 text-sky-200" : "border-lime-300/30 bg-lime-300/10 text-lime-200",
+                    )}>
+                      {workoutKindLabel(workout)}
+                    </span>
+                  );
+                })()}
                 <span className="rounded-full border border-white/10 px-2 py-1 text-zinc-300">{workout.total_sets} sets</span>
                 <span className="rounded-full border border-white/10 px-2 py-1 text-zinc-300">{Math.round(workout.total_volume).toLocaleString()} volume</span>
                 <span className="rounded-full border border-white/10 px-2 py-1 text-zinc-300">{workout.duration_minutes ? `${Math.round(workout.duration_minutes)} min` : "No duration"}</span>
