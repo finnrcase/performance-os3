@@ -40,6 +40,7 @@ SUMMARY_COLUMNS = [
     "carbs_delta",
     "fat_delta",
     "adherence_score",
+    "nutrition_logged",
     "notes",
 ]
 
@@ -71,7 +72,23 @@ def _target_value(targets: dict | None, key: str) -> float | None:
     return parsed if parsed > 0 else None
 
 
+def is_missing_nutrition_day(total_calories) -> bool:
+    """A day with no real calorie intake is a missing food log, not a true 0.
+
+    0-calorie days are assumed to be days the user forgot to log, unless a
+    future explicit fasting/zero-day feature marks them as intentional.
+    """
+    try:
+        return float(total_calories or 0) <= 0
+    except (TypeError, ValueError):
+        return True
+
+
 def _adherence_score(row: pd.Series) -> float | None:
+    # A missing food-log day has no real intake — it has no adherence score
+    # rather than a misleading 0%.
+    if is_missing_nutrition_day(row.get("total_calories")):
+        return None
     target_map = {
         "total_calories": "target_calories",
         "total_protein": "target_protein",
@@ -141,6 +158,7 @@ def build_daily_nutrition_summary(nutrition_log_df: pd.DataFrame, targets: dict 
     grouped["carbs_delta"] = grouped["total_carbs"] - grouped["target_carbs"]
     grouped["fat_delta"] = grouped["total_fat"] - grouped["target_fat"]
     grouped["adherence_score"] = grouped.apply(_adherence_score, axis=1)
+    grouped["nutrition_logged"] = ~grouped["total_calories"].apply(is_missing_nutrition_day)
     grouped["notes"] = ""
 
     for column in OPTIONAL_MICROS:
@@ -164,6 +182,11 @@ def load_daily_nutrition_summary() -> pd.DataFrame:
     for column in SUMMARY_COLUMNS:
         if column not in summary_df.columns:
             summary_df[column] = pd.NA
+    # Always recompute the missing-log flag from calories so historical rows
+    # (saved before this flag existed) are backfilled correctly on read.
+    summary_df["nutrition_logged"] = ~pd.to_numeric(
+        summary_df["total_calories"], errors="coerce"
+    ).apply(is_missing_nutrition_day)
     return summary_df[SUMMARY_COLUMNS]
 
 
@@ -182,46 +205,89 @@ def get_nutrition_history(days: int = 30) -> pd.DataFrame:
 
 
 def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7) -> dict:
-    """Summarize recent calorie and protein target adherence."""
+    """Summarize recent calorie and protein adherence.
+
+    0-calorie days are treated as missing food logs: they are excluded from
+    every average and target count, and reduce the reported confidence.
+    """
+    empty = {
+        "average_calories": None,
+        "average_target_calories": None,
+        "average_calories_delta": None,
+        "average_protein": None,
+        "average_target_protein": None,
+        "average_protein_delta": None,
+        "days_over_target": 0,
+        "days_under_target": 0,
+        "consistency_score": None,
+        "logged_days": 0,
+        "missing_days": 0,
+        "confidence": "low",
+        "data_quality_note": "No nutrition has been logged yet.",
+    }
     if summary_df.empty:
-        return {
-            "average_calories": None,
-            "average_target_calories": None,
-            "average_calories_delta": None,
-            "average_protein": None,
-            "average_target_protein": None,
-            "average_protein_delta": None,
-            "days_over_target": 0,
-            "days_under_target": 0,
-            "consistency_score": None,
-        }
+        return empty
 
     df = summary_df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"]).sort_values("date").tail(max(days, 1))
     for column in ["total_calories", "target_calories", "total_protein", "target_protein", "adherence_score"]:
         df[column] = pd.to_numeric(df.get(column), errors="coerce")
-    with_targets = df.dropna(subset=["target_calories"])
-    protein_targets = df.dropna(subset=["target_protein"])
+
+    window_days = len(df)
+    # Only days with real intake count; 0-calorie days are missing logs.
+    logged = df[~df["total_calories"].apply(is_missing_nutrition_day)]
+    missing_days = window_days - len(logged)
+    if logged.empty:
+        result = dict(empty)
+        result["missing_days"] = missing_days
+        result["data_quality_note"] = (
+            f"All {window_days} recent day(s) are missing a food log."
+            if window_days
+            else "No nutrition has been logged yet."
+        )
+        return result
+
+    with_targets = logged.dropna(subset=["target_calories"])
+    protein_targets = logged.dropna(subset=["target_protein"])
+    confidence = "high" if missing_days == 0 else "medium" if missing_days <= 2 else "low"
+    note = (
+        f"{missing_days} missing food log(s) in the last {window_days} days."
+        if missing_days
+        else "All recent days have a food log."
+    )
 
     return {
-        "average_calories": round(float(df["total_calories"].mean()), 0) if not df.empty else None,
+        "average_calories": round(float(logged["total_calories"].mean()), 0),
         "average_target_calories": round(float(with_targets["target_calories"].mean()), 0) if not with_targets.empty else None,
         "average_calories_delta": round(float((with_targets["total_calories"] - with_targets["target_calories"]).mean()), 0) if not with_targets.empty else None,
-        "average_protein": round(float(df["total_protein"].mean()), 1) if not df.empty else None,
+        "average_protein": round(float(logged["total_protein"].mean()), 1),
         "average_target_protein": round(float(protein_targets["target_protein"].mean()), 1) if not protein_targets.empty else None,
         "average_protein_delta": round(float((protein_targets["total_protein"] - protein_targets["target_protein"]).mean()), 1) if not protein_targets.empty else None,
         "days_over_target": int((with_targets["total_calories"] > with_targets["target_calories"]).sum()) if not with_targets.empty else 0,
         "days_under_target": int((with_targets["total_calories"] < with_targets["target_calories"]).sum()) if not with_targets.empty else 0,
-        "consistency_score": round(float(df["adherence_score"].dropna().mean()), 1) if not df["adherence_score"].dropna().empty else None,
+        "consistency_score": round(float(logged["adherence_score"].dropna().mean()), 1) if not logged["adherence_score"].dropna().empty else None,
+        "logged_days": int(len(logged)),
+        "missing_days": int(missing_days),
+        "confidence": confidence,
+        "data_quality_note": note,
     }
 
 
 def get_food_history_for_optimization(summary_df: pd.DataFrame) -> pd.DataFrame:
-    """Return compact summary fields used by calorie optimization engines."""
+    """Return compact summary fields used by calorie optimization engines.
+
+    Missing food-log days (0 calories) are dropped so the adaptive nutrition,
+    lean-bulk, baseline-learning and correlation engines never treat a forgotten
+    log as a real under-eating day.
+    """
     if summary_df.empty:
         return pd.DataFrame(columns=["date", "calories", "protein", "target_calories", "target_protein", "calories_delta", "protein_delta", "adherence_score"])
     df = summary_df.copy()
+    df["total_calories"] = pd.to_numeric(df["total_calories"], errors="coerce")
+    df = df[~df["total_calories"].apply(is_missing_nutrition_day)]
+    if df.empty:
+        return pd.DataFrame(columns=["date", "calories", "protein", "target_calories", "target_protein", "calories_delta", "protein_delta", "adherence_score"])
     return pd.DataFrame(
         {
             "date": df["date"],

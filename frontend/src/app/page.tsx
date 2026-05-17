@@ -187,6 +187,7 @@ type DailyNutritionSummary = {
   carbs_delta: number | null;
   fat_delta: number | null;
   adherence_score: number | null;
+  nutrition_logged?: boolean;
   notes: string;
 };
 
@@ -200,6 +201,10 @@ type NutritionAdherence = {
   days_over_target: number;
   days_under_target: number;
   consistency_score: number | null;
+  logged_days?: number;
+  missing_days?: number;
+  confidence?: "high" | "medium" | "low" | string;
+  data_quality_note?: string;
 };
 
 type ParsedFood = {
@@ -1774,11 +1779,17 @@ function FoodHistoryList({ logs, nutritionHistory }: Readonly<{ logs: NutritionE
               { calories: 0, protein: 0, carbs: 0, fat: 0 },
             );
 
+        const isMissingLog = summary
+          ? summary.nutrition_logged === false || (Number(summary.total_calories) || 0) <= 0
+          : totals.calories <= 0;
+
         return (
           <div key={date} className="rounded-lg border border-white/10 bg-white/[0.03] p-4">
             <div className="flex flex-col gap-1 sm:flex-row sm:items-baseline sm:justify-between">
               <h3 className="font-semibold text-white">{date}</h3>
-              <p className="text-sm text-zinc-400">{foodMacroSummary(totals)}</p>
+              <p className={cx("text-sm", isMissingLog ? "text-amber-300/80" : "text-zinc-400")}>
+                {isMissingLog ? "Missing food log" : foodMacroSummary(totals)}
+              </p>
             </div>
             <div className="mt-3 space-y-2">
               {entries.slice().reverse().map((entry, index) => (
@@ -3187,6 +3198,11 @@ function FoodPage({
                   <MetricCard title="Days over target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent 7 logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                   <MetricCard title="Consistency" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories and macro adherence" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
                 </div>
+                {nutritionAdherence?.data_quality_note ? (
+                  <p className={cx("text-xs", (nutritionAdherence.missing_days ?? 0) > 0 ? "text-amber-300/90" : "text-zinc-500")}>
+                    Nutrition confidence: {(nutritionAdherence.confidence ?? "low").replace(/^./, (c) => c.toUpperCase())} — {nutritionAdherence.data_quality_note}
+                  </p>
+                ) : null}
                 <ChartFrame className="h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <RechartsLineChart data={recentHistory}>
@@ -4902,6 +4918,11 @@ function HistoryPage({
                 <MetricCard title="Over Target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                 <MetricCard title="Adherence" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories/macros vs targets" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
               </div>
+            {nutritionAdherence?.data_quality_note ? (
+              <p className={cx("text-xs", (nutritionAdherence.missing_days ?? 0) > 0 ? "text-amber-300/90" : "text-zinc-500")}>
+                Nutrition confidence: {(nutritionAdherence.confidence ?? "low").replace(/^./, (c) => c.toUpperCase())} — {nutritionAdherence.data_quality_note}
+              </p>
+            ) : null}
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={dailyNutritionTrend}>
