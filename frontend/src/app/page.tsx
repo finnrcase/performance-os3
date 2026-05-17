@@ -6452,6 +6452,22 @@ export default function Home() {
     }
   };
 
+  const moveWorkoutDate = useCallback(async (workoutId: string, newDate: string) => {
+    setMessage(null);
+    setApiError(null);
+    try {
+      const result = await apiSend<{ old_date?: string; new_date?: string }>(
+        "/api/training/workout-date",
+        "POST",
+        { workout_id: workoutId, new_date: newDate },
+      );
+      setMessage(`Workout moved to ${result.new_date ?? newDate}. Analytics refreshed.`);
+      await refreshAll();
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Could not move the workout.");
+    }
+  }, [refreshAll]);
+
   const updateSelectedExercise = (exercise: string) => {
     setSelectedExercise(exercise);
     void apiGet<StrengthTrendResponse>(strengthTrendPath(exercise))
@@ -7043,6 +7059,7 @@ export default function Home() {
     training: (
       <TrainingPage
         workoutHistory={workoutHistory}
+        onMoveWorkout={moveWorkoutDate}
         strength={strengthTrends}
         selectedExercise={selectedExercise}
         setSelectedExercise={updateSelectedExercise}
@@ -7150,6 +7167,7 @@ export default function Home() {
         recoveryTrend={dashboard?.recovery_trend ?? []}
         trainingVolume={dashboard?.training_volume ?? []}
         workoutHistory={workoutHistory}
+        onMoveWorkout={moveWorkoutDate}
         strength={strengthTrends}
         selectedExercise={selectedExercise}
         setSelectedExercise={updateSelectedExercise}
