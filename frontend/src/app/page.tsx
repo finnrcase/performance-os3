@@ -3735,26 +3735,120 @@ function RecoveryPage({
   );
 }
 
+function previousDayISO(dateStr: string): string {
+  const base = new Date(`${(dateStr || "").slice(0, 10)}T00:00:00`);
+  if (Number.isNaN(base.getTime())) return "";
+  base.setDate(base.getDate() - 1);
+  return base.toISOString().slice(0, 10);
+}
+
+type MislogSuggestion = {
+  date: string;
+  previousDay: string;
+  earlier: WorkoutGroup;
+  later: WorkoutGroup;
+};
+
+// Detect a likely date mis-log: a day with 2+ workouts whose previous day has
+// none, where the two sessions look different (a repeated identical session is
+// not a confident candidate). The earlier-logged workout is the move target.
+function detectMisloggedWorkout(workouts: WorkoutGroup[]): MislogSuggestion | null {
+  const byDate = new Map<string, WorkoutGroup[]>();
+  for (const workout of workouts) {
+    const key = (workout.date || "").slice(0, 10);
+    if (!key) continue;
+    const existing = byDate.get(key);
+    if (existing) existing.push(workout);
+    else byDate.set(key, [workout]);
+  }
+  for (const date of [...byDate.keys()].sort().reverse()) {
+    const group = byDate.get(date) ?? [];
+    if (group.length < 2) continue;
+    const previousDay = previousDayISO(date);
+    if (!previousDay || byDate.has(previousDay)) continue;
+    const earlier = group[0];
+    const later = group[1];
+    const sameType = (earlier.workout_type || "").trim().toLowerCase() === (later.workout_type || "").trim().toLowerCase();
+    const sameMuscles = [...earlier.muscle_groups].sort().join("|") === [...later.muscle_groups].sort().join("|");
+    if (sameType && sameMuscles) continue;
+    return { date, previousDay, earlier, later };
+  }
+  return null;
+}
+
 function WorkoutHistory({
   workouts,
   onImportHevy,
+  onMoveWorkout,
   defaultExpanded = false,
   metadata = "Synced from Hevy",
 }: Readonly<{
   workouts: WorkoutGroup[];
   onImportHevy: () => void;
+  onMoveWorkout?: (workoutId: string, newDate: string) => void | Promise<void>;
   defaultExpanded?: boolean;
   metadata?: string;
 }>) {
   const [expanded, setExpanded] = useState(defaultExpanded);
+  const [dismissedDate, setDismissedDate] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState("");
+  const [busy, setBusy] = useState(false);
   const thisMonth = new Date().toISOString().slice(0, 7);
   const monthlyCount = workouts.filter((workout) => workout.date.startsWith(thisMonth)).length;
   const subtitle = [metadata, monthlyCount ? `${monthlyCount} workouts this month` : ""].filter(Boolean).join(" · ");
+  const suggestion = useMemo(() => detectMisloggedWorkout(workouts), [workouts]);
+
+  const handleMove = async (workoutId: string, newDate: string) => {
+    if (!onMoveWorkout || !newDate || busy) return;
+    setBusy(true);
+    try {
+      await onMoveWorkout(workoutId, newDate);
+      setEditingId(null);
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const content = !workouts.length ? (
     <EmptyState title="No workouts logged yet" description="Hevy-synced sessions will appear here by day." action="Import from Hevy" onAction={onImportHevy} />
   ) : (
     <div className="space-y-3">
+      {onMoveWorkout && suggestion && dismissedDate !== suggestion.date ? (
+        <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4">
+          <p className="text-sm font-semibold text-amber-100">Possible mis-logged workout</p>
+          <p className="mt-1 text-sm text-amber-100/80">
+            Two workouts were logged on {suggestion.date} and none on {suggestion.previousDay}. Move the earlier
+            workout{suggestion.earlier.workout_type ? ` (${suggestion.earlier.workout_type})` : ""} to {suggestion.previousDay}?
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => handleMove(suggestion.earlier.workout_id, suggestion.previousDay)}
+              disabled={busy}
+              className="rounded-lg border border-amber-300/40 bg-amber-300/15 px-3 py-2 text-sm font-semibold text-amber-50 transition hover:bg-amber-300/25 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {busy ? "Moving…" : `Move earlier workout to ${suggestion.previousDay}`}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDismissedDate(suggestion.date)}
+              disabled={busy}
+              className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:opacity-60"
+            >
+              Keep as today
+            </button>
+            <button
+              type="button"
+              onClick={() => { setDismissedDate(suggestion.date); setExpanded(true); }}
+              disabled={busy}
+              className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:opacity-60"
+            >
+              Review manually
+            </button>
+          </div>
+        </div>
+      ) : null}
       {workouts.map((workout) => (
         <details key={`${workout.date}-${workout.workout_id}`} className="rounded-xl border border-white/10 bg-white/[0.035] p-4">
           <summary className="cursor-pointer list-none">
@@ -3795,6 +3889,45 @@ function WorkoutHistory({
               </tbody>
             </table>
           </div>
+          {onMoveWorkout ? (
+            <div className="mt-3">
+              {editingId === workout.workout_id ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-xs text-zinc-400">Move this workout to:</span>
+                  <input
+                    type="date"
+                    value={editValue}
+                    onChange={(event) => setEditValue(event.target.value)}
+                    className="rounded-lg border border-white/10 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => handleMove(workout.workout_id, editValue)}
+                    disabled={busy || !editValue || editValue === workout.date.slice(0, 10)}
+                    className="rounded-lg border border-lime-300/30 bg-lime-300/10 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {busy ? "Saving…" : "Save date"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingId(null)}
+                    disabled={busy}
+                    className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:opacity-60"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => { setEditingId(workout.workout_id); setEditValue(workout.date.slice(0, 10)); }}
+                  className="rounded-lg border border-white/10 px-3 py-1.5 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04]"
+                >
+                  Edit date
+                </button>
+              )}
+            </div>
+          ) : null}
           <details className="mt-3 rounded-lg border border-white/10 bg-zinc-950/40 p-3">
             <summary className="cursor-pointer text-xs font-semibold text-zinc-400">Advanced/debug source IDs</summary>
             <div className="mt-3 space-y-1 text-xs text-zinc-500">
@@ -4050,6 +4183,7 @@ function TrainingPage({
   onConfirmHevy,
   onCancelHevy,
   onSyncHevy,
+  onMoveWorkout,
   onAnalyzeTraining,
   hevyPreview,
   hevySync,
@@ -4073,6 +4207,7 @@ function TrainingPage({
   onConfirmHevy: () => void;
   onCancelHevy: () => void;
   onSyncHevy: () => void;
+  onMoveWorkout: (workoutId: string, newDate: string) => void | Promise<void>;
   onAnalyzeTraining: () => void;
   hevyPreview: HevyPreview | null;
   hevySync: HevySyncStatus | null;
@@ -4162,7 +4297,7 @@ function TrainingPage({
           ) : null}
         </Card>
       </div>
-      <WorkoutHistory workouts={workoutHistory} onImportHevy={onPreviewHevy} metadata={relativeSyncTime(hevySync?.last_synced_at ?? "")} />
+      <WorkoutHistory workouts={workoutHistory} onImportHevy={onPreviewHevy} onMoveWorkout={onMoveWorkout} metadata={relativeSyncTime(hevySync?.last_synced_at ?? "")} />
       <StrengthTrendsSection
         strength={strength}
         selectedExercise={selectedExercise}
@@ -4314,6 +4449,7 @@ function HistoryPage({
   recoveryTrend,
   trainingVolume,
   workoutHistory,
+  onMoveWorkout,
   strength,
   selectedExercise,
   setSelectedExercise,
@@ -4336,6 +4472,7 @@ function HistoryPage({
   recoveryTrend: DashboardData["recovery_trend"];
   trainingVolume: DashboardData["training_volume"];
   workoutHistory: WorkoutGroup[];
+  onMoveWorkout: (workoutId: string, newDate: string) => void | Promise<void>;
   strength: StrengthTrendResponse | null;
   selectedExercise: string;
   setSelectedExercise: (value: string) => void;
@@ -5055,7 +5192,7 @@ function HistoryPage({
           )}
         </Card>
       </div>
-      <WorkoutHistory workouts={workoutHistory} onImportHevy={() => undefined} defaultExpanded metadata="Training history" />
+      <WorkoutHistory workouts={workoutHistory} onImportHevy={() => undefined} onMoveWorkout={onMoveWorkout} defaultExpanded metadata="Training history" />
       <StrengthTrendsSection
         strength={strength}
         selectedExercise={selectedExercise}

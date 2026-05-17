@@ -23,7 +23,7 @@ from src.nutrition import calculate_daily_totals, load_nutrition_log
 from src.nutrition_targets import calculate_macro_targets
 from src.goals import build_automatic_goals, load_user_goals
 from src.recovery import load_recovery_log
-from src.training import add_training_entry, load_training_log
+from src.training import add_training_entry, load_training_log, move_workout_date
 
 
 router = APIRouter(tags=["training"])
@@ -207,6 +207,23 @@ def add_training_log(entry: TrainingEntry) -> dict:
     """Add a local training entry."""
     training_df = add_training_entry(**entry.model_dump())
     return {"items": dataframe_records(training_df)}
+
+
+class WorkoutDateUpdate(BaseModel):
+    workout_id: str
+    new_date: str
+
+
+@router.post("/api/training/workout-date")
+def update_workout_date(payload: WorkoutDateUpdate) -> dict:
+    """Move a logged workout to a different date (e.g. an accidental same-day
+    duplicate that belonged to the previous day). The workout is moved in
+    place — never duplicated — and source IDs are preserved."""
+    try:
+        result = move_workout_date(payload.workout_id, payload.new_date)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"status": "ok", **result}
 
 
 @router.post("/api/training/ai/insights")

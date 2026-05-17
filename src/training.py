@@ -151,6 +151,53 @@ def save_training_log(df) -> None:
     save_dataframe("training_log", TRAINING_LOG_PATH, df, TRAINING_COLUMNS)
 
 
+def move_workout_date(workout_id: str, new_date: str) -> dict:
+    """Move every set-level row of one workout to a new date.
+
+    The workout is moved, not copied: workout_id, source, external_id and
+    hevy_workout_id are left untouched so source metadata and Hevy/Strava IDs
+    stay intact. The original date is recorded in notes as
+    ``date_corrected_from=`` for provenance, and updated_at is refreshed.
+    """
+    from datetime import datetime, timezone
+
+    workout_id = str(workout_id or "").strip()
+    if not workout_id:
+        raise ValueError("workout_id is required.")
+    parsed = pd.to_datetime(new_date, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError("new_date must be a valid YYYY-MM-DD date.")
+    normalized_date = parsed.date().isoformat()
+
+    df = load_training_log()
+    if df.empty:
+        raise ValueError(f"No workout found with id {workout_id}.")
+    mask = df["workout_id"].fillna("").astype(str).str.strip() == workout_id
+    if not mask.any():
+        raise ValueError(f"No workout found with id {workout_id}.")
+
+    old_dates = sorted({str(value) for value in df.loc[mask, "date"].dropna().astype(str) if str(value).strip()})
+    old_date = old_dates[0] if old_dates else ""
+    now = datetime.now(timezone.utc).isoformat()
+
+    for index in df.index[mask]:
+        if old_date:
+            previous = str(df.at[index, "notes"] or "").strip()
+            if "date_corrected_from=" not in previous:
+                marker = f"date_corrected_from={old_date}"
+                df.at[index, "notes"] = f"{previous} | {marker}" if previous else marker
+        df.at[index, "date"] = normalized_date
+        df.at[index, "updated_at"] = now
+
+    save_training_log(df)
+    return {
+        "workout_id": workout_id,
+        "old_date": old_date,
+        "new_date": normalized_date,
+        "moved_rows": int(mask.sum()),
+    }
+
+
 def add_training_entry(
     date,
     workout_type,
