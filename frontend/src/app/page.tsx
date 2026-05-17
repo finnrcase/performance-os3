@@ -6112,7 +6112,11 @@ export default function Home() {
   const [message, setMessage] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
+  const [rateLimited, setRateLimited] = useState(false);
   const hevyAutoSyncRef = useRef(false);
+
+  // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
+  useEffect(() => subscribeRateLimit(setRateLimited), []);
 
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
   const strengthTrendPath = useCallback((exercise = selectedExercise) => {
@@ -6271,7 +6275,9 @@ export default function Home() {
     if (requiredFailures.length > 0) {
       const joined = requiredReasons.join(" | ");
       let hint: string;
-      if (joined.includes("401") || joined.includes("403") || joined.includes("unauthor") || joined.includes("forbidden")) {
+      if (joined.includes("429") || joined.includes("rate limit") || joined.includes("too many requests")) {
+        hint = "The server is temporarily rate limiting requests (not your account). Wait a moment and click Retry.";
+      } else if (joined.includes("401") || joined.includes("403") || joined.includes("unauthor") || joined.includes("forbidden")) {
         hint = "Your session may have expired — please log in again.";
       } else if (joined.includes("invalid json") || joined.includes("unexpected token")) {
         hint = "The backend responded but the data could not be read (invalid response). Click Retry.";
@@ -7180,6 +7186,11 @@ export default function Home() {
           </header>
 
           <div className="p-4 sm:p-6 lg:p-8">
+            {rateLimited ? (
+              <Card className="mb-4 border-amber-400/30 bg-amber-400/10">
+                <p className="text-sm text-amber-100">Temporarily rate limited — retrying shortly. This is a server limit, not your account.</p>
+              </Card>
+            ) : null}
             {apiError ? (
               <Card className="mb-4 border-red-400/30 bg-red-400/10">
                 <div className="flex flex-wrap items-start justify-between gap-3">
