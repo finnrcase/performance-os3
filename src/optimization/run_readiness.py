@@ -12,16 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-
-DAY_SPLIT = {
-    "Monday": "Pull Day",
-    "Tuesday": "Leg Day",
-    "Wednesday": "Push Day",
-    "Thursday": "Pull Day",
-    "Friday": "Leg Day",
-    "Saturday": "Push Day",
-    "Sunday": "Run Day",
-}
+from src.training_schedule import LOWER_BODY_TERMS, is_run_row, planned_training_for_date
 
 
 def _empty(reason: str) -> dict:
@@ -153,20 +144,22 @@ def _training_context(training_df: pd.DataFrame, strava_df: pd.DataFrame | None,
             strava["workout_type"] = "Run"
         training = pd.concat([training, strava], ignore_index=True)
 
-    weekday = today.day_name()
-    planned_day = DAY_SPLIT.get(weekday, "Training Day")
+    planned = planned_training_for_date(today)
+    planned_day = planned["display_label"]
     yesterday = today - pd.Timedelta(days=1)
     week_start = today - pd.Timedelta(days=today.weekday())
 
     if training.empty:
         return {
             "planned_day": planned_day,
+            "planned_is_run_day": bool(planned["is_run_day"]),
+            "planned_is_leg_day": bool(planned["is_leg_day"]),
             "today_has_run": False,
-            "today_has_leg": "Leg" in planned_day,
+            "today_has_leg": bool(planned["is_leg_day"]),
             "yesterday_had_leg": False,
             "weekly_cardio_sessions": 0,
             "weekly_cardio_minutes": 0.0,
-            "hard_leg_context": "Leg" in planned_day,
+            "hard_leg_context": bool(planned["is_leg_day"]),
         }
 
     for column in ["workout_type", "muscle_group", "exercise", "source", "notes"]:
@@ -182,8 +175,8 @@ def _training_context(training_df: pd.DataFrame, strava_df: pd.DataFrame | None,
         + " "
         + training["notes"].fillna("").astype(str)
     ).str.lower()
-    cardio_mask = text.str.contains("run|cardio|mile|strava", regex=True, na=False) | training["source"].fillna("").astype(str).str.lower().eq("strava")
-    leg_mask = text.str.contains("leg|quad|hamstring|glute|squat|deadlift|rdl|lunge|calf", regex=True, na=False)
+    cardio_mask = training.apply(is_run_row, axis=1)
+    leg_mask = text.str.contains("|".join(LOWER_BODY_TERMS), regex=True, na=False)
 
     today_rows = training[training["date"] == today]
     yesterday_rows = training[training["date"] == yesterday]
@@ -192,12 +185,14 @@ def _training_context(training_df: pd.DataFrame, strava_df: pd.DataFrame | None,
 
     return {
         "planned_day": planned_day,
+        "planned_is_run_day": bool(planned["is_run_day"]),
+        "planned_is_leg_day": bool(planned["is_leg_day"]),
         "today_has_run": bool(cardio_mask.reindex(today_rows.index, fill_value=False).any()),
-        "today_has_leg": bool(leg_mask.reindex(today_rows.index, fill_value=False).any()) or "Leg" in planned_day,
+        "today_has_leg": bool(leg_mask.reindex(today_rows.index, fill_value=False).any()) or bool(planned["is_leg_day"]),
         "yesterday_had_leg": bool(leg_mask.reindex(yesterday_rows.index, fill_value=False).any()),
         "weekly_cardio_sessions": int(len(week_cardio.groupby("date"))) if not week_cardio.empty else 0,
         "weekly_cardio_minutes": float(week_cardio["duration_minutes"].sum()) if not week_cardio.empty else 0.0,
-        "hard_leg_context": bool(leg_mask.reindex(today_rows.index, fill_value=False).any() or leg_mask.reindex(yesterday_rows.index, fill_value=False).any() or "Leg" in planned_day),
+        "hard_leg_context": bool(leg_mask.reindex(today_rows.index, fill_value=False).any() or leg_mask.reindex(yesterday_rows.index, fill_value=False).any() or planned["is_leg_day"]),
     }
 
 
@@ -292,7 +287,7 @@ def generate_extra_run_readiness(
 
     if training["today_has_run"]:
         red_flags.append("A run or cardio workout is already logged today.")
-    if training["planned_day"] == "Sunday Run Day":
+    if training["planned_is_run_day"]:
         yellow_flags.append("Sunday is already the planned run day.")
     if training["today_has_leg"]:
         yellow_flags.append("Today is a leg-focused day.")
@@ -315,9 +310,9 @@ def generate_extra_run_readiness(
         (score is not None and score >= 85)
         or (score is None and sleep is not None and sleep >= 7.5 and not red_flags)
     )
-    if training["planned_day"] in {"Tuesday Leg Day", "Friday Leg Day"} and not excellent_recovery:
+    if training["planned_is_leg_day"] and not excellent_recovery:
         red_flags.append("Leg day calls for a conservative run decision.")
-    if training["planned_day"] == "Sunday Run Day" and not excellent_recovery:
+    if training["planned_is_run_day"] and not excellent_recovery:
         red_flags.append("Avoid stacking extra running on Run Day without excellent recovery.")
 
     reasoning = [*red_flags, *yellow_flags, *positives]

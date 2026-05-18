@@ -58,6 +58,7 @@ const navigation = [
 
 type PageId = (typeof navigation)[number]["id"];
 type FoodIconType = "bagel" | "protein_bar" | "oats" | "protein_shake" | "chicken";
+type AccentTheme = "lime" | "pink" | "purple" | "orange" | "blue" | "rainbow";
 
 type Goals = {
   current_bodyweight: number;
@@ -756,6 +757,17 @@ type DashboardData = {
     comparison: string | null;
     today_volume: number | null;
     percent_vs_average: number | null;
+    planned_workout?: string;
+    completed_workouts?: string[];
+    completed_summary?: string;
+    schedule_match?: string;
+    match_label?: string;
+    sources?: string[];
+    has_run?: boolean;
+    has_lift?: boolean;
+    cardio_indicator?: string | null;
+    extra_run_added?: boolean;
+    recovery_status_relative_to_plan?: string;
     run_summary?: RunSummary | null;
   };
   workout_quality: {
@@ -831,9 +843,29 @@ type SettingsData = {
   other_integrations?: Record<string, DiagnosticComponent>;
   required_user_actions?: string[];
   integrations: Record<string, string>;
+  appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
   services?: Record<string, { configured: boolean; status: string; message: string; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean }>;
+};
+
+type ApiConnectionLayer = {
+  status: string;
+  message: string;
+};
+
+type ApiConnectionTestItem = {
+  status: string;
+  message: string;
+  lastCheckedAt: string;
+  layers?: Record<string, ApiConnectionLayer>;
+};
+
+type ApiConnectionTestResponse = {
+  checkedAt?: string;
+  hevy: ApiConnectionTestItem;
+  openai: ApiConnectionTestItem;
+  withings: ApiConnectionTestItem;
 };
 
 type FormState = {
@@ -1058,6 +1090,27 @@ function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
 }
 
+const ACCENT_THEME_STORAGE_KEY = "performance-os-accent-theme";
+
+const accentThemeOptions: Array<{ id: AccentTheme; label: string; swatch: string }> = [
+  { id: "lime", label: "Lime", swatch: "bg-lime-300" },
+  { id: "pink", label: "Pink", swatch: "bg-pink-300" },
+  { id: "purple", label: "Purple", swatch: "bg-violet-300" },
+  { id: "orange", label: "Orange", swatch: "bg-orange-300" },
+  { id: "blue", label: "Blue", swatch: "bg-blue-300" },
+  { id: "rainbow", label: "Rainbow", swatch: "bg-[linear-gradient(120deg,#bef264,#67e8f9,#c4b5fd,#f9a8d4,#fdba74)]" },
+];
+
+function sanitizeAccentTheme(value: unknown): AccentTheme {
+  const normalized = String(value || "lime").toLowerCase();
+  return accentThemeOptions.some((option) => option.id === normalized) ? normalized as AccentTheme : "lime";
+}
+
+function readStoredAccentTheme(): AccentTheme {
+  if (typeof window === "undefined") return "lime";
+  return sanitizeAccentTheme(window.localStorage.getItem(ACCENT_THEME_STORAGE_KEY));
+}
+
 const DEFAULT_API_TIMEOUT_MS = 30_000;
 const UPLOAD_API_TIMEOUT_MS = 60_000;
 // Exponential backoff for HTTP 429 (server-side rate limiting): 1s, 3s, 8s,
@@ -1141,7 +1194,7 @@ async function fetchWithTimeout(
 
 async function apiGet<T>(path: string): Promise<T> {
   const url = apiUrl(path);
-  const response = await fetchWithTimeout(url, { cache: "no-store" });
+  const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" });
   if (!response.ok) {
     console.warn(`[apiGet] ${url} -> HTTP ${response.status}`);
     throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
@@ -1197,6 +1250,7 @@ async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
     {
       method: "POST",
       body: formData,
+      credentials: "include",
     },
     UPLOAD_API_TIMEOUT_MS,
   );
@@ -1219,7 +1273,7 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
   return (
     <div className="mb-4 flex items-start justify-between gap-4">
       <div>
-        {eyebrow ? <p className="mb-1 text-xs font-semibold uppercase tracking-[0.18em] text-lime-300/80">{eyebrow}</p> : null}
+        {eyebrow ? <p className="accent-text mb-1 text-xs font-semibold uppercase tracking-[0.18em]">{eyebrow}</p> : null}
         <h2 className="text-lg font-semibold text-white">{title}</h2>
       </div>
       {action ? <div>{action}</div> : null}
@@ -1374,7 +1428,7 @@ function macroIconAccent(label: string) {
   if (kind === "protein") return "border-teal-300/20 bg-teal-300/10 text-teal-300";
   if (kind === "carbs") return "border-blue-300/20 bg-blue-300/10 text-blue-300";
   if (kind === "fat") return "border-amber-300/20 bg-amber-300/10 text-amber-300";
-  return "border-lime-300/20 bg-lime-300/10 text-lime-300";
+  return "accent-outline";
 }
 
 type MacroProgress = {
@@ -1637,11 +1691,11 @@ function FoodIconPicker({
               className={cx(
                 "flex min-h-16 flex-col items-center justify-center gap-1 rounded-lg border px-2 py-2 text-center text-xs font-semibold transition",
                 selected
-                  ? "border-lime-300/60 bg-lime-300/15 text-lime-100"
-                  : "border-white/10 bg-zinc-950/45 text-zinc-300 hover:border-lime-300/25 hover:bg-lime-300/[0.06]",
+                  ? "accent-outline"
+                  : "accent-hover border-white/10 bg-zinc-950/45 text-zinc-300",
               )}
             >
-              <FoodIcon type={option.type} className="h-5 w-5 text-lime-200" />
+              <FoodIcon type={option.type} className="accent-text-strong h-5 w-5" />
               <span>{option.label}</span>
             </button>
           );
@@ -1695,11 +1749,11 @@ function FoodLogList({
         const isEditing = Boolean(entry.food_log_id && editingId === entry.food_log_id);
         const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
         return (
-          <div key={entryId} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-            <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div key={entryId} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+            <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
               <div className="flex min-w-0 items-start gap-3">
                 {selectedIcon ? (
-                  <span className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-lime-300/20 bg-lime-300/10 text-lime-200">
+                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
                     <FoodIcon type={selectedIcon} className="h-5 w-5" />
                   </span>
                 ) : null}
@@ -1708,34 +1762,41 @@ function FoodLogList({
                     <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
                     {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
                   </div>
-                  <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
                 </div>
               </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                {onEdit ? (
-                  <button
-                    type="button"
-                    onClick={() => onEdit(entry)}
-                    disabled={!entry.food_log_id || isSaving}
-                    className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
-                    aria-label={`Edit ${entry.food_name || "food entry"}`}
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                    Edit
-                  </button>
-                ) : null}
-                {onRemove ? (
-                  <button
-                    type="button"
-                    onClick={() => onRemove(entry)}
-                    disabled={!entry.food_log_id || removingId === entry.food_log_id || isSaving}
-                    className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
-                    aria-label={`Remove ${entry.food_name || "food entry"}`}
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                    {removingId === entry.food_log_id ? "Removing..." : "Remove"}
-                  </button>
-                ) : null}
+              <div className="grid gap-2 sm:justify-items-end">
+                <div className="flex flex-wrap gap-1.5 text-xs text-zinc-300 sm:justify-end">
+                  <span className="accent-outline rounded-full border px-2 py-1">{formatFoodAmount(entry.calories)} kcal</span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">P {formatFoodAmount(entry.protein)}g</span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">C {formatFoodAmount(entry.carbs)}g</span>
+                  <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">F {formatFoodAmount(entry.fat)}g</span>
+                </div>
+                <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                  {onEdit ? (
+                    <button
+                      type="button"
+                      onClick={() => onEdit(entry)}
+                      disabled={!entry.food_log_id || isSaving}
+                      className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label={`Edit ${entry.food_name || "food entry"}`}
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                      Edit
+                    </button>
+                  ) : null}
+                  {onRemove ? (
+                    <button
+                      type="button"
+                      onClick={() => onRemove(entry)}
+                      disabled={!entry.food_log_id || removingId === entry.food_log_id || isSaving}
+                      className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                      aria-label={`Remove ${entry.food_name || "food entry"}`}
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                      {removingId === entry.food_log_id ? "Removing..." : "Delete"}
+                    </button>
+                  ) : null}
+                </div>
               </div>
             </div>
 
@@ -1756,7 +1817,7 @@ function FoodLogList({
                     type="button"
                     onClick={() => onSaveIcon(entry)}
                     disabled={isSaving}
-                    className="inline-flex items-center gap-2 rounded-lg bg-lime-300 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="accent-bg inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <Check className="h-3.5 w-3.5" />
                     {isSaving ? "Saving..." : "Save"}
@@ -1885,7 +1946,7 @@ function EmptyState({
     <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
       <p className="font-medium text-white">{title}</p>
       <p className="mt-2 text-sm text-zinc-400">{description}</p>
-      <button onClick={onAction} className="mt-4 inline-flex items-center gap-2 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+      <button onClick={onAction} className="accent-bg mt-4 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold">
         <Plus className="h-4 w-4" />
         {action}
       </button>
@@ -1918,7 +1979,7 @@ function TextInput({
     <label className="space-y-2 text-sm text-zinc-400">
       <span>{label}</span>
       <input
-        className="h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-lime-300/60"
+        className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
         value={value}
         type={type}
         placeholder={placeholder}
@@ -1942,7 +2003,7 @@ function SelectInput({
     <label className="space-y-2 text-sm text-zinc-400">
       <span>{label}</span>
       <select
-        className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60"
+        className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >
@@ -2065,7 +2126,7 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
         </span>
       </div>
       <div className="mt-2 h-2 rounded-full bg-white/10">
-        <div className="h-2 rounded-full bg-lime-300" style={{ width: `${target ? percent : 0}%` }} />
+        <div className="accent-progress h-2 rounded-full" style={{ width: `${target ? percent : 0}%` }} />
       </div>
       <p className="mt-1 text-xs text-zinc-500">
         {!target ? "Set macro targets." : over && over > 0 ? `+${Math.round(over)}${unit === "kcal" ? " kcal" : unit} over` : `${Math.round(left ?? 0)}${unit === "kcal" ? " kcal" : unit} left`}
@@ -2192,7 +2253,7 @@ function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ repor
       >
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <p className="text-xs font-semibold uppercase tracking-[0.18em] text-lime-300/80">Weekly</p>
+            <p className="accent-text text-xs font-semibold uppercase tracking-[0.18em]">Weekly</p>
             <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>{report?.status ?? "learning"}</span>
           </div>
           <h2 className="mt-1 text-lg font-semibold text-white">Weekly Performance Report</h2>
@@ -2230,9 +2291,9 @@ function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ repor
                 <p className="text-xs font-medium uppercase tracking-[0.12em] text-amber-200/80">Watch</p>
                 <p className="mt-2 text-sm leading-6 text-amber-50">{report?.watch ?? "No clear weak signal yet."}</p>
               </div>
-              <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-3">
-                <p className="text-xs font-medium uppercase tracking-[0.12em] text-lime-200/80">Next week</p>
-                <p className="mt-2 text-sm leading-6 text-lime-50">{report?.recommendation ?? "Keep targets stable and build another week of clean logs."}</p>
+              <div className="accent-outline rounded-lg border p-3">
+                <p className="text-xs font-medium uppercase tracking-[0.12em]">Next week</p>
+                <p className="mt-2 text-sm leading-6 text-zinc-100">{report?.recommendation ?? "Keep targets stable and build another week of clean logs."}</p>
               </div>
             </div>
           </div>
@@ -2279,11 +2340,14 @@ function Dashboard({
   const topPlateauAlerts = optimization?.plateau_detection.top_alerts ?? [];
   const adaptiveRecommendation = data?.adaptive_recommendation;
   const topAdaptiveWarning = adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
+  const plannedWorkout = lift?.planned_workout ?? "Training";
+  const completedTraining = lift?.completed_summary || "";
+  const trainingSources = lift?.sources ?? [];
 
   return (
     <div className="grid gap-4 xl:grid-cols-5">
       <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log food</button>} />
+        <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
         {food?.has_targets ? (
           <div className="space-y-4">
             <DashboardProgressLine label="Calories" value={food.calories.eaten} target={food.calories.target} left={food.calories.left} over={food.calories.over} percent={food.calories.percent} unit="kcal" />
@@ -2327,15 +2391,34 @@ function Dashboard({
       </Card>
 
       <Card>
-        <SectionHeader eyebrow="Training" title="Today's Lift" action={<button onClick={() => setActivePage("training")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Training</button>} />
-        <p className="text-xl font-semibold text-white">{lift?.status ?? "No lift logged today"}</p>
-        <p className="mt-3 text-sm leading-6 text-zinc-400">{lift?.summary ?? "Log a workout or import from Hevy."}</p>
-        {lift?.today_volume ? <p className="mt-4 text-sm text-amber-200">Volume: {Math.round(lift.today_volume).toLocaleString()}</p> : null}
+        <SectionHeader eyebrow="Training" title="Today's Training" action={<button onClick={() => setActivePage("training")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Training</button>} />
+        <div className="space-y-3">
+          <div>
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Planned</p>
+            <p className="mt-1 text-xl font-semibold text-white">Today: {plannedWorkout}</p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Completed</p>
+            <p className="mt-1 text-sm font-semibold text-zinc-100">{completedTraining ? `Completed: ${completedTraining}` : "Workout not logged yet"}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className={cx("rounded-full border px-2.5 py-1 text-xs font-medium", lift?.schedule_match === "matched" || lift?.schedule_match === "matched_plus_extra_run" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : lift?.schedule_match === "different" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.04] text-zinc-400")}>
+                {lift?.match_label ?? "Workout not logged yet"}
+              </span>
+              {lift?.cardio_indicator ? <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">{lift.cardio_indicator}</span> : null}
+              {trainingSources.map((source) => (
+                <span key={source} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{source}</span>
+              ))}
+            </div>
+            {lift?.recovery_status_relative_to_plan ? <p className="mt-2 text-xs text-zinc-500">Recovery context: {lift.recovery_status_relative_to_plan}</p> : null}
+          </div>
+        </div>
+        {lift?.extra_run_added ? <p className="accent-outline mt-3 rounded-lg border p-3 text-sm font-semibold">Recovery run added</p> : null}
+        {lift?.today_volume ? <p className="mt-4 text-sm text-amber-200">Lift volume: {Math.round(lift.today_volume).toLocaleString()}</p> : null}
         {lift?.comparison ? <p className="mt-2 text-xs text-zinc-500">{lift.comparison}</p> : null}
         {lift?.run_summary ? (
           <div className="mt-4 border-t border-white/10 pt-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
-            <p className="mt-1 text-sm font-semibold text-lime-100">
+            <p className="accent-text-strong mt-1 text-sm font-semibold">
               {lift.run_summary.distance_miles.toFixed(2)} mi{lift.run_summary.run_count > 1 ? " total" : ""} · {formatRunDuration(lift.run_summary.duration_minutes)} · {formatRunPace(lift.run_summary.average_pace_min_per_mile)}{lift.run_summary.run_count > 1 ? " avg" : ""}
             </p>
             {(lift.run_summary.calories_burned || lift.run_summary.average_heart_rate) ? (
@@ -2399,7 +2482,7 @@ function Dashboard({
             </span>
           </div>
           <p className="mt-3 text-sm leading-6 text-zinc-300">{recovery?.extra_run_readiness?.message ?? "Connect wearable data for run readiness."}</p>
-          <p className="mt-2 text-sm font-semibold text-lime-200">{recovery?.extra_run_readiness?.recommended_run ?? "Connect wearable data"}</p>
+          <p className="accent-text-strong mt-2 text-sm font-semibold">{recovery?.extra_run_readiness?.recommended_run ?? "Connect wearable data"}</p>
           {recovery?.extra_run_readiness?.reasoning?.length ? (
             <p className="mt-2 text-xs leading-5 text-zinc-500">{recovery.extra_run_readiness.reasoning[0]}</p>
           ) : null}
@@ -2430,8 +2513,8 @@ function Dashboard({
           </button>
         ) : null}
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Macro adherence</p>
+          <div className="accent-outline rounded-lg border p-3">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
             <p className="mt-2 text-2xl font-semibold text-white">{optimization?.macro_adherence.weekly_score !== null && optimization?.macro_adherence.weekly_score !== undefined ? `${Math.round(optimization.macro_adherence.weekly_score)}` : "--"}</p>
             <p className="mt-1 text-xs leading-5 text-zinc-400">{optimization?.macro_adherence.summary ?? "Log meals against targets to calculate adherence."}</p>
           </div>
@@ -2472,12 +2555,12 @@ function Dashboard({
                 <p className="mt-1 text-sm text-zinc-400">{prs.bench_press.reps} rep{prs.bench_press.reps === 1 ? "" : "s"} · {prs.bench_press.date} · {prs.bench_press.source}</p>
                 {prs.bench_press.reps > 1 ? <p className="mt-2 text-sm text-emerald-200">Est. 1RM {prs.bench_press.estimated_1rm} lb</p> : null}
                 {prs.bench_press.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.bench_press.notes}</p> : null}
-                {prs.bench_press.manual_override ? <p className="mt-2 inline-flex rounded-full border border-lime-300/20 bg-lime-300/10 px-2.5 py-1 text-xs text-lime-100">Manual override</p> : null}
+                {prs.bench_press.manual_override ? <p className="accent-outline mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs">Manual override</p> : null}
               </>
             ) : (
               <p className="mt-3 text-sm text-zinc-500">Add bench PR</p>
             )}
-            <button onClick={onEditBenchPr} className="mt-4 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+            <button onClick={onEditBenchPr} className="accent-bg mt-4 rounded-lg px-3 py-2 text-sm font-semibold">
               {prs?.bench_press ? "Edit Bench PR" : "Add Bench PR"}
             </button>
             {forms.benchPr.editing ? (
@@ -2497,12 +2580,12 @@ function Dashboard({
                 <p className="mt-2 text-2xl font-semibold text-white">{prs.mile_time.display}</p>
                 <p className="mt-1 text-sm text-zinc-400">{prs.mile_time.date} · {prs.mile_time.source}{prs.mile_time.estimated ? " · estimated" : ""}</p>
                 {prs.mile_time.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.mile_time.notes}</p> : null}
-                {prs.mile_time.manual_override ? <p className="mt-2 inline-flex rounded-full border border-lime-300/20 bg-lime-300/10 px-2.5 py-1 text-xs text-lime-100">Manual override</p> : null}
+                {prs.mile_time.manual_override ? <p className="accent-outline mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs">Manual override</p> : null}
               </>
             ) : (
               <p className="mt-3 text-sm text-zinc-500">Add mile PR</p>
             )}
-            <button onClick={onEditMilePr} className="mt-4 rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">
+            <button onClick={onEditMilePr} className="accent-bg mt-4 rounded-lg px-3 py-2 text-sm font-semibold">
               {prs?.mile_time ? "Edit Mile PR" : "Add Mile PR"}
             </button>
             {forms.milePr.editing ? (
@@ -2576,7 +2659,7 @@ function GoalsPage({
               <p><span className="text-zinc-500">Mode:</span> Conservative 2500 kcal baseline with training-day carb support when workload and recovery justify it.</p>
             </div>
           </div>
-          <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.045] p-4">
+          <div className="accent-outline rounded-lg border p-4">
             <p className="text-sm text-zinc-400">Current active targets</p>
             <p className="mt-2 text-3xl font-semibold text-white">{targets ? `${targets.target_calories} kcal` : "No target"}</p>
             <p className="mt-3 text-sm text-zinc-300">
@@ -2611,7 +2694,7 @@ function GoalsPage({
                     : "The engine will combine weight, food, Hevy, Strava, performance, and recovery signals."}
                 </p>
               </div>
-              <span className="inline-flex w-fit rounded-full border border-lime-300/20 bg-lime-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-lime-100">
+              <span className="accent-outline inline-flex w-fit rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em]">
                 {adaptiveRecommendation?.confidence ?? "low"} confidence
               </span>
             </div>
@@ -2632,8 +2715,8 @@ function GoalsPage({
               </div>
             </div>
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
-              <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.045] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-lime-200/70">Day type</p>
+              <div className="accent-outline rounded-lg border p-3">
+                <p className="text-xs uppercase tracking-[0.12em]">Day type</p>
                 <p className="mt-2 text-sm font-semibold text-white">{adaptiveRecommendation?.dayType ?? "Learning"}</p>
                 <p className="mt-1 text-xs leading-5 text-zinc-400">{dayTypeAdjustment?.reason ?? "Workout and run context will tune daily carbs."}</p>
               </div>
@@ -2699,7 +2782,7 @@ function GoalsPage({
           subvalue={targets ? `Maintenance ${targets.maintenance_calories} - ${calorieDeltaLabel}` : "Save goals to calculate"}
           note={targets ? `Dynamic adjustment: ${targets.calorie_adjustment > 0 ? "+" : ""}${targets.calorie_adjustment} kcal/day. Macro math: ${targets.macro_calories ?? targets.target_calories} kcal (${targets.calorie_macro_delta ?? 0} delta).` : "Calories update from weight trend, training load, cardio, and recovery."}
           icon={Apple}
-          accent="border-lime-400/20 bg-lime-400/10 text-lime-300"
+          accent="accent-outline"
         />
         <TargetDetailCard
           title="Protein"
@@ -2757,7 +2840,7 @@ function GoalsPage({
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Action</p>
-              <p className="mt-2 text-sm font-semibold text-lime-100">{weightFeedback?.suggested_adjustment ?? "No bodyweight trend yet"}</p>
+              <p className="accent-text-strong mt-2 text-sm font-semibold">{weightFeedback?.suggested_adjustment ?? "No bodyweight trend yet"}</p>
             </div>
           </div>
           <p className="mt-4 text-sm leading-6 text-zinc-400">{weightFeedback?.reason ?? "Enter at least two bodyweight entries to unlock trend feedback."}</p>
@@ -2772,7 +2855,7 @@ function GoalsPage({
         <SectionHeader eyebrow="Lean Bulk" title="Calorie optimization details" />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <MetricCard title="7-Day Avg Weight" value={leanBulkDecision?.details.seven_day_avg_weight ? `${leanBulkDecision.details.seven_day_avg_weight}` : "Need data"} detail="Smooths water spikes" icon={Weight} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
-          <MetricCard title="14-Day Avg Weight" value={leanBulkDecision?.details.fourteen_day_avg_weight ? `${leanBulkDecision.details.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
+          <MetricCard title="14-Day Avg Weight" value={leanBulkDecision?.details.fourteen_day_avg_weight ? `${leanBulkDecision.details.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="accent-outline" />
           <MetricCard title="Calorie Avg" value={leanBulkDecision?.details.calorie_average ? `${leanBulkDecision.details.calorie_average}` : "Need logs"} detail="Recent daily average" icon={Apple} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
           <MetricCard title="Protein Avg" value={leanBulkDecision?.details.protein_average ? `${leanBulkDecision.details.protein_average}g` : "Need logs"} detail={leanBulkDecision?.details.protein_target ? `Target ~${leanBulkDecision.details.protein_target}g` : "0.8-1.0g/lb guardrail"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
           <MetricCard title="Training Trend" value={leanBulkDecision?.details.training_trend ?? "Need data"} detail="Key lift direction" icon={Dumbbell} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -2844,7 +2927,7 @@ function GoalsPage({
               Apply suggested macros
             </button>
           </div>
-          <p className="mt-2 text-lg font-semibold text-lime-100">
+          <p className="accent-text-strong mt-2 text-lg font-semibold">
             {leanBulkDecision ? `${leanBulkDecision.recommendation} calories (${leanBulkDecision.calorie_change > 0 ? "+" : ""}${leanBulkDecision.calorie_change}/day) -> ${leanBulkDecision.new_target_calories} kcal` : "Need more data before adjusting calories."}
           </p>
           <ul className="mt-3 space-y-2 text-sm text-zinc-300">
@@ -2865,6 +2948,7 @@ function FoodPage({
   nutritionHistory,
   nutritionAdherence,
   shortcuts,
+  frequentFoods,
   mealTemplates,
   forms,
   setForms,
@@ -2887,6 +2971,7 @@ function FoodPage({
   onSaveMealTemplate,
   onSaveAndLogToday,
   onLogShortcut,
+  onLogFrequentFood,
   onDeleteFoodLog,
   onUpdateFoodLog,
   onUpdateShortcut,
@@ -2909,6 +2994,7 @@ function FoodPage({
   nutritionHistory: DailyNutritionSummary[];
   nutritionAdherence: NutritionAdherence | null;
   shortcuts: FoodShortcut[];
+  frequentFoods: NutritionShortcutData["frequent_foods"];
   mealTemplates: MealTemplate[];
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
@@ -2931,6 +3017,7 @@ function FoodPage({
   onSaveMealTemplate: (event: FormEvent) => void;
   onSaveAndLogToday: (event: FormEvent) => void;
   onLogShortcut: (shortcutId: string) => void;
+  onLogFrequentFood: (foodName: string) => void;
   onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
   onUpdateFoodLog: (entry: NutritionEntry, updates: { iconType: FoodIconType | null }) => Promise<void>;
   onUpdateShortcut: (shortcut: FoodShortcut) => void;
@@ -2947,6 +3034,7 @@ function FoodPage({
 }>) {
   const [showFoodHistory, setShowFoodHistory] = useState(false);
   const [shortcutQuery, setShortcutQuery] = useState("");
+  const [shortcutTab, setShortcutTab] = useState<"saved" | "meals" | "frequent">("saved");
   const [editingShortcut, setEditingShortcut] = useState<FoodShortcut | null>(null);
   const [editingTemplateName, setEditingTemplateName] = useState<string | null>(null);
   const [templateRenameValue, setTemplateRenameValue] = useState("");
@@ -2973,14 +3061,15 @@ function FoodPage({
     fat_grams: dayTypeMacros?.adjusted_targets?.fat ?? targets.fat_grams,
   } : null;
   const hasMacroTargets = Boolean(displayTargets && displayTargets.target_calories > 0 && displayTargets.protein_grams > 0 && displayTargets.carb_grams > 0 && displayTargets.fat_grams > 0);
-  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "bg-lime-300");
+  const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "accent-progress");
   const macroProgress = [
     buildMacroProgress("Protein", "g", selectedDateTotals.protein, displayTargets?.protein_grams ?? 0, "bg-teal-300"),
     buildMacroProgress("Carbs", "g", selectedDateTotals.carbs, displayTargets?.carb_grams ?? 0, "bg-blue-300"),
     buildMacroProgress("Fat", "g", selectedDateTotals.fat, displayTargets?.fat_grams ?? 0, "bg-amber-300"),
   ];
   const recentHistory = nutritionHistory.slice(-30);
-  const filteredShortcuts = shortcuts.filter((shortcut) => normalizeSearchText(shortcut.shortcut_name).includes(normalizeSearchText(shortcutQuery)));
+  const normalizedShortcutQuery = normalizeSearchText(shortcutQuery);
+  const filteredShortcuts = shortcuts.filter((shortcut) => normalizeSearchText(shortcut.shortcut_name).includes(normalizedShortcutQuery));
   const templateSummaries = Array.from(
     mealTemplates.reduce((templates, item) => {
       const name = item.template_name;
@@ -2995,6 +3084,8 @@ function FoodPage({
     }, new Map<string, { template_name: string; calories: number; protein: number; carbs: number; fat: number; foods: number }>())
       .values(),
   ).sort((a, b) => a.template_name.localeCompare(b.template_name));
+  const filteredTemplateSummaries = templateSummaries.filter((template) => normalizeSearchText(template.template_name).includes(normalizedShortcutQuery));
+  const filteredFrequentFoods = frequentFoods.filter((food) => normalizeSearchText(food.food_name).includes(normalizedShortcutQuery));
   const beginTemplateRename = (templateName: string) => {
     setEditingTemplateName(templateName);
     setTemplateRenameValue(templateName);
@@ -3055,23 +3146,29 @@ function FoodPage({
   };
 
   const compactMacroRows = [
-    { label: "Calories", unit: "", consumed: selectedDateTotals.calories, target: displayTargets?.target_calories ?? 0, bar: "bg-lime-300" },
+    { label: "Calories", unit: "", consumed: selectedDateTotals.calories, target: displayTargets?.target_calories ?? 0, bar: "accent-progress" },
     { label: "Protein", unit: "g", consumed: selectedDateTotals.protein, target: displayTargets?.protein_grams ?? 0, bar: "bg-teal-300" },
     { label: "Carbs", unit: "g", consumed: selectedDateTotals.carbs, target: displayTargets?.carb_grams ?? 0, bar: "bg-blue-300" },
     { label: "Fat", unit: "g", consumed: selectedDateTotals.fat, target: displayTargets?.fat_grams ?? 0, bar: "bg-amber-300" },
   ];
+  const shortcutTabs: Array<{ id: "saved" | "meals" | "frequent"; label: string; count: number }> = [
+    { id: "saved", label: "Saved foods", count: shortcuts.length },
+    { id: "meals", label: "Meals", count: templateSummaries.length },
+    { id: "frequent", label: "Frequent", count: frequentFoods.length },
+  ];
 
   return (
-    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
+    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start">
       <div className="min-w-0 space-y-4 xl:self-start">
-        <Card>
-          <SectionHeader eyebrow="Today" title={`Macros · ${selectedDateLabel}`} />
+        <Card className="min-w-0">
+          <SectionHeader eyebrow="Today" title={`Daily summary · ${selectedDateLabel}`} />
           {hasMacroTargets ? (
             <div className="space-y-3">
               {compactMacroRows.map((row) => {
                 const consumed = Math.round(row.consumed);
                 const target = Math.round(row.target);
                 const remaining = Math.max(0, target - consumed);
+                const over = Math.max(0, consumed - target);
                 const percent = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
                 return (
                   <div key={row.label}>
@@ -3082,18 +3179,129 @@ function FoodPage({
                     <div className="mt-1 h-1.5 rounded-full bg-white/10">
                       <div className={cx("h-1.5 rounded-full", row.bar)} style={{ width: `${percent}%` }} />
                     </div>
-                    <p className="mt-1 text-xs text-zinc-500">{remaining}{row.unit} remaining</p>
+                    <div className="mt-1 flex items-center justify-between text-xs text-zinc-500">
+                      <span>{over > 0 ? `${over}${row.unit} over` : `${remaining}${row.unit} remaining`}</span>
+                      <span>{Math.round(percent)}%</span>
+                    </div>
                   </div>
                 );
               })}
+              {dayTypeMacros ? (
+                <p className="accent-outline rounded-lg border px-3 py-2 text-xs leading-5">
+                  {dayTypeMacros.day_type}: {dayTypeMacros.reason}
+                </p>
+              ) : null}
             </div>
           ) : (
             <p className="text-sm text-zinc-400">Set macro targets in Goals to see today&apos;s progress here.</p>
           )}
         </Card>
+        <Card className="min-w-0">
+          <SectionHeader
+            eyebrow="Logged foods"
+            title={`Food logged for ${selectedDateLabel}`}
+            action={
+              <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                {showFoodHistory ? "Hide details" : "View full history/details"}
+                <ChevronDown className={cx("h-4 w-4 transition", showFoodHistory ? "rotate-180" : "")} />
+              </button>
+            }
+          />
+          <FoodLogList
+            entries={selectedDateEntries.slice().reverse()}
+            emptyDescription="Entries for this date will appear here immediately after saving."
+            onRemove={(entry) => void removeFoodLogEntry(entry)}
+            removingId={deletingFoodLogId}
+            onEdit={beginFoodLogEdit}
+            editingId={editingFoodLogId}
+            editingIcon={editingFoodLogIcon}
+            onEditingIconChange={setEditingFoodLogIcon}
+            onCancelEdit={cancelFoodLogEdit}
+            onSaveIcon={(entry) => void saveFoodLogIcon(entry)}
+            savingId={savingFoodLogId}
+          />
+        </Card>
+        {showFoodHistory ? (
+          <Card className="min-w-0">
+            <SectionHeader eyebrow="Details" title="Food history and targets" />
+            <div className="space-y-4">
+              {hasMacroTargets ? (
+                <div className="space-y-3">
+                  {adaptiveRecommendation ? (
+                    <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-4">
+                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                        <div>
+                          <p className="text-sm font-semibold text-white">Adaptive baseline recommendation</p>
+                          <p className="mt-1 text-sm leading-6 text-zinc-400">
+                            {adaptiveRecommendation.caloriesTarget} kcal · P {adaptiveRecommendation.proteinTarget}g · C {adaptiveRecommendation.carbsTarget}g · F {adaptiveRecommendation.fatTarget}g
+                          </p>
+                          <p className="mt-1 text-xs leading-5 text-zinc-500">{adaptiveRecommendation.reasoning?.[0] ?? "Recommendation updates with body, food, training, runs, and recovery data."}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={onApplySuggestedMacros}
+                          className="w-fit rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-zinc-950 transition hover:bg-emerald-200"
+                        >
+                          Apply
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <MacroProgressCard macro={calorieProgress} />
+                  <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-3">
+                    {macroProgress.map((macro) => (
+                      <MacroProgressCard key={macro.label} macro={macro} />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {nutritionHistory.length ? (
+                <>
+                  <div className="grid gap-3 md:grid-cols-4">
+                    <MetricCard title="7-day calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Target comparison pending"} icon={Apple} accent="accent-outline" />
+                    <MetricCard title="7-day protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Target comparison pending"} icon={Utensils} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
+                    <MetricCard title="Days over target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent 7 logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
+                    <MetricCard title="Consistency" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories and macro adherence" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
+                  </div>
+                  {nutritionAdherence?.data_quality_note ? (
+                    <p className={cx("text-xs", (nutritionAdherence.missing_days ?? 0) > 0 ? "text-amber-300/90" : "text-zinc-500")}>
+                      Nutrition confidence: {(nutritionAdherence.confidence ?? "low").replace(/^./, (c) => c.toUpperCase())} - {nutritionAdherence.data_quality_note}
+                    </p>
+                  ) : null}
+                  <ChartFrame className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <RechartsLineChart data={recentHistory}>
+                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                        <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                        <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                        <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
+                        <Line dataKey="target_calories" name="Target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
+                      </RechartsLineChart>
+                    </ResponsiveContainer>
+                  </ChartFrame>
+                  <ChartFrame className="h-72">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={recentHistory}>
+                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                        <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                        <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                        <Area type="monotone" dataKey="total_protein" name="Protein" stroke="#2dd4bf" fill="#2dd4bf33" strokeWidth={2} />
+                        <Area type="monotone" dataKey="total_carbs" name="Carbs" stroke="#60a5fa" fill="#60a5fa22" strokeWidth={2} />
+                        <Area type="monotone" dataKey="total_fat" name="Fat" stroke="#f59e0b" fill="#f59e0b22" strokeWidth={2} />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </ChartFrame>
+                </>
+              ) : null}
+              <FoodHistoryList logs={logs} nutritionHistory={nutritionHistory} />
+            </div>
+          </Card>
+        ) : null}
       </div>
-      <div className="min-w-0 space-y-4">
-      <Card className="min-w-0">
+      <div className="flex min-w-0 flex-col gap-4">
+      <Card className="order-3 min-w-0">
         <SectionHeader eyebrow="Food" title="Manual food entry" />
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
@@ -3101,7 +3309,7 @@ function FoodPage({
               key={mode}
               type="button"
               onClick={() => setManualFoodMode(mode)}
-              className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.04]")}
+              className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "accent-active" : "text-zinc-300 hover:bg-white/[0.04]")}
             >
               {mode === "direct" ? "Direct macros" : "Serving-size scaling"}
             </button>
@@ -3150,7 +3358,7 @@ function FoodPage({
                 <p className="text-sm font-semibold text-white">Upload nutrition label</p>
                 <p className="mt-1 text-sm text-zinc-400">PDF, PNG, JPG, or JPEG. Extraction is a placeholder for now; manual fields stay editable.</p>
                 <input
-                  className="mt-3 block w-full text-sm text-zinc-300 file:mr-3 file:rounded-lg file:border-0 file:bg-lime-300 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-zinc-950"
+                  className="accent-file mt-3 block w-full text-sm text-zinc-300 file:mr-3 file:px-3 file:py-2 file:text-sm"
                   type="file"
                   accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg"
                   onChange={(event) => {
@@ -3168,7 +3376,7 @@ function FoodPage({
             </>
           )}
           {manualError ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{manualError}</p> : null}
-          <button disabled={manualSaving} className="h-11 rounded-lg bg-lime-300 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+          <button disabled={manualSaving} className="accent-bg h-11 rounded-lg text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
             {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Save food entry"}
           </button>
           {manualFoodMode === "serving" ? (
@@ -3178,19 +3386,19 @@ function FoodPage({
           ) : null}
         </form>
       </Card>
-      <div className="min-w-0 space-y-4">
-        <Card>
+      <div className="contents">
+        <Card className="hidden">
           <SectionHeader eyebrow="Targets" title="Macro progress" />
           {hasMacroTargets ? (
             <div className="space-y-4">
               {dayTypeMacros ? (
-                <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-4">
+                <div className="accent-outline rounded-lg border p-4">
                   <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
                       <p className="text-sm font-semibold text-white">{dayTypeMacros.day_type}</p>
                       <p className="mt-1 text-sm leading-6 text-zinc-400">{dayTypeMacros.reason}</p>
                     </div>
-                    <span className="w-fit rounded-full border border-lime-300/25 bg-lime-300/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-lime-100">
+                    <span className="accent-outline w-fit rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em]">
                       {dayTypeMacros.confidence} confidence
                     </span>
                   </div>
@@ -3249,7 +3457,7 @@ function FoodPage({
             />
           )}
         </Card>
-        <Card>
+        <Card className="hidden">
           <SectionHeader
             eyebrow="Today"
             title={`Food logged for ${selectedDateLabel}`}
@@ -3261,7 +3469,7 @@ function FoodPage({
             }
           />
           <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
-            <MetricCard title="Calories" value={`${Math.round(selectedDateTotals.calories)}`} detail="selected day" icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
+            <MetricCard title="Calories" value={`${Math.round(selectedDateTotals.calories)}`} detail="selected day" icon={Apple} accent="accent-outline" />
             <MetricCard title="Protein" value={`${Math.round(selectedDateTotals.protein)}g`} detail="selected day" icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
             <MetricCard title="Carbs" value={`${Math.round(selectedDateTotals.carbs)}g`} detail="selected day" icon={CarbsMoleculeIcon} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
             <MetricCard title="Fat" value={`${Math.round(selectedDateTotals.fat)}g`} detail="selected day" icon={FatMoleculeIcon} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
@@ -3283,12 +3491,12 @@ function FoodPage({
           </div>
         </Card>
         {showFoodHistory ? (
-          <Card>
+          <Card className="hidden">
             <SectionHeader eyebrow="History" title="Food history" />
             {nutritionHistory.length ? (
               <div className="space-y-4">
                 <div className="grid gap-3 md:grid-cols-4">
-                  <MetricCard title="7-day calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Target comparison pending"} icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
+                  <MetricCard title="7-day calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Target comparison pending"} icon={Apple} accent="accent-outline" />
                   <MetricCard title="7-day protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Target comparison pending"} icon={Utensils} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
                   <MetricCard title="Days over target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent 7 logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                   <MetricCard title="Consistency" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories and macro adherence" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -3306,7 +3514,7 @@ function FoodPage({
                       <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
                       <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
                       <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
-                      <Line dataKey="target_calories" name="Target" stroke="#a78bfa" strokeWidth={2} strokeDasharray="4 4" dot={false} />
+                      <Line dataKey="target_calories" name="Target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
                     </RechartsLineChart>
                   </ResponsiveContainer>
                 </ChartFrame>
@@ -3330,8 +3538,8 @@ function FoodPage({
             )}
           </Card>
         ) : null}
-        <Card>
-          <SectionHeader eyebrow="Food" title="Quick Add from Text" />
+        <Card className="order-2 min-w-0">
+          <SectionHeader eyebrow="AI text entry" title="Analyze food text" />
           <form onSubmit={onParseFood} className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               <TextInput label="Date" type="date" value={forms.nutrition.date} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, date: value } }))} />
@@ -3339,24 +3547,24 @@ function FoodPage({
             <label className="block space-y-2 text-sm text-zinc-400">
               <span>Food list</span>
               <textarea
-                className="min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 focus:border-lime-300/60"
+                className="accent-focus min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
                 value={aiText}
                 maxLength={4000}
-                placeholder="Example: 3 eggs, 2 slices sourdough toast with butter, chicken burrito bowl, protein shake with banana"
+                placeholder={"4oz nonfat milk with 4g protein\nbuilt puff bar\n2 kirkland bagels\nchicken burrito bowl"}
                 onChange={(event) => setAiText(event.target.value)}
               />
               <span className="block text-xs text-zinc-600">{aiText.length}/4000</span>
             </label>
             <button disabled={parseLoading || !aiText.trim()} className="h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
-              {parseLoading ? "Analyzing..." : "Analyze Food"}
+              {parseLoading ? "Analyzing..." : "Analyze"}
             </button>
           </form>
           {shortcutSuggestion ? (
-            <div className="mt-4 rounded-lg border border-lime-300/20 bg-lime-300/10 p-4">
-              <p className="text-sm font-semibold text-lime-100">Use saved {shortcutSuggestion.type} instead?</p>
+            <div className="accent-outline mt-4 rounded-lg border p-4">
+              <p className="text-sm font-semibold">Use saved {shortcutSuggestion.type} instead?</p>
               <p className="mt-1 text-sm text-zinc-300">{shortcutSuggestion.label} looks close to what you typed. Logging it avoids another OpenAI call.</p>
               <div className="mt-3 flex flex-wrap gap-2">
-                <button onClick={onUseSuggestion} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Use saved shortcut</button>
+                <button onClick={onUseSuggestion} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Use saved shortcut</button>
                 <button onClick={onParseAnyway} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Parse new anyway</button>
               </div>
             </div>
@@ -3407,7 +3615,7 @@ function FoodPage({
                   <TextInput label="Sodium optional mg" type="number" min={0} step="any" value={food.sodium ?? ""} onChange={(value) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, sodium: value === "" ? null : Number(value) } : item))} />
                   <div className="space-y-2 text-sm text-zinc-400">
                     <span>Confidence</span>
-                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60" value={food.confidence || "medium"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, confidence: event.target.value } : item))}>
+                    <select className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition" value={food.confidence || "medium"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, confidence: event.target.value } : item))}>
                       <option value="high">high</option>
                       <option value="medium">medium</option>
                       <option value="low">low</option>
@@ -3415,7 +3623,7 @@ function FoodPage({
                   </div>
                   <div className="space-y-2 text-sm text-zinc-400">
                     <span>Source</span>
-                    <select className="h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition focus:border-lime-300/60" value={food.source || "openai_estimate"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item))}>
+                    <select className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition" value={food.source || "openai_estimate"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item))}>
                       <option value="usda_fdc">USDA</option>
                       <option value="existing_database">Existing database</option>
                       <option value="openai_estimate">OpenAI estimate</option>
@@ -3433,7 +3641,7 @@ function FoodPage({
                       <p className="mt-1">{food.verification_reason || (food.source === "usda_fdc" ? "Matched nutrition database source context." : "Estimate only. Please review.")}</p>
                     )}
                     {food.source_url ? (
-                      <a className="mt-2 inline-flex text-lime-200 underline decoration-lime-200/40" href={food.source_url} target="_blank" rel="noreferrer">
+                      <a className="accent-link mt-2 inline-flex underline" href={food.source_url} target="_blank" rel="noreferrer">
                         Source link
                       </a>
                     ) : null}
@@ -3447,8 +3655,8 @@ function FoodPage({
                 </p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                <button className="h-11 rounded-lg bg-lime-300 px-4 text-sm font-semibold text-zinc-950">
-                  Save all confirmed items
+                <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
+                  Save to today
                 </button>
                 <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="h-11 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
                   Save as Food Shortcut
@@ -3457,21 +3665,35 @@ function FoodPage({
                   Save as Meal Template
                 </button>
                 <button type="button" onClick={(event) => onSaveAndLogToday(event as unknown as FormEvent)} className="h-11 rounded-lg bg-amber-300 px-4 text-sm font-semibold text-zinc-950">
-                  Save and Log Today
+                  Save shortcut, meal, and log
                 </button>
               </div>
             </form>
           ) : null}
         </Card>
-        <Card>
+        <Card className="hidden">
           <SectionHeader eyebrow="Log" title="Recent saved foods" />
           <FoodLogList entries={logs.slice(-5).reverse()} emptyDescription="Manual food entries will appear here after saving." />
         </Card>
-        <Card>
-          <SectionHeader eyebrow="Shortcuts" title="Food shortcuts & meal templates" />
+        <Card className="order-1 min-w-0">
+          <SectionHeader eyebrow="Fast log" title="Saved foods & meals" />
           <div className="space-y-4">
-            <TextInput label="Search shortcuts" value={shortcutQuery} placeholder="Finn shake" onChange={setShortcutQuery} />
-            {filteredShortcuts.length ? (
+            <div className="grid grid-cols-3 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
+              {shortcutTabs.map((tab) => (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setShortcutTab(tab.id)}
+                  className={cx("rounded-md px-2 py-2 font-semibold transition", shortcutTab === tab.id ? "accent-active" : "text-zinc-300 hover:bg-white/[0.04]")}
+                >
+                  <span className="block truncate">{tab.label}</span>
+                  <span className={cx("mt-0.5 block text-[11px]", shortcutTab === tab.id ? "text-zinc-900" : "text-zinc-500")}>{tab.count}</span>
+                </button>
+              ))}
+            </div>
+            <TextInput label="Search saved items" value={shortcutQuery} placeholder="Bagel, shake, burrito" onChange={setShortcutQuery} />
+            {shortcutTab === "saved" ? (
+              filteredShortcuts.length ? (
               <div className="space-y-3">
                 {filteredShortcuts.map((shortcut) => (
                   <div key={shortcut.shortcut_id} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
@@ -3484,21 +3706,40 @@ function FoodPage({
                         <TextInput label="Fat" type="number" min={0} step="any" value={editingShortcut.fat} onChange={(value) => setEditingShortcut((item) => item ? { ...item, fat: Number(value) } : item)} />
                         <TextInput label="Notes" value={editingShortcut.notes ?? ""} onChange={(value) => setEditingShortcut((item) => item ? { ...item, notes: value } : item)} />
                         <div className="flex gap-2 sm:col-span-2">
-                          <button type="button" onClick={() => { if (editingShortcut) onUpdateShortcut(editingShortcut); setEditingShortcut(null); }} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Save edits</button>
+                          <button type="button" onClick={() => { if (editingShortcut) onUpdateShortcut(editingShortcut); setEditingShortcut(null); }} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Save edits</button>
                           <button type="button" onClick={() => setEditingShortcut(null)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Cancel</button>
                         </div>
                       </div>
                     ) : (
-                      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                        <div>
+                      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                        <div className="min-w-0">
                           <p className="font-semibold text-white">{shortcut.shortcut_name}</p>
-                          <p className="mt-1 text-sm text-zinc-400">{Math.round(shortcut.calories)} cal · {Math.round(shortcut.protein)}g protein · {Math.round(shortcut.carbs)}g carbs · {Math.round(shortcut.fat)}g fat</p>
                           <p className="mt-2 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">Source: {shortcut.source || "manual"}</p>
                         </div>
-                        <div className="flex flex-wrap gap-2">
-                          <button type="button" onClick={() => onLogShortcut(shortcut.shortcut_id)} className="rounded-lg bg-lime-300 px-3 py-2 text-sm font-semibold text-zinc-950">Log today</button>
-                          <button type="button" onClick={() => setEditingShortcut(shortcut)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Edit</button>
-                          <button type="button" onClick={() => onDeleteShortcut(shortcut.shortcut_id)} className="rounded-lg border border-red-300/30 px-3 py-2 text-sm font-semibold text-red-100">Delete</button>
+                        <div className="grid gap-2 sm:w-64">
+                          <div className="grid grid-cols-4 gap-2 text-right">
+                            <div>
+                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Calories</p>
+                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.calories)} kcal</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">P</p>
+                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.protein)}g</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">C</p>
+                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.carbs)}g</p>
+                            </div>
+                            <div>
+                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">F</p>
+                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.fat)}g</p>
+                            </div>
+                          </div>
+                          <div className="flex flex-wrap justify-end gap-2">
+                            <button type="button" onClick={() => onLogShortcut(shortcut.shortcut_id)} className="accent-bg rounded-lg px-3 py-2 text-xs font-semibold">Add to today</button>
+                            <button type="button" onClick={() => setEditingShortcut(shortcut)} className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-200">Edit</button>
+                            <button type="button" onClick={() => onDeleteShortcut(shortcut.shortcut_id)} className="rounded-lg border border-red-300/30 px-3 py-2 text-xs font-semibold text-red-100">Delete</button>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -3507,12 +3748,14 @@ function FoodPage({
               </div>
             ) : (
               <EmptyState title="No food shortcuts yet" description="Parse food with AI, then save it as a reusable shortcut for one-click logging." action="Use AI parser" onAction={() => undefined} />
-            )}
-            {templateSummaries.length ? (
+            )
+            ) : null}
+            {shortcutTab === "meals" ? (
+              filteredTemplateSummaries.length ? (
               <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
                 <p className="text-sm font-semibold text-white">Meal templates</p>
                 <div className="mt-3 grid gap-3">
-                  {templateSummaries.map((template) => (
+                  {filteredTemplateSummaries.map((template) => (
                     <div key={template.template_name} className="grid gap-3 rounded-lg border border-violet-300/15 bg-violet-300/[0.045] p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
                       <div className="min-w-0">
                         {editingTemplateName === template.template_name ? (
@@ -3525,7 +3768,7 @@ function FoodPage({
                                 type="button"
                                 onClick={() => void saveTemplateRename(template.template_name)}
                                 disabled={!templateRenameValue.trim() || pendingTemplateAction === `rename:${template.template_name}`}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg bg-lime-300 text-zinc-950 transition hover:bg-lime-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                className="accent-bg inline-flex h-9 w-9 items-center justify-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-50"
                                 aria-label="Save template name"
                               >
                                 <Check className="h-4 w-4" />
@@ -3547,7 +3790,7 @@ function FoodPage({
                             <button
                               type="button"
                               onClick={() => beginTemplateRename(template.template_name)}
-                              className="mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 text-zinc-400 transition hover:border-lime-300/30 hover:bg-lime-300/10 hover:text-lime-100"
+                              className="accent-hover mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 text-zinc-400 transition"
                               aria-label={`Rename ${template.template_name}`}
                             >
                               <Pencil className="h-3.5 w-3.5" />
@@ -3579,16 +3822,62 @@ function FoodPage({
                           type="button"
                           onClick={() => void logTemplate(template.template_name)}
                           disabled={pendingTemplateAction === `log:${template.template_name}`}
-                          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-violet-200 px-3 py-2 text-xs font-semibold text-zinc-950 transition hover:bg-violet-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          className="accent-bg inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
                         >
                           <Plus className="h-3.5 w-3.5" />
-                          {pendingTemplateAction === `log:${template.template_name}` ? "Adding..." : "Add to log"}
+                          {pendingTemplateAction === `log:${template.template_name}` ? "Adding..." : "Add to today"}
                         </button>
                       </div>
                     </div>
                   ))}
                 </div>
               </div>
+            ) : (
+              <EmptyState title="No meal templates yet" description="Save an AI parse as a meal template to reuse it here." action="Use AI parser" onAction={() => undefined} />
+            )
+            ) : null}
+            {shortcutTab === "frequent" ? (
+              filteredFrequentFoods.length ? (
+                <div className="space-y-3">
+                  {filteredFrequentFoods.map((food) => (
+                    <div key={food.food_name} className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="line-clamp-2 min-w-0 font-semibold text-white">{food.food_name}</p>
+                          {food.is_favorite ? <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-xs font-semibold text-amber-100">Favorite</span> : null}
+                        </div>
+                        <p className="mt-1 text-xs text-zinc-500">{food.default_meal_type || DEFAULT_MEAL_TYPE}</p>
+                      </div>
+                      <div className="grid gap-2 sm:w-64">
+                        <div className="grid grid-cols-4 gap-2 text-right">
+                          <div>
+                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Calories</p>
+                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.calories)} kcal</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">P</p>
+                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.protein)}g</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">C</p>
+                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.carbs)}g</p>
+                          </div>
+                          <div>
+                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">F</p>
+                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.fat)}g</p>
+                          </div>
+                        </div>
+                        <button type="button" onClick={() => onLogFrequentFood(food.food_name)} className="accent-bg inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition">
+                          <Plus className="h-3.5 w-3.5" />
+                          Add to today
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <EmptyState title="No frequent foods yet" description="Frequent foods appear after repeated logging." action="Log food" onAction={() => undefined} />
+              )
             ) : null}
           </div>
         </Card>
@@ -3945,7 +4234,7 @@ function WorkoutHistory({
                   return (
                     <span className={cx(
                       "rounded-full border px-2 py-1 font-semibold",
-                      isRunLike ? "border-sky-300/30 bg-sky-300/10 text-sky-200" : "border-lime-300/30 bg-lime-300/10 text-lime-200",
+                      isRunLike ? "border-sky-300/30 bg-sky-300/10 text-sky-200" : "accent-outline",
                     )}>
                       {workoutKindLabel(workout)}
                     </span>
@@ -3997,7 +4286,7 @@ function WorkoutHistory({
                     type="button"
                     onClick={() => handleMove(workout.workout_id, editValue)}
                     disabled={busy || !editValue || editValue === workout.date.slice(0, 10)}
-                    className="rounded-lg border border-lime-300/30 bg-lime-300/10 px-3 py-1.5 text-xs font-semibold text-lime-100 transition hover:bg-lime-300/20 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="accent-outline rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     {busy ? "Saving…" : "Save date"}
                   </button>
@@ -4112,10 +4401,10 @@ function StrengthTrendsSection({
       <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
         <SectionHeader eyebrow="Strength" title="Exercise trends" />
         <div className="inline-flex rounded-lg border border-white/10 bg-white/[0.04] p-1">
-          <button type="button" onClick={() => setTrendView("exercise")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "exercise" ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
+          <button type="button" onClick={() => setTrendView("exercise")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "exercise" ? "accent-active" : "text-zinc-300 hover:bg-white/[0.06]")}>
             Exercise View
           </button>
-          <button type="button" onClick={() => setTrendView("muscle_group")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "muscle_group" ? "bg-lime-300 text-zinc-950" : "text-zinc-300 hover:bg-white/[0.06]")}>
+          <button type="button" onClick={() => setTrendView("muscle_group")} className={cx("rounded-md px-3 py-2 text-sm font-semibold transition", trendView === "muscle_group" ? "accent-active" : "text-zinc-300 hover:bg-white/[0.06]")}>
             Muscle Group View
           </button>
         </div>
@@ -4835,7 +5124,7 @@ function HistoryPage({
               type="button"
               onClick={handleCsvExport}
               disabled={exportLoading}
-              className="inline-flex items-center gap-2 rounded-lg border border-lime-300/25 bg-lime-300/10 px-3 py-2 text-sm font-semibold text-lime-100 transition hover:border-lime-200/40 hover:bg-lime-300/15 disabled:cursor-not-allowed disabled:opacity-60"
+              className="accent-outline inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
             >
               <Download className="h-4 w-4" />
               {exportLoading ? "Exporting..." : "Export CSV"}
@@ -4848,7 +5137,7 @@ function HistoryPage({
             <select
               value={exportRange}
               onChange={(event) => setExportRange(event.target.value as CsvExportRange)}
-              className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
+              className="accent-focus w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition"
             >
               <option value="all">All time</option>
               <option value="7d">Last 7 days</option>
@@ -4865,7 +5154,7 @@ function HistoryPage({
                   type="date"
                   value={exportStartDate}
                   onChange={(event) => setExportStartDate(event.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
+                  className="accent-focus w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition"
                 />
               </label>
               <label className="space-y-2 text-sm text-zinc-300">
@@ -4874,7 +5163,7 @@ function HistoryPage({
                   type="date"
                   value={exportEndDate}
                   onChange={(event) => setExportEndDate(event.target.value)}
-                  className="w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition focus:border-lime-300/50"
+                  className="accent-focus w-full rounded-lg border border-white/10 bg-zinc-950 px-3 py-2 text-sm text-white outline-none transition"
                 />
               </label>
             </>
@@ -4919,20 +5208,20 @@ function HistoryPage({
             </div>
           </div>
           {backupPreview ? (
-            <div className="mt-4 rounded-lg border border-lime-300/25 bg-lime-300/[0.05] p-4">
+            <div className="accent-outline mt-4 rounded-lg border p-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p className="text-sm font-semibold text-white">Review backup before importing</p>
                   <p className="mt-1 text-xs text-zinc-400">{backupPreview.fileName}</p>
                 </div>
                 {backupPreview.dateRange ? (
-                  <p className="text-xs text-zinc-300">Date range: <span className="text-lime-200">{backupPreview.dateRange.earliest} → {backupPreview.dateRange.latest}</span></p>
+                  <p className="text-xs text-zinc-300">Date range: <span className="accent-text-strong">{backupPreview.dateRange.earliest} → {backupPreview.dateRange.latest}</span></p>
                 ) : null}
               </div>
               <div className="mt-4 rounded border border-white/5 bg-zinc-950/40 p-3">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Import mode</p>
                 <div className="mt-2 grid gap-2 sm:grid-cols-2">
-                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "skip" ? "border-lime-300/40 bg-lime-300/[0.06] text-lime-100" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
+                  <label className={cx("flex cursor-pointer items-start gap-2 rounded border px-3 py-2 text-sm transition", backupImportMode === "skip" ? "accent-outline" : "border-white/10 text-zinc-300 hover:bg-white/[0.03]")}>
                     <input
                       type="radio"
                       name="backupImportMode"
@@ -5009,7 +5298,7 @@ function HistoryPage({
                   type="checkbox"
                   checked={backupSkipDocuments}
                   onChange={(event) => handleBackupSkipDocumentsChange(event.target.checked)}
-                  className="mt-1 h-4 w-4 rounded border-white/20 bg-zinc-950 text-lime-300 focus:ring-lime-300"
+                  className="accent-control mt-1 h-4 w-4 rounded border-white/20 bg-zinc-950"
                 />
                 <span>
                   <span className="font-medium">Skip importing settings &amp; documents</span>
@@ -5048,7 +5337,7 @@ function HistoryPage({
                   Dismiss
                 </button>
               </div>
-              <p className="mt-1 text-xs text-zinc-400">Mode: <span className="text-lime-200">{backupSummary.import_mode === "update" ? "Update matching" : "Skip existing"}</span></p>
+              <p className="mt-1 text-xs text-zinc-400">Mode: <span className="accent-text-strong">{backupSummary.import_mode === "update" ? "Update matching" : "Skip existing"}</span></p>
               <ul className="mt-3 grid gap-1 text-sm text-zinc-200 sm:grid-cols-2">
                 {Object.entries(backupSummary.datasets).map(([key, result]) => {
                   const label = BACKUP_DATASET_LABELS[key] ?? key;
@@ -5088,8 +5377,8 @@ function HistoryPage({
               <p className="mt-1 text-sm text-zinc-400">P {adaptiveRecommendation.proteinTarget}g · C {adaptiveRecommendation.carbsTarget}g · F {adaptiveRecommendation.fatTarget}g</p>
               <p className="mt-2 text-xs text-zinc-500">{adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}{adaptiveRecommendation.calorieAdjustment} kcal vs active baseline</p>
             </div>
-            <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.055] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Day type</p>
+            <div className="accent-outline rounded-lg border p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em]">Day type</p>
               <p className="mt-2 text-lg font-semibold text-white">{adaptiveRecommendation.dayType ?? "Learning"}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">{adaptiveRecommendation.dayTypeAdjustment?.reason ?? "Training day adjustment appears with logged workload."}</p>
             </div>
@@ -5132,8 +5421,8 @@ function HistoryPage({
         <Card>
           <SectionHeader eyebrow="Optimization" title="Trend intelligence" />
           <div className="grid gap-3 lg:grid-cols-3">
-            <div className="rounded-lg border border-lime-300/15 bg-lime-300/[0.06] p-4">
-              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-lime-200/80">Macro adherence</p>
+            <div className="accent-outline rounded-lg border p-4">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
               <p className="mt-2 text-3xl font-semibold text-white">{optimization.macro_adherence.weekly_score !== null ? Math.round(optimization.macro_adherence.weekly_score) : "--"}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">{optimization.macro_adherence.summary}</p>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
@@ -5178,7 +5467,7 @@ function HistoryPage({
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                  <Line dataKey="score" name="Adherence score" stroke="#22d3ee" strokeWidth={3} dot={false} />
+                  <Line dataKey="score" name="Adherence score" stroke="var(--accent-primary)" strokeWidth={3} dot={false} />
                 </RechartsLineChart>
               </ResponsiveContainer>
             </ChartFrame>
@@ -5201,7 +5490,7 @@ function HistoryPage({
           {dailyNutritionTrend.length ? (
             <div className="space-y-4">
               <div className="grid gap-3 md:grid-cols-4">
-                <MetricCard title="7-day Calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Totals only"} icon={Apple} accent="border-lime-400/20 bg-lime-400/10 text-lime-300" />
+                <MetricCard title="7-day Calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Totals only"} icon={Apple} accent="accent-outline" />
                 <MetricCard title="7-day Protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Totals only"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
                 <MetricCard title="Over Target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                 <MetricCard title="Adherence" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories/macros vs targets" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
@@ -5219,7 +5508,7 @@ function HistoryPage({
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
                   <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
                   <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
-                  <Line dataKey="target_calories" name="Calorie target" stroke="#a78bfa" strokeWidth={2} strokeDasharray="4 4" dot={false} />
+                  <Line dataKey="target_calories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
                   <Line dataKey="total_protein" name="Protein" stroke="#2dd4bf" strokeWidth={3} dot={false} />
                 </RechartsLineChart>
               </ResponsiveContainer>
@@ -5561,14 +5850,14 @@ function AquariumEasterEgg() {
         aria-controls="settings-aquarium"
         aria-label={isOpen ? "Close Aquarium easter egg" : "Open Aquarium easter egg"}
         onClick={toggleAquarium}
-        className="rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition hover:border-lime-300/30 hover:bg-lime-300/10 hover:text-lime-100"
+        className="accent-hover rounded-lg border border-white/10 bg-white/[0.03] px-3 py-2 text-xs font-semibold text-zinc-400 transition"
       >
         Aquarium
       </button>
       {isOpen ? (
         <div
           id="settings-aquarium"
-          className="aquarium-tile relative h-44 w-full max-w-xl overflow-hidden rounded-lg border border-lime-200/15 bg-[#05131f] shadow-2xl shadow-lime-950/25"
+          className="aquarium-tile accent-border relative h-44 w-full max-w-xl overflow-hidden rounded-lg border bg-[#05131f] shadow-2xl shadow-[var(--accent-glow)]"
         >
           <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(34,211,238,0.20),rgba(14,116,144,0.12)_45%,rgba(2,6,23,0.84)),radial-gradient(circle_at_20%_20%,rgba(125,211,252,0.20),transparent_28%),radial-gradient(circle_at_80%_12%,rgba(45,212,191,0.12),transparent_25%)]" />
           <div className="absolute inset-x-0 bottom-0 h-12 bg-[linear-gradient(180deg,transparent,rgba(8,47,73,0.50))]" />
@@ -5971,7 +6260,7 @@ function AquariumEasterEgg() {
 function healthStatusClass(status: string) {
   if (status === "connected") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
   if (status === "green") return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
-  if (status === "syncing") return "border-lime-300/20 bg-lime-300/10 text-lime-100";
+  if (status === "syncing") return "accent-outline";
   if (status === "yellow") return "border-amber-300/20 bg-amber-300/10 text-amber-100";
   if (status === "error") return "border-red-400/25 bg-red-400/10 text-red-100";
   if (status === "red") return "border-red-400/25 bg-red-400/10 text-red-100";
@@ -6132,11 +6421,164 @@ function IntegrationHealthGrid({
   );
 }
 
+
+function apiConnectionStyle(status: string) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized === "connected") {
+    return {
+      card: "border-emerald-300/20 bg-emerald-300/[0.06]",
+      badge: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+      icon: Check,
+    };
+  }
+  if (["ready_to_connect", "needs_reconnect", "rate_limited"].includes(normalized)) {
+    return {
+      card: "border-amber-300/20 bg-amber-300/[0.06]",
+      badge: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+      icon: AlertTriangle,
+    };
+  }
+  if (["missing_api_key", "missing_credentials", "not_checked", "not_configured"].includes(normalized)) {
+    return {
+      card: "border-zinc-500/25 bg-zinc-500/[0.06]",
+      badge: "border-zinc-500/30 bg-zinc-500/10 text-zinc-300",
+      icon: CircleMinus,
+    };
+  }
+  return {
+    card: "border-red-400/25 bg-red-400/[0.06]",
+    badge: "border-red-400/25 bg-red-400/10 text-red-100",
+    icon: X,
+  };
+}
+
+
+function formatConnectionStatus(status: string) {
+  return String(status || "not_checked").replaceAll("_", " ");
+}
+
+
+function ApiConnectionTestPanel({
+  results,
+  testing,
+  onTest,
+}: Readonly<{
+  results: ApiConnectionTestResponse | null;
+  testing: boolean;
+  onTest: () => void;
+}>) {
+  const cards: Array<{ id: "hevy" | "openai" | "withings"; title: string; description: string }> = [
+    { id: "hevy", title: "Hevy", description: "API key and workout endpoint" },
+    { id: "openai", title: "OpenAI / ChatGPT", description: "API key and lightweight API reachability" },
+    { id: "withings", title: "Withings", description: "App credentials, OAuth token, scope, and body metrics API" },
+  ];
+  return (
+    <Card>
+      <SectionHeader
+        eyebrow="Connections"
+        title="API Connection Tests"
+        action={
+          <button
+            type="button"
+            onClick={onTest}
+            disabled={testing}
+            className="accent-bg inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={cx("h-4 w-4", testing && "animate-spin")} />
+            {testing ? "Testing..." : "Test API Connections"}
+          </button>
+        }
+      />
+      <div className="grid gap-3 lg:grid-cols-3">
+        {cards.map((card) => {
+          const result = results?.[card.id];
+          const status = result?.status ?? "not_checked";
+          const style = apiConnectionStyle(status);
+          const Icon = style.icon;
+          const layers = Object.entries(result?.layers ?? {});
+          return (
+            <div key={card.id} className={cx("rounded-lg border p-4", style.card)}>
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-semibold text-white">{card.title}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{card.description}</p>
+                </div>
+                <span className={cx("inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full border", style.badge)}>
+                  <Icon className="h-4 w-4" />
+                </span>
+              </div>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <span className={cx("rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", style.badge)}>
+                  {formatConnectionStatus(status)}
+                </span>
+                <span className="text-xs text-zinc-500">
+                  {result?.lastCheckedAt ? `Checked ${relativeSyncTime(result.lastCheckedAt)}` : "Not checked yet"}
+                </span>
+              </div>
+              <p className="mt-3 text-sm leading-6 text-zinc-200">{result?.message ?? "Run the connection test to verify this API."}</p>
+              {layers.length ? (
+                <div className="mt-3 grid gap-2 border-t border-white/10 pt-3 text-xs leading-5">
+                  {layers.map(([key, layer]) => (
+                    <div key={key} className="flex items-start justify-between gap-3 rounded-lg border border-white/10 bg-black/10 px-2.5 py-2">
+                      <span className="font-medium capitalize text-zinc-300">{key.replaceAll("_", " ")}</span>
+                      <span className="max-w-[70%] text-right text-zinc-500">{formatConnectionStatus(layer.status)} - {layer.message}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+
+function AccentThemePicker({ value, onChange }: Readonly<{ value: AccentTheme; onChange: (theme: AccentTheme) => void }>) {
+  return (
+    <Card>
+      <SectionHeader eyebrow="Appearance" title="Accent Color" />
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
+        {accentThemeOptions.map((option) => {
+          const active = value === option.id;
+          return (
+            <button
+              key={option.id}
+              type="button"
+              onClick={() => onChange(option.id)}
+              className={cx(
+                "flex min-h-20 items-center justify-between gap-3 rounded-lg border px-3 py-3 text-left transition",
+                active ? "accent-soft shadow-lg shadow-[var(--accent-glow)]" : "border-white/10 bg-white/[0.035] text-zinc-300 hover:border-[var(--accent-border)] hover:bg-white/[0.055]",
+              )}
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className={cx("h-8 w-8 shrink-0 rounded-full border border-white/20 shadow-inner", option.swatch)} />
+                <span className="min-w-0">
+                  <span className={cx("block text-sm font-semibold", active ? "accent-text-strong" : "text-white")}>{option.label}</span>
+                  <span className="mt-1 block text-xs text-zinc-500">{active ? "Active" : "Theme color"}</span>
+                </span>
+              </span>
+              {active ? <Check className="h-4 w-4 shrink-0 accent-text-strong" /> : null}
+            </button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
+
 function SettingsPage({
   settings,
+  accentTheme,
+  apiConnectionTests,
+  apiConnectionTesting,
   forms,
   setForms,
   onSubmit,
+  onAccentThemeChange,
+  onTestApiConnections,
   onConnectStrava,
   onConnectWithings,
   onSyncWithings,
@@ -6146,9 +6588,14 @@ function SettingsPage({
   onClearWithings,
 }: Readonly<{
   settings: SettingsData | null;
+  accentTheme: AccentTheme;
+  apiConnectionTests: ApiConnectionTestResponse | null;
+  apiConnectionTesting: boolean;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onSubmit: (event: FormEvent) => void;
+  onAccentThemeChange: (theme: AccentTheme) => void;
+  onTestApiConnections: () => void;
   onConnectStrava: () => void;
   onConnectWithings: () => void;
   onSyncWithings: () => void;
@@ -6162,12 +6609,14 @@ function SettingsPage({
     <div className="space-y-4">
       <DiagnosticStatusDashboard settings={settings} />
       {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+      <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
+      <AccentThemePicker value={accentTheme} onChange={onAccentThemeChange} />
       {false ? (
       <Card>
         <SectionHeader eyebrow="Diagnostics" title="Backend connection" />
         <p className="text-sm text-zinc-400">
           Active backend base URL:{" "}
-          <span className="font-mono text-lime-200">{publicApiBaseLabel()}</span>
+          <span className="accent-text-strong font-mono">{publicApiBaseLabel()}</span>
         </p>
         <p className="mt-1 text-xs text-zinc-500">
           Resolved from NEXT_PUBLIC_API_URL. Requests time out after {Math.round(DEFAULT_API_TIMEOUT_MS / 1000)}s.
@@ -6187,13 +6636,13 @@ function SettingsPage({
               onChange={(value) => setForms((state) => ({ ...state, settings: { ...state.settings, [key]: value } }))}
             />
           ))}
-          <button className="h-11 rounded-lg bg-lime-300 text-sm font-semibold text-zinc-950 md:col-span-2">Save settings locally</button>
+          <button className="accent-bg h-11 rounded-lg text-sm font-semibold md:col-span-2">Save settings locally</button>
         </form>
       </Card>
       <div className="grid gap-4 lg:grid-cols-3">
         <Card>
           <SectionHeader eyebrow="Strava" title="OAuth connection" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.strava ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.strava ?? "Not configured"}</span></p>
           <button onClick={onConnectStrava} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
             {settings?.statuses.strava === "Connected" || settings?.statuses.strava === "Disconnected" ? "Reconnect Strava" : "Connect Strava"}
           </button>
@@ -6201,7 +6650,7 @@ function SettingsPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="OpenAI" title="Food parser" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.openai_api_key ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.openai_api_key ?? "Not configured"}</span></p>
           <button onClick={onTestOpenAI} className="mt-4 h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950">
             Test OpenAI Food Parser
           </button>
@@ -6209,12 +6658,12 @@ function SettingsPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Fitbit / Google Health" title="Wearable recovery" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
           <p className="mt-3 text-xs leading-5 text-zinc-500">Prepared for sleep, HRV, resting HR, and recovery trend ingestion. Full OAuth sync is not implemented yet.</p>
         </Card>
         <Card>
           <SectionHeader eyebrow="Withings" title="Scale measurements" />
-          <p className="text-sm text-zinc-400">Status: <span className="text-lime-200">{settings?.statuses.withings ?? "Not configured"}</span></p>
+          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.withings ?? "Not configured"}</span></p>
           <div className="mt-4 flex flex-wrap gap-2">
             <button onClick={onConnectWithings} className="h-11 rounded-lg bg-sky-300 px-4 text-sm font-semibold text-zinc-950">
               {settings?.statuses.withings === "Connected" ? "Reconnect Withings" : "Connect Withings"}
@@ -6239,7 +6688,7 @@ function SettingsPage({
           <Card key={key}>
             <p className="font-semibold text-white">{label}</p>
             <p className="mt-2 text-sm text-zinc-400">Saved value: {settings?.integrations[key] ?? "Not configured"}</p>
-            <p className="mt-3 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs text-lime-200">{settings?.statuses[key] ?? "Not configured"}</p>
+            <p className="accent-text-strong mt-3 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs">{settings?.statuses[key] ?? "Not configured"}</p>
           </Card>
         ))}
       </div>
@@ -6313,6 +6762,9 @@ export default function Home() {
   const [muscleTrendMetric, setMuscleTrendMetric] = useState<keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">>("strength_index");
   const [trainingInsight, setTrainingInsight] = useState<TrainingInsight | null>(null);
   const [settings, setSettings] = useState<SettingsData | null>(null);
+  const [apiConnectionTests, setApiConnectionTests] = useState<ApiConnectionTestResponse | null>(null);
+  const [apiConnectionTesting, setApiConnectionTesting] = useState(false);
+  const [accentTheme, setAccentTheme] = useState<AccentTheme>(() => readStoredAccentTheme());
   const [forms, setForms] = useState<FormState>(initialForms);
   const [aiText, setAiText] = useState("");
   const [parsedFoods, setParsedFoods] = useState<ParsedFood[]>([]);
@@ -6348,6 +6800,11 @@ export default function Home() {
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
 
+  useEffect(() => {
+    document.documentElement.dataset.accentTheme = accentTheme;
+    window.localStorage.setItem(ACCENT_THEME_STORAGE_KEY, accentTheme);
+  }, [accentTheme]);
+
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
   const strengthTrendPath = useCallback((exercise = selectedExercise) => {
     const params = new URLSearchParams();
@@ -6360,6 +6817,42 @@ export default function Home() {
     }
     return `/api/training/strength-trends?${params.toString()}`;
   }, [selectedExercise, selectedMuscleGroup, trendDateRange]);
+
+  const applySettingsData = useCallback((nextSettings: SettingsData) => {
+    setSettings(nextSettings);
+    if (nextSettings.appearance?.accent_color) {
+      setAccentTheme(sanitizeAccentTheme(nextSettings.appearance.accent_color));
+    }
+  }, []);
+
+  const handleAccentThemeChange = useCallback(async (theme: AccentTheme) => {
+    const nextTheme = sanitizeAccentTheme(theme);
+    setAccentTheme(nextTheme);
+    setSettings((state) => state ? { ...state, appearance: { ...(state.appearance ?? {}), accent_color: nextTheme } } : state);
+    try {
+      const updated = await apiSend<SettingsData>("/api/settings", "PUT", { appearance: { accent_color: nextTheme } });
+      applySettingsData(updated);
+      setMessage(`Accent color set to ${accentThemeOptions.find((option) => option.id === nextTheme)?.label ?? "Lime"}.`);
+    } catch {
+      window.localStorage.setItem(ACCENT_THEME_STORAGE_KEY, nextTheme);
+      setMessage("Accent color saved on this device. Backend settings were unavailable.");
+    }
+  }, [applySettingsData]);
+
+  const handleTestApiConnections = useCallback(async () => {
+    setApiConnectionTesting(true);
+    setApiError(null);
+    setMessage(null);
+    try {
+      const results = await apiGet<ApiConnectionTestResponse>("/api/integrations/test");
+      setApiConnectionTests(results);
+      setMessage("API connection tests complete.");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "API connection tests failed.");
+    } finally {
+      setApiConnectionTesting(false);
+    }
+  }, []);
 
   const refreshAll = useCallback(async () => {
     setApiError(null);
@@ -6402,7 +6895,7 @@ export default function Home() {
         key: "settings",
         label: "Settings",
         required: false,
-        run: async () => setSettings(await apiGet<SettingsData>("/api/integrations/status")),
+        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status")),
       },
       {
         key: "nutrition_logs",
@@ -6523,7 +7016,7 @@ export default function Home() {
       setApiError(null);
     }
     setLoading(false);
-  }, [strengthTrendPath]);
+  }, [applySettingsData, strengthTrendPath]);
 
   useEffect(() => {
     const id = window.setTimeout(() => {
@@ -6839,6 +7332,7 @@ export default function Home() {
         nutritionHistory={nutritionHistory}
         nutritionAdherence={nutritionAdherence}
         shortcuts={shortcutData.items}
+        frequentFoods={shortcutData.frequent_foods}
         mealTemplates={shortcutData.meal_templates}
         forms={forms}
         setForms={setForms}
@@ -6980,6 +7474,14 @@ export default function Home() {
               meal_type: DEFAULT_MEAL_TYPE,
             });
           }, "Shortcut logged.")
+        }
+        onLogFrequentFood={(foodName) =>
+          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            await apiSend(`/api/nutrition/frequent-foods/${encodeURIComponent(foodName)}/log`, "POST", {
+              date: forms.nutrition.date,
+              meal_type: DEFAULT_MEAL_TYPE,
+            });
+          }, "Frequent food logged.")
         }
         onDeleteFoodLog={(entry) =>
           submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
@@ -7278,8 +7780,13 @@ export default function Home() {
     settings: (
       <SettingsPage
         settings={settings}
+        accentTheme={accentTheme}
+        apiConnectionTests={apiConnectionTests}
+        apiConnectionTesting={apiConnectionTesting}
         forms={forms}
         setForms={setForms}
+        onAccentThemeChange={handleAccentThemeChange}
+        onTestApiConnections={handleTestApiConnections}
         onSyncHevy={() => {
           void syncHevyNow(true);
         }}
@@ -7341,7 +7848,7 @@ export default function Home() {
           setMessage(null);
           try {
             const updated = await apiSend<SettingsData>("/api/integrations/withings/disconnect", "POST", {});
-            setSettings(updated);
+            applySettingsData(updated);
             setMessage("Withings disconnected. Reconnect from Settings when ready.");
             await refreshAll();
           } catch (error) {
@@ -7364,7 +7871,7 @@ export default function Home() {
         onSubmit={(event) =>
           submitAndRefresh(event, async () => {
             const updated = await apiSend<SettingsData>("/api/settings", "PUT", { integrations: forms.settings });
-            setSettings(updated);
+            applySettingsData(updated);
             setForms((state) => ({ ...state, settings: {} }));
           }, "Settings saved locally.")
         }
@@ -7373,8 +7880,8 @@ export default function Home() {
   };
 
   return (
-    <main className="min-h-screen bg-[#07080b] text-zinc-100">
-      <div className="pointer-events-none fixed inset-0 bg-[radial-gradient(circle_at_top_left,rgba(45,212,191,0.16),transparent_30%),radial-gradient(circle_at_top_right,rgba(96,165,250,0.11),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.04),transparent_40%)]" />
+    <main data-accent-theme={accentTheme} className="min-h-screen bg-[#07080b] text-zinc-100">
+      <div className="accent-page-glow pointer-events-none fixed inset-0" />
       <div className="relative flex min-h-screen">
         <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
           <div className="mb-8 flex items-center gap-3">
@@ -7398,7 +7905,7 @@ export default function Home() {
                 <button
                   key={item.id}
                   onClick={() => setActivePage(item.id)}
-                  className={cx("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition", activePage === item.id ? "bg-lime-300 text-zinc-950" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
+                  className={cx("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition", activePage === item.id ? "accent-active" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
                 >
                   <Icon className="h-4 w-4" />
                   {item.label}
@@ -7426,7 +7933,7 @@ export default function Home() {
             </div>
             <div className="mt-4 flex gap-2 overflow-x-auto pb-1 lg:hidden">
               {navigation.map((item) => (
-                <button key={item.id} onClick={() => setActivePage(item.id)} className={cx("whitespace-nowrap rounded-lg px-3 py-2 text-sm transition", activePage === item.id ? "bg-lime-300 text-zinc-950" : "bg-white/[0.06] text-zinc-300")}>
+                <button key={item.id} onClick={() => setActivePage(item.id)} className={cx("whitespace-nowrap rounded-lg px-3 py-2 text-sm transition", activePage === item.id ? "accent-active" : "bg-white/[0.06] text-zinc-300")}>
                   {item.label}
                 </button>
               ))}

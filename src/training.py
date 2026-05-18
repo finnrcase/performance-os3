@@ -13,7 +13,8 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, save_dataframe
+from src.storage import load_dataframe, mark_dataframe_deletes, save_dataframe
+from src.training_schedule import is_run_row
 
 TRAINING_COLUMNS = [
     "workout_id",
@@ -93,6 +94,12 @@ def _hydrate_legacy_import_metadata(training_df: pd.DataFrame) -> pd.DataFrame:
                 if pd.notna(weight) and float(weight) > 0:
                     df.at[index, "weight"] = round(float(weight) * 2.2046226218, 2)
                     df.at[index, "notes"] = f"{note} | legacy_weight_converted_kg_to_lb=true | weight_unit=lb"
+
+            if is_run_row(df.loc[index].to_dict()):
+                df.at[index, "workout_type"] = "Run"
+                df.at[index, "muscle_group"] = "Cardio"
+                if "classification=running_cardio" not in str(df.at[index, "notes"]).lower():
+                    df.at[index, "notes"] = f"{df.at[index, 'notes']} | classification=running_cardio"
 
         if "strava_activity_id=" in note:
             activity_id = _extract_note_value(note, "strava_activity_id")
@@ -189,6 +196,9 @@ def move_workout_date(workout_id: str, new_date: str) -> dict:
         df.at[index, "date"] = normalized_date
         df.at[index, "updated_at"] = now
 
+    # Delete the old row identities when the date participates in the fallback
+    # row key for manual workouts.
+    df = mark_dataframe_deletes(df, "training_log", df.loc[mask].assign(date=old_date).to_dict(orient="records") if old_date else [])
     save_training_log(df)
     return {
         "workout_id": workout_id,

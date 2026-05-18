@@ -21,8 +21,9 @@ import pandas as pd
 
 from src.config import load_settings
 from src.paths import PROJECT_ROOT, processed_data_path, raw_data_path
-from src.storage import load_document, save_document
+from src.storage import load_document, mark_dataframe_deletes, save_document
 from src.training import TRAINING_COLUMNS, load_training_log, save_training_log
+from src.training_schedule import classify_hevy_workout
 
 
 HEVY_API_BASE_URL = "https://api.hevyapp.com"
@@ -282,6 +283,70 @@ def _muscle_group(exercise: dict) -> str:
     return ""
 
 
+def _walk_payload_dicts(value) -> list[dict]:
+    if isinstance(value, dict):
+        rows = [value]
+        for item in value.values():
+            rows.extend(_walk_payload_dicts(item))
+        return rows
+    if isinstance(value, list):
+        rows = []
+        for item in value:
+            rows.extend(_walk_payload_dicts(item))
+        return rows
+    return []
+
+
+def _cardio_metrics(workout: dict) -> dict:
+    distance_miles = 0.0
+    duration_minutes = 0.0
+    calories = 0.0
+    for item in _walk_payload_dicts(workout):
+        for key, value in item.items():
+            key_text = str(key).lower()
+            number = _safe_float(value)
+            if number <= 0:
+                continue
+            if key_text in {"distance_miles", "miles"}:
+                distance_miles += number
+            elif key_text in {"distance_km", "kilometers", "kilometres"}:
+                distance_miles += number * 0.621371
+            elif key_text in {"distance_m", "distance_meters", "meters", "metres"}:
+                distance_miles += number / 1609.344
+            elif key_text in {"duration_minutes", "minutes"}:
+                duration_minutes += number
+            elif key_text in {"duration_seconds", "elapsed_seconds", "moving_time", "seconds", "time_seconds"}:
+                duration_minutes += number / 60
+            elif key_text in {"calories", "calories_burned", "active_calories"}:
+                calories += number
+    return {
+        "distance_miles": round(distance_miles, 2),
+        "duration_minutes": round(duration_minutes, 1),
+        "calories": round(calories, 0),
+    }
+
+
+def _append_cardio_notes(notes_parts: list[str], metrics: dict, duration: float) -> None:
+    notes_parts.append("classification=running_cardio")
+    distance = float(metrics.get("distance_miles") or 0)
+    duration_minutes = float(metrics.get("duration_minutes") or 0) or float(duration or 0)
+    calories = float(metrics.get("calories") or 0)
+    if distance > 0:
+        notes_parts.append(f"distance_miles={round(distance, 2)}")
+    if duration_minutes > 0:
+        notes_parts.append(f"cardio_duration_minutes={round(duration_minutes, 1)}")
+    if distance > 0 and duration_minutes > 0:
+        notes_parts.append(f"pace_min_per_mile={round(duration_minutes / distance, 2)}")
+    if calories > 0:
+        notes_parts.append(f"calories={round(calories)}")
+
+
+def _cardio_note_parts(metrics: dict, duration: float) -> list[str]:
+    parts: list[str] = []
+    _append_cardio_notes(parts, metrics, duration)
+    return parts
+
+
 def normalize_hevy_workout(workout: dict) -> list[dict]:
     """
     Convert one Hevy workout into local training log rows.
@@ -293,7 +358,13 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
     workout_updated_at = str(workout.get("updated_at") or workout.get("modified_at") or workout.get("created_at") or "").strip()
     title = str(workout.get("title") or "Hevy Workout").strip()
     workout_date = _parse_date(workout.get("start_time") or workout.get("created_at"))
+    classification = classify_hevy_workout(workout)
+    workout_type = classification["workout_type"]
+    is_cardio = bool(classification["is_run"])
+    cardio_metrics = _cardio_metrics(workout) if is_cardio else {}
     duration = _duration_minutes(workout.get("start_time"), workout.get("end_time"))
+    if duration <= 0 and cardio_metrics.get("duration_minutes"):
+        duration = float(cardio_metrics["duration_minutes"])
     workout_description = str(workout.get("description") or "").strip()
     rows = []
 
@@ -321,6 +392,11 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
                 f"end_time={end_time}",
                 "weight_unit=lb",
             ]
+            if is_cardio:
+                notes_parts.append(f"classification_reason={','.join(classification.get('reasons') or ['cardio_signal'])}")
+                notes_parts.append(f"planned_workout={classification.get('planned', {}).get('display_label', '')}")
+                if not duration_written:
+                    _append_cardio_notes(notes_parts, cardio_metrics, duration)
             if weight_kg:
                 notes_parts.append(f"source_weight_kg={round(weight_kg, 4)}")
             if set_item.get("type"):
@@ -334,13 +410,13 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
                 {
                     "workout_id": workout_id,
                     "date": workout_date,
-                    "workout_type": "Strength",
-                    "muscle_group": _muscle_group(exercise),
+                    "workout_type": workout_type,
+                    "muscle_group": "Cardio" if is_cardio else _muscle_group(exercise),
                     "exercise": exercise_name,
                     "set_number": set_index + 1,
-                    "sets": 1,
-                    "reps": _safe_int(set_item.get("reps")),
-                    "weight": round(weight_kg * KG_TO_LB, 2) if weight_kg else 0.0,
+                    "sets": 0 if is_cardio else 1,
+                    "reps": 0 if is_cardio else _safe_int(set_item.get("reps")),
+                    "weight": 0.0 if is_cardio else round(weight_kg * KG_TO_LB, 2) if weight_kg else 0.0,
                     "rpe": _safe_float(set_item.get("rpe")),
                     "duration_minutes": duration if not duration_written else 0.0,
                     "notes": " | ".join(notes_parts),
@@ -360,8 +436,8 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
             {
                 "workout_id": workout_id,
                 "date": workout_date,
-                "workout_type": "Strength",
-                "muscle_group": "",
+                "workout_type": workout_type,
+                "muscle_group": "Cardio" if is_cardio else "",
                 "exercise": title,
                 "set_number": 1,
                 "sets": 0,
@@ -369,9 +445,24 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
                 "weight": 0.0,
                 "rpe": 0.0,
                 "duration_minutes": duration,
-                "notes": (
-                    f"Imported from Hevy | {HEVY_WORKOUT_MARKER}{workout_id} | "
-                    f"start_time={start_time} | end_time={end_time} | weight_unit=lb"
+                "notes": " | ".join(
+                    [
+                        "Imported from Hevy",
+                        f"{HEVY_WORKOUT_MARKER}{workout_id}",
+                        f"workout_title={title}",
+                        f"start_time={start_time}",
+                        f"end_time={end_time}",
+                        "weight_unit=lb",
+                        *(
+                            [
+                                f"classification_reason={','.join(classification.get('reasons') or ['cardio_signal'])}",
+                                f"planned_workout={classification.get('planned', {}).get('display_label', '')}",
+                                *_cardio_note_parts(cardio_metrics, duration),
+                            ]
+                            if is_cardio
+                            else []
+                        ),
+                    ]
                 ),
                 "source": "hevy",
                 "external_id": f"{workout_id}:workout",
@@ -406,16 +497,19 @@ def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import") -> di
 
     training_df = load_training_log()
     before_rows = len(training_df)
+    removed_records: list[dict] = []
     if training_df.empty:
         kept_df = training_df
     else:
         mask = training_df.apply(lambda row: _row_hevy_workout_id(row) != workout_id, axis=1)
+        removed_records = training_df.loc[~mask].to_dict(orient="records")
         kept_df = training_df[mask].copy()
     removed_rows = before_rows - len(kept_df)
     if removed_rows:
         logger.info("Prevented duplicates by replacing %s existing rows for Hevy workout %s", removed_rows, workout_id)
     import_df = pd.DataFrame(rows).reindex(columns=TRAINING_COLUMNS)
     training_df = pd.concat([kept_df, import_df], ignore_index=True).sort_values("date", kind="stable").reset_index(drop=True)
+    training_df = mark_dataframe_deletes(training_df, "training_log", removed_records)
     save_training_log(training_df)
     logger.info("Saved Hevy workout %s with %s rows via %s", workout_id, len(rows), sync_source)
     return {"workout_id": workout_id, "saved_rows": len(rows), "replaced_rows": removed_rows, "training_log": training_df}
@@ -426,9 +520,12 @@ def delete_hevy_workout(workout_id: str, sync_source: str = "hevy_delete") -> di
     if training_df.empty:
         return {"workout_id": workout_id, "deleted_rows": 0, "training_log": training_df}
     before_rows = len(training_df)
-    kept_df = training_df[training_df.apply(lambda row: _row_hevy_workout_id(row) != str(workout_id), axis=1)].copy()
+    keep_mask = training_df.apply(lambda row: _row_hevy_workout_id(row) != str(workout_id), axis=1)
+    removed_records = training_df.loc[~keep_mask].to_dict(orient="records")
+    kept_df = training_df[keep_mask].copy()
     deleted_rows = before_rows - len(kept_df)
     if deleted_rows:
+        kept_df = mark_dataframe_deletes(kept_df, "training_log", removed_records)
         save_training_log(kept_df)
         logger.info("Deleted %s rows for Hevy workout %s via %s", deleted_rows, workout_id, sync_source)
     return {"workout_id": workout_id, "deleted_rows": deleted_rows, "training_log": kept_df}

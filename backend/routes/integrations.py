@@ -1,17 +1,24 @@
-import os
+import json
 import logging
+import os
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from datetime import datetime, timezone
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode, urlparse
+from urllib.request import Request as UrlRequest, urlopen
 
 import pandas as pd
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel
+from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI, RateLimitError
+from pydantic import BaseModel, Field
 
-from src.config import INTEGRATION_FIELDS, fitbit_google_health_status, integration_status, load_settings, mask_secret, save_settings
+from src.config import INTEGRATION_FIELDS, fitbit_google_health_status, integration_status, load_settings, mask_secret, normalize_accent_color, save_settings
 from src.ai.food_parser import get_openai_key_status
 from src.body_metrics import load_body_metrics
-from src.integrations.hevy_client import load_hevy_sync_state
+from src.integrations.hevy_client import HEVY_API_BASE_URL, load_hevy_sync_state
 from src.integrations.strava_client import (
     StravaIntegrationError,
     build_strava_auth_url,
@@ -23,8 +30,13 @@ from src.integrations.strava_client import (
     refresh_strava_token_if_needed,
 )
 from src.integrations.withings_client import (
+    WITHINGS_MEASURE_URL,
+    WITHINGS_REQUESTED_MEASTYPES,
+    WithingsIntegrationError,
+    WithingsReconnectRequired,
     get_withings_connection_status,
     load_withings_sync_state,
+    refresh_withings_token_if_needed,
 )
 from src.integration_health import build_integration_status_report
 from src.nutrition import load_nutrition_log
@@ -35,6 +47,7 @@ from src.training import load_training_log
 
 router = APIRouter(tags=["integrations"])
 logger = logging.getLogger(__name__)
+API_TEST_TIMEOUT_SECONDS = 8
 
 
 @router.get("/status")
@@ -44,7 +57,8 @@ def status() -> dict:
 
 
 class SettingsPayload(BaseModel):
-    integrations: dict[str, str] = {}
+    integrations: dict[str, str] = Field(default_factory=dict)
+    appearance: dict[str, str] = Field(default_factory=dict)
 
 
 def _read_dotenv_value(key: str) -> str:
@@ -69,6 +83,201 @@ def _configured_from_env(key: str) -> bool:
     import os
 
     return bool(os.getenv(key, "").strip() or _read_dotenv_value(key).strip())
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _effective_config_value(settings: dict, settings_key: str, env_key: str) -> str:
+    """Resolve a secret/config value without exposing where it came from."""
+    return (
+        os.getenv(env_key, "").strip()
+        or _read_dotenv_value(env_key).strip()
+        or str(settings.get("integrations", {}).get(settings_key, "") or "").strip()
+    )
+
+
+def _test_result(status: str, message: str, last_checked_at: str, **extra: object) -> dict:
+    return {
+        "status": status,
+        "message": message,
+        "lastCheckedAt": last_checked_at,
+        **extra,
+    }
+
+
+def _hevy_probe(api_key: str) -> None:
+    query = urlencode({"page": 1, "pageSize": 1})
+    request = UrlRequest(
+        f"{HEVY_API_BASE_URL}/v1/workouts?{query}",
+        headers={"api-key": api_key, "Accept": "application/json"},
+    )
+    with urlopen(request, timeout=API_TEST_TIMEOUT_SECONDS) as response:
+        payload = response.read().decode("utf-8")
+    if payload:
+        json.loads(payload)
+
+
+def _test_hevy_connection(settings: dict) -> dict:
+    checked_at = _now_iso()
+    api_key = _effective_config_value(settings, "hevy_api_key", "HEVY_API_KEY")
+    if not api_key:
+        return _test_result("missing_api_key", "HEVY_API_KEY is not configured.", checked_at)
+    try:
+        _hevy_probe(api_key)
+        return _test_result("connected", "Hevy API reachable.", checked_at)
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            return _test_result("invalid_api_key", "Hevy rejected the API key.", checked_at)
+        if exc.code == 429:
+            return _test_result("rate_limited", "Hevy rate limited the test request. Try again shortly.", checked_at)
+        return _test_result("api_unreachable", f"Hevy test failed with HTTP {exc.code}.", checked_at)
+    except (URLError, TimeoutError):
+        return _test_result("api_unreachable", "Could not reach Hevy before the timeout.", checked_at)
+    except (json.JSONDecodeError, OSError):
+        return _test_result("api_unreachable", "Hevy returned an unreadable response.", checked_at)
+
+
+def _openai_probe(api_key: str) -> None:
+    client = OpenAI(api_key=api_key, timeout=API_TEST_TIMEOUT_SECONDS, max_retries=0)
+    # Listing models is an inexpensive auth/connectivity check; it does not run
+    # a model generation.
+    client.models.list()
+
+
+def _test_openai_connection(settings: dict) -> dict:
+    checked_at = _now_iso()
+    api_key = _effective_config_value(settings, "openai_api_key", "OPENAI_API_KEY")
+    if not api_key:
+        return _test_result("missing_api_key", "OPENAI_API_KEY is not configured.", checked_at)
+    try:
+        _openai_probe(api_key)
+        return _test_result("connected", "OpenAI API reachable.", checked_at)
+    except AuthenticationError:
+        return _test_result("invalid_api_key", "OpenAI rejected the API key.", checked_at)
+    except RateLimitError:
+        return _test_result("rate_limited", "OpenAI rate limited the test request. Check quota or try again shortly.", checked_at)
+    except APIConnectionError:
+        return _test_result("api_unreachable", "Could not reach OpenAI before the timeout.", checked_at)
+    except APIStatusError as exc:
+        if exc.status_code in {401, 403}:
+            return _test_result("invalid_api_key", "OpenAI rejected the API key.", checked_at)
+        if exc.status_code == 429:
+            return _test_result("rate_limited", "OpenAI rate limited the test request. Check quota or try again shortly.", checked_at)
+        return _test_result("api_unreachable", f"OpenAI test failed with HTTP {exc.status_code}.", checked_at)
+    except Exception:
+        logger.exception("OpenAI API connection test failed without exposing credentials.")
+        return _test_result("api_unreachable", "OpenAI API test failed unexpectedly.", checked_at)
+
+
+def _scope_set(scopes: str) -> set[str]:
+    return {scope.strip().lower() for scope in re.split(r"[\s,]+", str(scopes or "")) if scope.strip()}
+
+
+def _withings_probe(access_token: str) -> None:
+    now = int(time.time())
+    request = UrlRequest(
+        WITHINGS_MEASURE_URL,
+        data=urlencode(
+            {
+                "action": "getmeas",
+                "category": 1,
+                "meastypes": WITHINGS_REQUESTED_MEASTYPES,
+                "startdate": now - 7 * 24 * 60 * 60,
+                "enddate": now,
+            }
+        ).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
+    with urlopen(request, timeout=API_TEST_TIMEOUT_SECONDS) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    status = int(payload.get("status", 0) or 0)
+    if status != 0:
+        message = payload.get("error") or payload.get("body", {}).get("error") or f"Withings API returned status {status}."
+        raise WithingsIntegrationError(str(message))
+
+
+def _withings_layer(status: str, message: str) -> dict:
+    return {"status": status, "message": message}
+
+
+def _test_withings_connection(settings: dict) -> dict:
+    checked_at = _now_iso()
+    client_id = _effective_config_value(settings, "withings_client_id", "WITHINGS_CLIENT_ID")
+    client_secret = _effective_config_value(settings, "withings_client_secret", "WITHINGS_CLIENT_SECRET")
+    redirect_uri = os.getenv("WITHINGS_REDIRECT_URI", "").strip() or _read_dotenv_value("WITHINGS_REDIRECT_URI").strip()
+    missing = [
+        label
+        for label, value in [
+            ("WITHINGS_CLIENT_ID", client_id),
+            ("WITHINGS_CLIENT_SECRET", client_secret),
+            ("WITHINGS_REDIRECT_URI", redirect_uri),
+        ]
+        if not value
+    ]
+    layers = {
+        "credentials": _withings_layer("configured", "Withings app credentials are configured."),
+        "oauth": _withings_layer("not_connected", "User OAuth tokens have not been checked yet."),
+        "scopes": _withings_layer("unknown", "Withings scopes have not been checked yet."),
+    }
+    if missing:
+        layers["credentials"] = _withings_layer("missing", f"Missing {', '.join(missing)}.")
+        return _test_result("missing_credentials", f"Missing Withings app credentials: {', '.join(missing)}.", checked_at, layers=layers)
+
+    metadata = settings.get("metadata", {})
+    tokens = metadata.get("withings_tokens", {})
+    sync = metadata.get("withings_sync", {})
+    access_token = str(tokens.get("access_token", "") or "")
+    refresh_token = str(tokens.get("refresh_token", "") or "")
+    expires_at = int(tokens.get("expires_at") or 0)
+    scopes = _scope_set(str(tokens.get("scopes", "") or ""))
+
+    if not access_token and not refresh_token:
+        layers["oauth"] = _withings_layer("not_connected", "Withings app credentials are ready, but user OAuth is not connected.")
+        return _test_result("ready_to_connect", "Withings credentials configured, user OAuth not connected.", checked_at, layers=layers)
+    if sync.get("needs_reconnect"):
+        layers["oauth"] = _withings_layer("needs_reconnect", "Saved Withings OAuth tokens require reconnection.")
+        return _test_result("needs_reconnect", "Withings OAuth needs reconnecting.", checked_at, layers=layers)
+    if not refresh_token:
+        layers["oauth"] = _withings_layer("needs_reconnect", "Saved Withings token has no refresh token.")
+        return _test_result("needs_reconnect", "Withings refresh token is missing. Reconnect Withings.", checked_at, layers=layers)
+    if "user.metrics" not in scopes:
+        layers["oauth"] = _withings_layer("connected", "Withings OAuth tokens exist.")
+        layers["scopes"] = _withings_layer("missing", "Withings OAuth scope must include user.metrics for body metrics.")
+        return _test_result("needs_reconnect", "Withings is connected without body metrics scope. Reconnect Withings.", checked_at, layers=layers)
+
+    layers["scopes"] = _withings_layer("configured", "Withings body metrics scope is present.")
+    try:
+        if not access_token or expires_at <= int(time.time()) + 300:
+            access_token = str(refresh_withings_token_if_needed(timeout_seconds=API_TEST_TIMEOUT_SECONDS) or "")
+        layers["oauth"] = _withings_layer("connected", "Withings OAuth token is present and refreshable.")
+        _withings_probe(access_token)
+        return _test_result("connected", "Withings API reachable and body metrics access is working.", checked_at, layers=layers)
+    except WithingsReconnectRequired:
+        layers["oauth"] = _withings_layer("token_expired", "Withings token refresh failed.")
+        return _test_result("token_expired", "Withings token expired. Reconnect Withings.", checked_at, layers=layers)
+    except HTTPError as exc:
+        if exc.code in {401, 403}:
+            layers["oauth"] = _withings_layer("needs_reconnect", "Withings rejected the saved access token.")
+            return _test_result("needs_reconnect", "Withings rejected the saved token. Reconnect Withings.", checked_at, layers=layers)
+        return _test_result("api_unreachable", f"Withings test failed with HTTP {exc.code}.", checked_at, layers=layers)
+    except (URLError, TimeoutError):
+        return _test_result("api_unreachable", "Could not reach Withings before the timeout.", checked_at, layers=layers)
+    except WithingsIntegrationError as exc:
+        message = str(exc)
+        lowered = message.lower()
+        if any(token in lowered for token in ["invalid", "expired", "unauthorized", "access_token", "refresh token"]):
+            layers["oauth"] = _withings_layer("needs_reconnect", "Withings rejected the saved OAuth token.")
+            return _test_result("needs_reconnect", "Withings OAuth token was rejected. Reconnect Withings.", checked_at, layers=layers)
+        return _test_result("api_unreachable", f"Withings API test failed: {message}", checked_at, layers=layers)
+    except (json.JSONDecodeError, OSError):
+        return _test_result("api_unreachable", "Withings returned an unreadable response.", checked_at, layers=layers)
 
 
 def _latest_date(df: pd.DataFrame, source_filter: str | None = None) -> str:
@@ -403,6 +612,7 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
 def _settings_response(settings: dict) -> dict:
     """Return settings with secrets masked for frontend display."""
     integrations = settings.get("integrations", {})
+    appearance = settings.get("metadata", {}).get("appearance", {})
     masked = {
         key: mask_secret(integrations.get(key, ""))
         for key in INTEGRATION_FIELDS
@@ -426,6 +636,7 @@ def _settings_response(settings: dict) -> dict:
     }
     return {
         "integrations": masked,
+        "appearance": {"accent_color": normalize_accent_color(appearance.get("accent_color"))},
         "statuses": statuses,
         "health": _integration_health(settings, statuses),
         "services": _integration_components(settings),
@@ -451,6 +662,8 @@ def update_settings(payload: SettingsPayload) -> dict:
         value = str(incoming.get(key, "")).strip()
         if value and not value.startswith("••"):
             settings["integrations"][key] = value
+    if payload.appearance:
+        settings.setdefault("metadata", {}).setdefault("appearance", {})["accent_color"] = normalize_accent_color(payload.appearance.get("accent_color"))
     save_settings(settings)
     return _settings_response(load_settings())
 
@@ -462,6 +675,30 @@ def get_integration_statuses(external_checks: bool = Query(default=True)) -> dic
     response = _settings_response(settings)
     response.update(build_integration_status_report(settings=settings, run_external_checks=external_checks))
     return response
+
+
+@router.get("/api/integrations/test")
+def test_api_connections() -> dict:
+    """Run explicit, timeout-bounded API connectivity checks for Settings."""
+    settings = load_settings()
+    checked_at = _now_iso()
+    checks = {
+        "hevy": _test_hevy_connection,
+        "openai": _test_openai_connection,
+        "withings": _test_withings_connection,
+    }
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = {name: executor.submit(check, settings) for name, check in checks.items()}
+        for name, future in futures.items():
+            try:
+                results[name] = future.result(timeout=API_TEST_TIMEOUT_SECONDS + 2)
+            except FutureTimeout:
+                results[name] = _test_result("api_unreachable", f"{name.title()} test timed out.", checked_at)
+            except Exception:
+                logger.exception("%s API connection test failed without exposing credentials.", name.title())
+                results[name] = _test_result("api_unreachable", f"{name.title()} API test failed unexpectedly.", checked_at)
+    return {"checkedAt": checked_at, **results}
 
 
 @router.get("/api/integrations/strava/auth-url")

@@ -24,6 +24,7 @@ from src.nutrition_targets import calculate_macro_targets
 from src.goals import build_automatic_goals, load_user_goals
 from src.recovery import load_recovery_log
 from src.training import add_training_entry, load_training_log, move_workout_date
+from src.training_schedule import load_training_schedule_profile, planned_training_for_date, save_training_schedule_profile
 
 
 router = APIRouter(tags=["training"])
@@ -63,6 +64,11 @@ class HevyImportRequest(BaseModel):
 
 class TrainingInsightsRequest(BaseModel):
     exercise_name: str | None = None
+
+
+class TrainingScheduleProfilePayload(BaseModel):
+    name: str | None = None
+    days: dict[str, dict]
 
 
 def _training_log_with_volume() -> pd.DataFrame:
@@ -156,6 +162,20 @@ def get_training_logs() -> dict:
 def get_training_history() -> dict:
     """Return expandable workouts grouped by date and workout_id."""
     return {"items": grouped_workout_history(load_training_log())}
+
+
+@router.get("/api/training/schedule")
+def get_training_schedule() -> dict:
+    """Return the configurable recurring split profile."""
+    profile = load_training_schedule_profile()
+    return {"profile": profile, "today": planned_training_for_date(pd.Timestamp.today().normalize(), profile=profile)}
+
+
+@router.put("/api/training/schedule")
+def update_training_schedule(payload: TrainingScheduleProfilePayload) -> dict:
+    """Replace the recurring split profile used by dashboard/adaptive logic."""
+    profile = save_training_schedule_profile(payload.model_dump(exclude_none=True))
+    return {"profile": profile, "today": planned_training_for_date(pd.Timestamp.today().normalize(), profile=profile)}
 
 
 @router.get("/api/training/exercises")

@@ -93,6 +93,33 @@ class TrainingWorkloadTest(unittest.TestCase):
         self.assertGreater(targets["workload_calorie_adjustment"], 0)
         self.assertGreater(targets["carb_grams"], 300)
 
+    def test_hevy_run_counts_as_cardio_not_strength_workload(self):
+        training = pd.DataFrame(
+            [
+                {
+                    "workout_id": "hevy-run",
+                    "date": "2026-04-26",
+                    "workout_type": "Strength",
+                    "muscle_group": "",
+                    "exercise": "Treadmill",
+                    "sets": 1,
+                    "reps": 1,
+                    "weight": 0,
+                    "rpe": 0,
+                    "duration_minutes": 30,
+                    "notes": "Imported from Hevy | hevy_workout_id=hevy-run | workout_title=Sunday Run | distance_miles=3.0",
+                    "source": "hevy",
+                }
+            ]
+        )
+
+        workload = analyze_training_workload(training, bodyweight=160)
+
+        self.assertEqual(workload["current"]["strength_workouts_per_week"], 0)
+        self.assertGreater(workload["current"]["runs_per_week"], 0)
+        self.assertGreater(workload["current"]["weekly_mileage"], 0)
+        self.assertGreater(workload["current"]["cardio_calorie_demand"], 0)
+
     def test_hevy_performance_signal_detects_multi_exercise_decline(self):
         rows = []
         for date, bench_weight, row_weight in [

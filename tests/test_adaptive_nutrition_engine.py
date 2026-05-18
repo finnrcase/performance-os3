@@ -179,6 +179,26 @@ def _sunday_run_training() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _sunday_hevy_run_training() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "workout_id": "hevy-run",
+                "date": "2026-04-26",
+                "workout_type": "Strength",
+                "exercise": "Treadmill",
+                "sets": 1,
+                "reps": 1,
+                "weight": 0,
+                "rpe": 0,
+                "duration_minutes": 35,
+                "source": "hevy",
+                "notes": "Imported from Hevy | hevy_workout_id=hevy-run | workout_title=Sunday Run | distance_miles=3.5",
+            }
+        ]
+    )
+
+
 class AdaptiveNutritionEngineTest(unittest.TestCase):
     def test_macro_math_protein_first_fat_floor_and_carbs_remaining(self):
         recommendation = build_adaptive_nutrition_recommendation(
@@ -340,6 +360,21 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
 
         self.assertLessEqual(recommendation["dayOfWeekAdjustment"]["calorie_delta"], -100)
         self.assertTrue(any("Sunday is usually run-only" in trend for trend in recommendation["detectedTrends"]))
+
+    def test_sunday_hevy_run_drives_run_cardio_day_type(self):
+        recommendation = build_adaptive_nutrition_recommendation(
+            user_goals=GOALS,
+            body_metrics_df=_body_comp(0.04, 0, days=28, start="2026-04-05"),
+            nutrition_df=_nutrition(days=28, start="2026-04-05"),
+            training_df=_sunday_hevy_run_training(),
+            recovery_df=_recovery(days=28, start="2026-04-05"),
+            current_targets=CURRENT,
+            today="2026-04-26",
+        )
+
+        self.assertEqual(recommendation["dayType"], "Run/cardio-focused day")
+        self.assertGreater(recommendation["signals"]["runningLoad"]["runs_per_week"], 0)
+        self.assertGreater(recommendation["dayTypeAdjustment"]["carb_delta"], 0)
 
     def test_missing_data_warnings_are_explicit(self):
         recommendation = build_adaptive_nutrition_recommendation(

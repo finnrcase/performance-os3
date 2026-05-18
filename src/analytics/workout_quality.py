@@ -7,6 +7,7 @@ import math
 import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
+from src.training_schedule import is_run_row, is_strength_row
 
 
 def _empty(status: str = "missing") -> dict:
@@ -69,11 +70,15 @@ def _clean_training(training_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _is_run(df: pd.DataFrame) -> pd.Series:
-    return (df["source"].str.lower() == "strava") | (df["workout_type"].str.lower() == "run")
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    return df.apply(is_run_row, axis=1)
 
 
 def _is_strength(df: pd.DataFrame) -> pd.Series:
-    return (df["source"].str.lower() == "hevy") | (df["workout_type"].str.lower() == "strength")
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    return df.apply(is_strength_row, axis=1)
 
 
 def _pct(current: float, baseline: float) -> float | None:
@@ -105,7 +110,7 @@ def _run_quality(df: pd.DataFrame, today_rows: pd.DataFrame, today_date: pd.Time
             "score_label": f"{score:.1f}/10",
             "color": _score_color(score),
             "explanation": "Run logged, but not enough comparable history yet.",
-            "source": "strava",
+            "source": str(today_run.get("source") or "run"),
         }
     if distance > 0:
         similar = previous[(previous["distance_miles"] >= distance * 0.8) & (previous["distance_miles"] <= distance * 1.2)]
@@ -136,7 +141,7 @@ def _run_quality(df: pd.DataFrame, today_rows: pd.DataFrame, today_date: pd.Time
         "color": _score_color(score),
         "explanation": explanation,
         "comparison": f"Compared with {min(5, len(similar))} similar runs.",
-        "source": "strava",
+        "source": str(today_run.get("source") or "run"),
     }
 
 

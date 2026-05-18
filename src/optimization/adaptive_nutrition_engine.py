@@ -18,6 +18,7 @@ from src.analytics.training_workload import analyze_hevy_performance_signal, ana
 from src.nutrition_targets import align_macro_calories, calculate_bodyweight_trend_signal, calculate_macro_targets
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
+from src.training_schedule import is_run_row, is_strength_row, planned_training_for_date
 
 
 NUTRITION_RECOMMENDATION_HISTORY_PATH = processed_data_path("nutrition_recommendation_history.json")
@@ -327,17 +328,11 @@ def _running_load_signal(workload: dict, performance_signal: dict | None = None)
 
 
 def _is_hevy_row(row: pd.Series) -> bool:
-    source = str(row.get("source") or "").lower()
-    notes = str(row.get("notes") or "").lower()
-    workout_type = str(row.get("workout_type") or "").lower()
-    return source == "hevy" or "hevy_workout_id=" in notes or workout_type == "strength"
+    return is_strength_row(row)
 
 
 def _is_run_row(row: pd.Series) -> bool:
-    source = str(row.get("source") or "").lower()
-    notes = str(row.get("notes") or "").lower()
-    workout_type = str(row.get("workout_type") or "").lower()
-    return source == "strava" or workout_type == "run" or "strava_activity_id=" in notes
+    return is_run_row(row)
 
 
 def _is_lower_body_training(df: pd.DataFrame) -> bool:
@@ -362,6 +357,7 @@ def _is_lower_body_training(df: pd.DataFrame) -> bool:
 
 
 def _detect_day_type(training_df: pd.DataFrame | None, workload: dict, recovery_signal: dict, analysis_day: pd.Timestamp) -> dict:
+    planned = planned_training_for_date(analysis_day)
     df = _date_clean(training_df)
     today_rows = df[df["date"] == analysis_day].copy() if not df.empty else pd.DataFrame()
     lift_rows = today_rows[today_rows.apply(_is_hevy_row, axis=1)] if not today_rows.empty else pd.DataFrame()
@@ -416,7 +412,7 @@ def _detect_day_type(training_df: pd.DataFrame | None, workload: dict, recovery_
     if not run_rows.empty or float(running_current) >= 8 or run_minutes_today >= 30:
         return {
             "type": "Run/cardio-focused day",
-            "reason": "Strava/cardio load is the main workload signal, so the day gets a smaller carb-focused bump.",
+            "reason": "Run/cardio load is the main workload signal, so the day gets a smaller carb-focused bump.",
             "calorie_delta": 75,
             "carb_delta": 30,
             "fat_delta": -5,
@@ -430,6 +426,33 @@ def _detect_day_type(training_df: pd.DataFrame | None, workload: dict, recovery_
             "carb_delta": -10,
             "fat_delta": 0,
             "confidence": recovery_signal.get("confidence", "low"),
+        }
+    if planned["is_leg_day"]:
+        return {
+            "type": "Leg day",
+            "reason": f"{planned['display_label']} is planned in the recurring split, so carbs are biased toward lower-body demand.",
+            "calorie_delta": int(planned.get("calorie_delta") or 150),
+            "carb_delta": int(planned.get("carb_delta") or 55),
+            "fat_delta": -8,
+            "confidence": "low",
+        }
+    if planned["is_run_day"]:
+        return {
+            "type": "Run/cardio-focused day",
+            "reason": f"{planned['display_label']} is planned in the recurring split, so the day gets a carb-focused run adjustment.",
+            "calorie_delta": int(planned.get("calorie_delta") or 75),
+            "carb_delta": int(planned.get("carb_delta") or 30),
+            "fat_delta": -5,
+            "confidence": "low",
+        }
+    if planned["is_strength_day"]:
+        return {
+            "type": "Moderate lifting day",
+            "reason": f"{planned['display_label']} is planned in the recurring split, so the day gets a moderate lifting adjustment.",
+            "calorie_delta": int(planned.get("calorie_delta") or 75),
+            "carb_delta": int(planned.get("carb_delta") or 22),
+            "fat_delta": -2,
+            "confidence": "low",
         }
     return {
         "type": "Recovery/rest day",

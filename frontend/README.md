@@ -45,9 +45,10 @@ In production, set:
 NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
 ```
 
-`BACKEND_API_URL` is still accepted as a server-side rewrite fallback, but the
-production frontend should use `NEXT_PUBLIC_API_URL` so browser calls and OAuth
-callback forwarding both target the Railway FastAPI backend.
+`NEXT_PUBLIC_API_URL` configures the same-origin `/api` rewrite and OAuth
+callback forwarding to the Railway FastAPI backend. Browser requests stay on the
+Vercel origin by default so the signed access cookie is sent to Next.js and then
+forwarded to FastAPI.
 
 ## Private Access Gate
 
@@ -96,9 +97,10 @@ Optional:
 BACKEND_API_URL=https://api-production-b3ff.up.railway.app
 ```
 
-Production should use `NEXT_PUBLIC_API_URL` so the Vercel frontend calls the
-Railway FastAPI backend directly. `BACKEND_API_URL` is only a server-side
-rewrite fallback.
+Production should use `NEXT_PUBLIC_API_URL` so Vercel can rewrite same-origin
+`/api/*` requests to Railway. `BACKEND_API_URL` is only a server-side rewrite
+fallback. Set `NEXT_PUBLIC_USE_DIRECT_API=true` only when intentionally testing
+direct browser-to-backend calls.
 Do not add backend secrets such as `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, or
 `HEVY_API_KEY` to Vercel. Those belong on the FastAPI backend host.
 
@@ -107,6 +109,7 @@ The FastAPI backend must have its own production env vars, including:
 ```bash
 DATABASE_URL=postgres://...
 APP_PASSWORD=your-private-password
+SESSION_SECRET=your-long-random-session-secret
 OPENAI_API_KEY=...
 HEVY_API_KEY=...
 STRAVA_CLIENT_ID=...
@@ -161,8 +164,8 @@ The Dashboard includes cards for recovery score, calories today, protein today, 
 ## Notes
 
 - External API keys stay on the FastAPI backend, never in the browser.
-- FastAPI reads/writes the existing local CSV and JSON files.
-- Hosted FastAPI deployments should set `PERFORMANCE_OS_DATA_DIR` to a
-  persistent disk or volume.
-- Streamlit remains the working MVP interface.
+- FastAPI reads/writes local CSV and JSON files in development.
+- Hosted FastAPI deployments should use `DATABASE_URL`; Postgres JSONB rows are
+  upserted by durable IDs instead of whole-table rewrites for core datasets.
+- Streamlit remains available as a local utility interface.
 - The product design plan lives in `PRODUCT_PLAN.md`.

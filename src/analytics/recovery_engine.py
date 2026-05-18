@@ -11,6 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from src.training_schedule import is_run_row, is_strength_row
+
 
 RECOVERY_ANALYTICS_COLUMNS = [
     "date",
@@ -108,13 +110,22 @@ def _daily_training(training_df: pd.DataFrame) -> pd.DataFrame:
         daily_df[column] = pd.to_numeric(daily_df[column], errors="coerce").fillna(0)
     if "notes" not in daily_df.columns:
         daily_df["notes"] = ""
+    if "workout_type" not in daily_df.columns:
+        daily_df["workout_type"] = ""
+    daily_df["is_strength"] = daily_df.apply(is_strength_row, axis=1)
+    daily_df["is_run"] = daily_df.apply(is_run_row, axis=1)
 
     daily_df["volume"] = np.where(
-        daily_df["workout_type"].astype(str).str.lower() == "strength",
+        daily_df["is_strength"],
         daily_df["sets"] * daily_df["reps"] * daily_df["weight"],
         0,
     )
     daily_df["run_load"] = daily_df["notes"].fillna("").astype(str).apply(_extract_run_load)
+    missing_run_load = daily_df["is_run"] & (daily_df["run_load"] <= 0)
+    daily_df.loc[missing_run_load, "run_load"] = daily_df.loc[missing_run_load].apply(
+        lambda row: (_note_number(row["notes"], "distance_miles") * 10) + (float(row["duration_minutes"] or 0) * 0.45),
+        axis=1,
+    )
 
     return (
         daily_df.groupby("date", as_index=False)
@@ -134,6 +145,17 @@ def _extract_run_load(note: str) -> float:
     if marker not in note:
         return 0.0
     raw = note.split(marker, 1)[1].split("|", 1)[0].strip()
+    try:
+        return float(raw)
+    except ValueError:
+        return 0.0
+
+
+def _note_number(note: str, key: str) -> float:
+    marker = f"{key}="
+    if marker not in str(note):
+        return 0.0
+    raw = str(note).split(marker, 1)[1].split("|", 1)[0].strip()
     try:
         return float(raw)
     except ValueError:

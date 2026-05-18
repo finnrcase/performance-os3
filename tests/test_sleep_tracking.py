@@ -8,11 +8,13 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from src import recovery as recovery_module
+from tests.auth_helpers import configure_test_auth
 
 
 class SleepTrackingTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        configure_test_auth(self.client)
 
     def test_sleep_entries_derive_from_manual_recovery_logs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

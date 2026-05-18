@@ -6,6 +6,7 @@ import pandas as pd
 
 from src.analytics.exercise_muscle_map import get_exercise_muscle_group
 from src.analytics.strength_trends import calculate_estimated_1rm, calculate_muscle_group_trend, calculate_strength_trend
+from src.training_schedule import is_run_row, is_strength_row
 
 
 WINDOWS = (7, 14, 28)
@@ -63,13 +64,12 @@ def _note_number(note: str, key: str) -> float:
 
 
 def _source_mask(df: pd.DataFrame, value: str) -> pd.Series:
-    source = df["source"].fillna("").astype(str).str.lower() if "source" in df.columns else pd.Series("", index=df.index)
-    workout_type = df["workout_type"].fillna("").astype(str).str.lower() if "workout_type" in df.columns else pd.Series("", index=df.index)
-    notes = df["notes"].fillna("").astype(str).str.lower() if "notes" in df.columns else pd.Series("", index=df.index)
+    if df.empty:
+        return pd.Series(False, index=df.index)
     if value == "hevy":
-        return source.eq("hevy") | notes.str.contains("hevy_workout_id=", regex=False)
+        return df.apply(is_strength_row, axis=1)
     if value == "strava":
-        return source.eq("strava") | workout_type.eq("run") | notes.str.contains("strava_activity_id=", regex=False)
+        return df.apply(is_run_row, axis=1)
     return pd.Series(False, index=df.index)
 
 

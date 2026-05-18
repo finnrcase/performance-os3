@@ -173,6 +173,7 @@ def save_daily_nutrition_summary(summary_df: pd.DataFrame) -> None:
     for column in SUMMARY_COLUMNS:
         if column not in summary_df.columns:
             summary_df[column] = pd.NA
+    summary_df.attrs["replace_all"] = True
     save_dataframe("daily_nutrition_summary", DAILY_NUTRITION_SUMMARY_PATH, summary_df, SUMMARY_COLUMNS)
 
 
@@ -190,21 +191,44 @@ def load_daily_nutrition_summary() -> pd.DataFrame:
     return summary_df[SUMMARY_COLUMNS]
 
 
+def _calendarized_summary(summary_df: pd.DataFrame, days: int, today: str | pd.Timestamp | None = None) -> pd.DataFrame:
+    """Return an explicit daily window where absent food rows are missing logs."""
+    day_count = max(int(days or 1), 1)
+    end = pd.to_datetime(today, errors="coerce").normalize() if today is not None else pd.Timestamp.today().normalize()
+    if pd.isna(end):
+        end = pd.Timestamp.today().normalize()
+    start = end - pd.Timedelta(days=day_count - 1)
+    calendar = pd.DataFrame({"date": pd.date_range(start=start, end=end, freq="D")})
+
+    if summary_df.empty:
+        merged = calendar
+    else:
+        df = summary_df.copy()
+        df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.normalize()
+        df = df.dropna(subset=["date"]).sort_values("date").drop_duplicates("date", keep="last")
+        merged = calendar.merge(df, on="date", how="left")
+
+    for column in SUMMARY_COLUMNS:
+        if column not in merged.columns:
+            merged[column] = pd.NA
+    for column in ["total_calories", "total_protein", "total_carbs", "total_fat"]:
+        merged[column] = pd.to_numeric(merged[column], errors="coerce").fillna(0)
+    for column in ["target_calories", "target_protein", "target_carbs", "target_fat", "adherence_score"]:
+        merged[column] = pd.to_numeric(merged[column], errors="coerce")
+    merged["nutrition_logged"] = ~merged["total_calories"].apply(is_missing_nutrition_day)
+    merged["date"] = merged["date"].dt.date.astype(str)
+    return merged[SUMMARY_COLUMNS]
+
+
 def get_nutrition_history(days: int = 30) -> pd.DataFrame:
     """Return recent day-level nutrition summaries."""
     summary_df = load_daily_nutrition_summary()
     if summary_df.empty:
         return summary_df
-    summary_df = summary_df.copy()
-    summary_df["date"] = pd.to_datetime(summary_df["date"], errors="coerce")
-    summary_df = summary_df.dropna(subset=["date"]).sort_values("date", ascending=False)
-    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=max(days, 1) - 1)
-    summary_df = summary_df[summary_df["date"] >= cutoff]
-    summary_df["date"] = summary_df["date"].dt.date.astype(str)
-    return summary_df.sort_values("date").reset_index(drop=True)
+    return _calendarized_summary(summary_df, days).sort_values("date").reset_index(drop=True)
 
 
-def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7) -> dict:
+def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7, today: str | pd.Timestamp | None = None) -> dict:
     """Summarize recent calorie and protein adherence.
 
     0-calorie days are treated as missing food logs: they are excluded from
@@ -225,12 +249,7 @@ def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7) -> dict
         "confidence": "low",
         "data_quality_note": "No nutrition has been logged yet.",
     }
-    if summary_df.empty:
-        return empty
-
-    df = summary_df.copy()
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    df = df.dropna(subset=["date"]).sort_values("date").tail(max(days, 1))
+    df = _calendarized_summary(summary_df, days, today=today)
     for column in ["total_calories", "target_calories", "total_protein", "target_protein", "adherence_score"]:
         df[column] = pd.to_numeric(df.get(column), errors="coerce")
 

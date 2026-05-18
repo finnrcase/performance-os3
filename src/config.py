@@ -9,6 +9,7 @@ from src.paths import processed_data_path
 from src.storage import load_document, save_document
 
 SETTINGS_PATH = processed_data_path("user_settings.json")
+ACCENT_COLORS = {"lime", "pink", "purple", "orange", "blue", "rainbow"}
 
 INTEGRATION_FIELDS = {
     "hevy_api_key": "",
@@ -59,12 +60,19 @@ WITHINGS_SYNC_FIELDS = {
 }
 
 
+def normalize_accent_color(value: object) -> str:
+    """Return a supported accent theme id, preserving lime as the default."""
+    normalized = str(value or "lime").strip().lower()
+    return normalized if normalized in ACCENT_COLORS else "lime"
+
+
 def default_settings() -> dict:
     """Return the default local settings shape."""
     return {
         "integrations": INTEGRATION_FIELDS.copy(),
         "metadata": {
             "version": 1,
+            "appearance": {"accent_color": "lime"},
             "strava_tokens": STRAVA_TOKEN_FIELDS.copy(),
             "strava_sync": STRAVA_SYNC_FIELDS.copy(),
             "withings_tokens": WITHINGS_TOKEN_FIELDS.copy(),
@@ -86,6 +94,10 @@ def load_settings() -> dict:
         }
     )
     settings["metadata"].update(saved.get("metadata", {}))
+    saved_appearance = saved.get("metadata", {}).get("appearance", {})
+    settings["metadata"]["appearance"] = {
+        "accent_color": normalize_accent_color(saved_appearance.get("accent_color") or settings["metadata"].get("appearance", {}).get("accent_color"))
+    }
     saved_tokens = saved.get("metadata", {}).get("strava_tokens", {})
     settings["metadata"]["strava_tokens"] = {
         key: saved_tokens.get(key, default)
@@ -119,6 +131,10 @@ def save_settings(settings: dict) -> None:
         }
     )
     normalized["metadata"].update(settings.get("metadata", {}))
+    appearance = settings.get("metadata", {}).get("appearance", {})
+    normalized["metadata"]["appearance"] = {
+        "accent_color": normalize_accent_color(appearance.get("accent_color"))
+    }
     tokens = settings.get("metadata", {}).get("strava_tokens", {})
     normalized["metadata"]["strava_tokens"] = {
         key: tokens.get(key, default)

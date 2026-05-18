@@ -13,7 +13,8 @@ The platform supports CSV/JSON-backed workflows for:
 - Food logging, frequent foods, meal templates, and optional AI food parsing
 - Bodyweight and body metrics tracking
 - Recovery check-ins and deterministic recovery scoring
-- Manual training logs and placeholder integration flows
+- Manual and imported training logs from Hevy/Strava, Withings body metrics,
+  OpenAI-assisted food parsing, and integration diagnostics
 - Recommendation and performance optimization engines
 - Local integrations/settings configuration
 
@@ -95,9 +96,11 @@ NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 `SESSION_SECRET` signs the private access cookie after a successful login. Both
 are server-side only and must not use the `NEXT_PUBLIC_` prefix.
 
-`NEXT_PUBLIC_API_URL` is the public Railway backend URL used by the browser and
-by OAuth callback forwarding routes. `BACKEND_API_URL` is still accepted as a
-server-side rewrite fallback, but production should set `NEXT_PUBLIC_API_URL`.
+`NEXT_PUBLIC_API_URL` is the public Railway backend URL used by the Next.js
+same-origin `/api` rewrite and OAuth callback forwarding routes. Browser calls
+stay on the Vercel origin by default so the signed access cookie can be
+forwarded to FastAPI. Set `NEXT_PUBLIC_USE_DIRECT_API=true` only for deliberate
+direct-backend debugging.
 
 Do not put backend API keys or OAuth secrets in the Vercel frontend project.
 Keep `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `HEVY_API_KEY`, and similar keys
@@ -142,6 +145,7 @@ Set backend environment variables as needed:
 ```bash
 DATABASE_URL=postgres://...
 APP_PASSWORD=your-private-password
+SESSION_SECRET=your-long-random-session-secret
 OPENAI_API_KEY=...
 USDA_FDC_API_KEY=...
 STRAVA_CLIENT_ID=...
@@ -166,9 +170,10 @@ Production ownership rules:
 - Vercel gets only frontend/session config: `APP_PASSWORD`,
   `SESSION_SECRET`, `NEXT_PUBLIC_API_URL`, and `NEXT_PUBLIC_APP_URL`.
 - Railway gets all backend secrets and integrations: `DATABASE_URL`,
-  `OPENAI_API_KEY`, `STRAVA_CLIENT_ID`, `STRAVA_CLIENT_SECRET`,
-  `STRAVA_ACCESS_TOKEN`, `STRAVA_REFRESH_TOKEN`, `HEVY_API_KEY`, and webhook or
-  OAuth secrets.
+  `APP_PASSWORD`, `SESSION_SECRET`, `OPENAI_API_KEY`, `STRAVA_CLIENT_ID`,
+  `STRAVA_CLIENT_SECRET`, `STRAVA_ACCESS_TOKEN`, `STRAVA_REFRESH_TOKEN`,
+  `HEVY_API_KEY`, and webhook or OAuth secrets. FastAPI validates the same
+  signed session cookie as the Next.js gate.
 - Do not put `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `STRAVA_REFRESH_TOKEN`,
   `HEVY_API_KEY`, or database credentials in Vercel.
 - After changing Railway or Vercel environment variables, redeploy both
@@ -208,7 +213,9 @@ set `DATABASE_URL` to a hosted Postgres database such as Neon, Supabase
 Postgres, or another managed Postgres provider. When `DATABASE_URL` is present,
 Performance OS stores food logs, meal templates, body metrics, recovery/sleep,
 training history, integration tokens, macro targets, and PR/settings documents
-in Postgres tables instead of local files.
+in Postgres JSONB-backed tables instead of local files. Durable row identities
+are upserted in transactions so normal phone/laptop/integration writes do not
+rewrite whole tables.
 
 Initialize the schema:
 
@@ -260,8 +267,10 @@ browser storage, or mock data for important production records.
 - Next.js route handlers under `frontend/src/app/api/access/*` run on Vercel.
 - Application data routes such as `/api/dashboard`, `/api/food/*`,
   `/api/training/*`, and `/api/recovery/*` are served by FastAPI.
-- In production, the browser calls the Railway backend from
-  `NEXT_PUBLIC_API_URL`. `BACKEND_API_URL` remains only as a rewrite fallback.
+- In production, the browser calls same-origin `/api/*` routes on Vercel.
+  Next.js rewrites those requests to the FastAPI backend configured by
+  `NEXT_PUBLIC_API_URL` or `BACKEND_API_URL`, preserving the private session
+  cookie. FastAPI also rejects private API routes without that session.
 - The FastAPI backend allows Vercel preview URLs via CORS and should also be
   configured with `CORS_ALLOW_ORIGINS` for your production domain.
 

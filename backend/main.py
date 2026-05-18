@@ -1,9 +1,4 @@
-"""FastAPI placeholder for the future Performance OS production backend.
-
-The Streamlit app in app/main.py remains the current MVP user interface.
-This FastAPI app will eventually serve a modern frontend while reusing the
-shared business logic in src/.
-"""
+"""FastAPI backend for the production Performance OS frontend."""
 
 from pathlib import Path
 import logging
@@ -12,12 +7,13 @@ import threading
 import time
 
 import pandas as pd
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 
 from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training, withings
-from backend.routes.utils import dataframe_records
+from backend.routes.utils import dataframe_records, require_authenticated_request
 from src.analytics.food_history import (
     build_daily_nutrition_summary,
     calculate_calorie_adherence,
@@ -44,6 +40,7 @@ from src.optimization.performance_engine import generate_performance_recommendat
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import load_recovery_log, load_sleep_entries
 from src.training import calculate_training_volume, load_training_log
+from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import HevyIntegrationError, sync_hevy_events
 from src.storage import ensure_database_schema, production_storage_warnings, use_database
 
@@ -56,7 +53,7 @@ _hevy_poll_thread_started = False
 app = FastAPI(
     title="Performance OS API",
     version="0.1.0",
-    description="Placeholder API for the future production Performance OS frontend.",
+    description="Private API for Performance OS health, training, nutrition, recovery, body metrics, and integrations.",
 )
 
 
@@ -83,6 +80,31 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["Content-Disposition"],
 )
+
+
+PUBLIC_API_PATHS = {
+    "/api/strava/callback",
+    "/api/integrations/strava/callback",
+    "/api/withings/callback",
+    "/api/hevy/webhook",
+}
+
+
+def _is_public_api_path(path: str) -> bool:
+    normalized = path.rstrip("/") or "/"
+    return normalized in PUBLIC_API_PATHS
+
+
+@app.middleware("http")
+async def require_session_for_private_api(request: Request, call_next):
+    """Fail closed for private API routes; OAuth callbacks/webhooks stay public."""
+    path = request.url.path
+    if request.method != "OPTIONS" and path.startswith("/api/") and not _is_public_api_path(path):
+        try:
+            require_authenticated_request(request)
+        except HTTPException as exc:
+            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+    return await call_next(request)
 
 
 @app.get("/health")
@@ -432,6 +454,11 @@ def _daily_training_rows(training_df: pd.DataFrame) -> pd.DataFrame:
     df = training_df.copy()
     df["date"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["date"])
+    if df.empty:
+        return pd.DataFrame()
+    df = df[df.apply(is_strength_row, axis=1)].copy()
+    if df.empty:
+        return pd.DataFrame()
     for column in ["sets", "reps", "weight", "duration_minutes"]:
         df[column] = pd.to_numeric(df.get(column, 0), errors="coerce").fillna(0)
     df["volume"] = df["sets"] * df["reps"] * df["weight"]
@@ -480,11 +507,7 @@ def _today_run_summary(training_df: pd.DataFrame, today: str) -> dict | None:
     df["duration_minutes"] = pd.to_numeric(df["duration_minutes"], errors="coerce").fillna(0)
 
     today_rows = df[df["date"].dt.date.astype(str) == today].copy()
-    run_rows = today_rows[
-        df.loc[today_rows.index, "source"].str.lower().eq("strava")
-        | df.loc[today_rows.index, "workout_type"].str.lower().eq("run")
-        | df.loc[today_rows.index, "notes"].str.contains("strava_activity_id=", regex=False, na=False)
-    ].copy()
+    run_rows = today_rows[today_rows.apply(is_run_row, axis=1)].copy()
     if run_rows.empty:
         return None
 
@@ -517,12 +540,27 @@ def _today_run_summary(training_df: pd.DataFrame, today: str) -> dict | None:
 
 
 def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
+    day_summary = summarize_training_day(training_df, today)
     daily = _daily_training_rows(training_df)
     run_summary = _today_run_summary(training_df, today)
+    base_tile = {
+        "planned_workout": day_summary["planned_workout"],
+        "completed_workouts": day_summary["completed_workouts"],
+        "completed_summary": day_summary["completed_summary"],
+        "schedule_match": day_summary["schedule_match"],
+        "match_label": day_summary["match_label"],
+        "sources": day_summary["sources"],
+        "has_run": day_summary["has_run"],
+        "has_lift": day_summary["has_lift"],
+        "cardio_indicator": day_summary["cardio_indicator"],
+        "extra_run_added": day_summary["extra_run_added"],
+        "recovery_status_relative_to_plan": day_summary["recovery_status_relative_to_plan"],
+    }
     if daily.empty:
         return {
-            "status": "No lift logged today",
-            "summary": "Log a workout or import from Hevy.",
+            **base_tile,
+            "status": f"Today: {day_summary['planned_workout']}",
+            "summary": f"Completed: {day_summary['completed_summary']}" if day_summary["completed_summary"] else "Workout not logged yet",
             "comparison": None,
             "today_volume": None,
             "percent_vs_average": None,
@@ -532,8 +570,9 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
     today_rows = daily[daily["date"].dt.date.astype(str) == today]
     if today_rows.empty:
         return {
-            "status": "No lift logged today",
-            "summary": "Training tile updates after today's workout is logged.",
+            **base_tile,
+            "status": f"Today: {day_summary['planned_workout']}",
+            "summary": f"Completed: {day_summary['completed_summary']}" if day_summary["completed_summary"] else "Workout not logged yet",
             "comparison": None,
             "today_volume": None,
             "percent_vs_average": None,
@@ -549,8 +588,9 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
         similar = previous[previous["muscle_group"] == today_row["muscle_group"]]
     if similar.empty:
         return {
-            "status": "Need more similar workouts",
-            "summary": f"Today: {today_row['workout_type'] or 'Workout'} · {int(today_row['total_sets'])} sets",
+            **base_tile,
+            "status": f"Today: {day_summary['planned_workout']}",
+            "summary": f"Completed: {day_summary['completed_summary'] or today_row['workout_type'] or 'Workout'}",
             "comparison": None,
             "today_volume": round(float(today_row["total_volume"]), 0),
             "percent_vs_average": None,
@@ -561,8 +601,9 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
     percent = ((today_volume - baseline) / baseline * 100) if baseline > 0 else 0
     direction = "Stronger" if percent > 3 else "Lighter" if percent < -3 else "Similar"
     return {
-        "status": f"{direction} than average {today_row['weekday']} session",
-        "summary": f"Volume {percent:+.0f}% vs last {min(4, len(similar))} similar sessions",
+        **base_tile,
+        "status": f"Today: {day_summary['planned_workout']}",
+        "summary": f"Completed: {day_summary['completed_summary'] or today_row['workout_type'] or 'Workout'} · {direction.lower()} than recent baseline",
         "comparison": f"{today_row['workout_type']} · {today_row['muscle_group']}",
         "today_volume": round(today_volume, 0),
         "percent_vs_average": round(percent, 1),

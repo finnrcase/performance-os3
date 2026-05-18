@@ -130,7 +130,7 @@ def _friendly_withings_message(message: str, context: str) -> str:
     return f"{context}: {cleaned}"
 
 
-def _post_form(url: str, body: dict, headers: dict | None = None, context: str = "Withings API request failed") -> dict:
+def _post_form(url: str, body: dict, headers: dict | None = None, context: str = "Withings API request failed", timeout_seconds: int = 25) -> dict:
     request = Request(
         url,
         data=urlencode(body).encode("utf-8"),
@@ -142,7 +142,7 @@ def _post_form(url: str, body: dict, headers: dict | None = None, context: str =
         method="POST",
     )
     try:
-        with urlopen(request, timeout=25) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
     except HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
@@ -259,7 +259,7 @@ def exchange_withings_code(code: str, redirect_uri: str) -> dict:
     return _save_withings_tokens(token_body)
 
 
-def refresh_withings_token_if_needed(force: bool = False):
+def refresh_withings_token_if_needed(force: bool = False, timeout_seconds: int = 25):
     settings = load_settings()
     tokens = settings.get("metadata", {}).get("withings_tokens", {})
     access_token = str(tokens.get("access_token", "") or "")
@@ -285,6 +285,7 @@ def refresh_withings_token_if_needed(force: bool = False):
                 "refresh_token": refresh_token,
             },
             context="Withings token refresh failed",
+            timeout_seconds=timeout_seconds,
         )
         token_body = _withings_body(payload, context="Withings token refresh failed")
     except WithingsIntegrationError as exc:

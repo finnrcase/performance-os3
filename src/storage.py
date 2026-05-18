@@ -37,9 +37,88 @@ DOCUMENT_TABLES = {
     "nutrition_recommendation_history": "nutrition_recommendation_history",
     "personal_records": "personal_records",
     "hevy_sync_state": "integration_sync_state",
+    "training_schedule_profile": "training_schedule_profiles",
 }
 
 ALL_DATASET_TABLES = sorted({*DATAFRAME_TABLES.values(), *DOCUMENT_TABLES.values()})
+
+LOWERCASE_KEY_FIELDS = {
+    "food_name",
+    "shortcut_name",
+    "template_name",
+    "source",
+}
+
+
+def _stable_text(value: Any, *, lowercase: bool = False) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    if text.lower() in {"", "nan", "none", "<na>", "nat"}:
+        return ""
+    return text.lower() if lowercase else text
+
+
+def _composite_key(dataset: str, record: dict[str, Any], fields: list[str]) -> str | None:
+    parts = [
+        _stable_text(record.get(field), lowercase=field in LOWERCASE_KEY_FIELDS)
+        for field in fields
+    ]
+    if any(not part for part in parts):
+        return None
+    return f"{dataset}:" + "|".join(parts)
+
+
+def dataframe_row_key(dataset: str, record: dict[str, Any], row_index: int | None = None) -> str | None:
+    """Return the durable Postgres row identity for a dataset record when known."""
+    if dataset == "nutrition_log":
+        return _composite_key(dataset, record, ["food_log_id"]) or _composite_key(dataset, record, ["source", "source_id"])
+    if dataset == "frequent_foods":
+        return _composite_key(dataset, record, ["food_name"])
+    if dataset == "food_shortcuts":
+        return _composite_key(dataset, record, ["shortcut_id"]) or _composite_key(dataset, record, ["shortcut_name"])
+    if dataset == "meal_templates":
+        return _composite_key(dataset, record, ["template_name", "food_name", "calories", "protein", "carbs", "fat"])
+    if dataset == "body_metrics":
+        return _composite_key(dataset, record, ["source", "source_id"]) or _composite_key(dataset, record, ["date", "source", "notes"])
+    if dataset == "training_log":
+        return _composite_key(dataset, record, ["external_id"]) or _composite_key(dataset, record, ["workout_id", "exercise", "set_number"])
+    if dataset == "recovery_log":
+        return _composite_key(dataset, record, ["date"])
+    if dataset == "sleep_entries":
+        return _composite_key(dataset, record, ["id"])
+    if dataset == "daily_nutrition_summary":
+        return _composite_key(dataset, record, ["date"])
+    if dataset in {"ai_food_cache", "usda_food_cache", "verified_food_cache"}:
+        for fields in (["cache_key"], ["query"], ["normalized_name"], ["food_name"], ["fdc_id"]):
+            key = _composite_key(dataset, record, fields)
+            if key:
+                return key
+    return None
+
+
+def dataframe_row_keys(dataset: str, records: list[dict[str, Any]]) -> list[str]:
+    """Return known durable row keys for records, skipping records without one."""
+    keys = []
+    for index, record in enumerate(records):
+        key = dataframe_row_key(dataset, record, index)
+        if key:
+            keys.append(key)
+    return keys
+
+
+def mark_dataframe_deletes(df: pd.DataFrame, dataset: str, deleted_records: list[dict[str, Any]]) -> pd.DataFrame:
+    """Attach explicit Postgres row deletes to a filtered dataframe before saving."""
+    keys = dataframe_row_keys(dataset, [_clean_record(record) for record in deleted_records])
+    if keys:
+        existing = list(df.attrs.get("delete_row_keys", []))
+        df.attrs["delete_row_keys"] = [*existing, *keys]
+    return df
 
 
 def database_url() -> str:
@@ -96,6 +175,7 @@ def ensure_database_schema(force: bool = False) -> None:
                     f"""
                     CREATE TABLE IF NOT EXISTS {table} (
                         id BIGSERIAL PRIMARY KEY,
+                        row_key TEXT,
                         row_order INTEGER NOT NULL DEFAULT 0,
                         data JSONB NOT NULL,
                         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -103,7 +183,9 @@ def ensure_database_schema(force: bool = False) -> None:
                     )
                     """
                 )
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS row_key TEXT")
                 cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_row_order_idx ON {table} (row_order)")
+                cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_row_key_unique_idx ON {table} (row_key) WHERE row_key IS NOT NULL")
         conn.commit()
     _schema_ready = True
 
@@ -153,14 +235,45 @@ def save_dataframe(dataset: str, path: Path, df: pd.DataFrame, columns: list[str
         ensure_database_schema()
         table = _table_for_dataframe(dataset)
         records = [_clean_record(record) for record in data.to_dict(orient="records")]
+        row_keys = dataframe_row_keys(dataset, records)
+        delete_row_keys = sorted(set(str(key) for key in data.attrs.get("delete_row_keys", []) if str(key).strip()))
+        replace_all = bool(data.attrs.get("replace_all", False))
         with _connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"TRUNCATE TABLE {table}")
-                if records:
-                    cur.executemany(
-                        f"INSERT INTO {table} (row_order, data) VALUES (%s, %s::jsonb)",
-                        [(index, json.dumps(record)) for index, record in enumerate(records)],
-                    )
+                if replace_all or (records and len(row_keys) != len(records)):
+                    cur.execute(f"DELETE FROM {table}")
+                    if records:
+                        cur.executemany(
+                            f"INSERT INTO {table} (row_key, row_order, data) VALUES (%s, %s, %s::jsonb)",
+                            [
+                                (dataframe_row_key(dataset, record, index), index, json.dumps(record))
+                                for index, record in enumerate(records)
+                            ],
+                        )
+                else:
+                    if delete_row_keys:
+                        cur.execute(f"DELETE FROM {table} WHERE row_key = ANY(%s)", (delete_row_keys,))
+                    if records:
+                        cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
+                        cur.executemany(
+                            f"""
+                            INSERT INTO {table} (row_key, row_order, data)
+                            VALUES (%s, %s, %s::jsonb)
+                            ON CONFLICT (row_key) WHERE row_key IS NOT NULL
+                            DO UPDATE SET
+                                row_order = EXCLUDED.row_order,
+                                data = EXCLUDED.data,
+                                updated_at = now()
+                            """,
+                            [
+                                (row_keys[index], index, json.dumps(record))
+                                for index, record in enumerate(records)
+                            ],
+                        )
+                    elif delete_row_keys:
+                        pass
+                    else:
+                        cur.execute(f"DELETE FROM {table}")
             conn.commit()
         return
 
@@ -196,8 +309,19 @@ def save_document(key: str, path: Path, document: dict[str, Any]) -> dict[str, A
         table = _table_for_document(key)
         with _connect() as conn:
             with conn.cursor() as cur:
-                cur.execute(f"TRUNCATE TABLE {table}")
-                cur.execute(f"INSERT INTO {table} (row_order, data) VALUES (0, %s::jsonb)", (json.dumps(data),))
+                cur.execute(
+                    f"""
+                    INSERT INTO {table} (row_key, row_order, data)
+                    VALUES ('document', 0, %s::jsonb)
+                    ON CONFLICT (row_key) WHERE row_key IS NOT NULL
+                    DO UPDATE SET
+                        row_order = EXCLUDED.row_order,
+                        data = EXCLUDED.data,
+                        updated_at = now()
+                    """,
+                    (json.dumps(data),),
+                )
+                cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
             conn.commit()
         return data
 

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from backend.main import app
 from src import nutrition as nutrition_module
+from tests.auth_helpers import configure_test_auth
 
 
 SAMPLE_ANALYSIS = {
@@ -72,6 +73,7 @@ SAMPLE_ANALYSIS = {
 class FoodTextApiTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        configure_test_auth(self.client)
 
     def test_analyze_text_rejects_empty_input(self):
         response = self.client.post("/api/food/analyze-text", json={"date": "2026-05-13", "text": "   "})

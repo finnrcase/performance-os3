@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import base64
 import csv
-import hashlib
-import hmac
 import io
 import json
-import os
-import time
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 
+from backend.routes.utils import require_authenticated_request
 from src.analytics.food_history import DAILY_NUTRITION_SUMMARY_PATH, SUMMARY_COLUMNS, build_daily_nutrition_summary, save_daily_nutrition_summary
 from src.analytics.personal_records import PERSONAL_RECORDS_PATH
 from src.analytics.personal_response_learning import generate_personal_response_learning
@@ -47,9 +43,6 @@ from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, load_training_log
 
 
 router = APIRouter(prefix="/api/export", tags=["export"])
-
-ACCESS_COOKIE = "performance_os_access"
-SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
 
 CSV_COLUMNS = [
     "date",
@@ -157,40 +150,6 @@ BACKUP_DEDUPE_STAGES: dict[str, list[tuple[list[str], list[str]]]] = {
         ),
     ],
 }
-
-
-def _sign_session(timestamp: str, secret: str) -> str:
-    signature = hmac.new(secret.encode("utf-8"), timestamp.encode("utf-8"), hashlib.sha256).digest()
-    return base64.b64encode(signature).decode("utf-8").replace("+", "-").replace("/", "_").replace("=", "")
-
-
-def _require_authenticated_request(request: Request) -> None:
-    if not os.getenv("APP_PASSWORD"):
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="APP_PASSWORD is not configured")
-    session_secret = os.getenv("SESSION_SECRET")
-    if not session_secret:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="SESSION_SECRET is not configured")
-
-    token = request.cookies.get(ACCESS_COOKIE)
-    if not token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authentication required")
-
-    timestamp, separator, signature = token.partition(".")
-    if not separator:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
-
-    try:
-        timestamp_ms = int(timestamp)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session") from exc
-
-    now_ms = int(time.time() * 1000)
-    if now_ms - timestamp_ms > SESSION_MAX_AGE_SECONDS * 1000:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired")
-
-    expected_signature = _sign_session(timestamp, session_secret)
-    if not hmac.compare_digest(signature, expected_signature):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid session")
 
 
 def _parse_date_param(value: str | None, name: str) -> date | None:
@@ -662,7 +621,7 @@ def _system_summaries(
 
 @router.get("/daily-csv")
 def export_daily_csv(
-    _: None = Depends(_require_authenticated_request),
+    _: None = Depends(require_authenticated_request),
     start_date_value: str | None = Query(default=None, alias="startDate"),
     end_date_value: str | None = Query(default=None, alias="endDate"),
 ) -> Response:
@@ -741,7 +700,7 @@ def export_daily_csv(
 
 
 @router.get("/full-backup")
-def export_full_backup(_: None = Depends(_require_authenticated_request)) -> Response:
+def export_full_backup(_: None = Depends(require_authenticated_request)) -> Response:
     """Download a complete JSON backup of persisted Performance OS data."""
     nutrition_df = load_nutrition_log()
     body_metrics_df = load_body_metrics()
@@ -888,7 +847,7 @@ async def _run_backup_import(file: UploadFile, skip_documents: bool, import_mode
 
 @router.post("/full-backup/import")
 async def import_full_backup(
-    _: None = Depends(_require_authenticated_request),
+    _: None = Depends(require_authenticated_request),
     file: UploadFile = File(...),
     skip_documents: bool = Query(True, description="If true (default), skip importing settings/goals/targets/personal_records/hevy_sync_state documents. Prevents overwriting current production settings with stale local ones."),
     import_mode: str = Query("skip", description="'skip' (default) preserves current production rows on a match; 'update' lets backup values overwrite matching production rows."),
@@ -903,7 +862,7 @@ import_router = APIRouter(prefix="/api/import", tags=["import"])
 
 @import_router.post("/full-backup")
 async def import_full_backup_alias(
-    _: None = Depends(_require_authenticated_request),
+    _: None = Depends(require_authenticated_request),
     file: UploadFile = File(...),
     skip_documents: bool = Query(True),
     import_mode: str = Query("skip"),

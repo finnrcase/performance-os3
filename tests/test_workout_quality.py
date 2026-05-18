@@ -118,6 +118,31 @@ class WorkoutQualityTest(unittest.TestCase):
         self.assertGreater(result["score"], 7)
         self.assertIn("pace improved", result["explanation"])
 
+    def test_sunday_hevy_run_counts_as_workout_quality(self):
+        training = pd.DataFrame(
+            [
+                {
+                    "workout_id": "hevy-run",
+                    "date": "2026-04-26",
+                    "workout_type": "Strength",
+                    "exercise": "Treadmill",
+                    "sets": 1,
+                    "reps": 1,
+                    "weight": 0,
+                    "duration_minutes": 30,
+                    "notes": "Imported from Hevy | hevy_workout_id=hevy-run | workout_title=Sunday Run",
+                    "source": "hevy",
+                    "muscle_group": "",
+                }
+            ]
+        )
+
+        result = calculate_workout_quality(training, today="2026-04-26")
+
+        self.assertEqual(result["status"], "low_history")
+        self.assertEqual(result["source"], "hevy")
+        self.assertEqual(result["score"], 6.0)
+
 
 if __name__ == "__main__":
     unittest.main()

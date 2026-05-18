@@ -9,11 +9,13 @@ from backend.main import app
 from src import goals as goals_module
 from src import nutrition as nutrition_module
 from src import nutrition_targets as targets_module
+from tests.auth_helpers import configure_test_auth
 
 
 class GoalsApiTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        configure_test_auth(self.client)
 
     def test_apply_suggested_macros_persists_aligned_active_targets(self):
         with tempfile.TemporaryDirectory() as temp_dir:

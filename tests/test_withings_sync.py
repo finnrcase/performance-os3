@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from src import body_metrics as body_metrics_module
 from src.integrations import withings_client
+from tests.auth_helpers import configure_test_auth
 
 
 WITHINGS_MEASURE_RESPONSE = {
@@ -35,6 +36,7 @@ WITHINGS_MEASURE_RESPONSE = {
 class WithingsSyncTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        configure_test_auth(self.client)
 
     def test_sync_imports_scale_measurements_into_body_metrics_idempotently(self):
         with tempfile.TemporaryDirectory() as temp_dir:

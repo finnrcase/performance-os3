@@ -3,6 +3,69 @@
 :root {
   --background: #07080b;
   --foreground: #f4f4f5;
+  --accent-primary: #bef264;
+  --accent-secondary: #d9f99d;
+  --accent-text: #d9f99d;
+  --accent-soft: rgba(190, 242, 100, 0.1);
+  --accent-glow: rgba(190, 242, 100, 0.28);
+  --accent-border: rgba(190, 242, 100, 0.32);
+  --accent-surface: #bef264;
+  --accent-surface-hover: #d9f99d;
+}
+
+[data-accent-theme="pink"] {
+  --accent-primary: #f9a8d4;
+  --accent-secondary: #fbcfe8;
+  --accent-text: #fbcfe8;
+  --accent-soft: rgba(249, 168, 212, 0.11);
+  --accent-glow: rgba(249, 168, 212, 0.3);
+  --accent-border: rgba(249, 168, 212, 0.34);
+  --accent-surface: #f9a8d4;
+  --accent-surface-hover: #fbcfe8;
+}
+
+[data-accent-theme="purple"] {
+  --accent-primary: #c4b5fd;
+  --accent-secondary: #ddd6fe;
+  --accent-text: #ddd6fe;
+  --accent-soft: rgba(196, 181, 253, 0.11);
+  --accent-glow: rgba(196, 181, 253, 0.32);
+  --accent-border: rgba(196, 181, 253, 0.34);
+  --accent-surface: #c4b5fd;
+  --accent-surface-hover: #ddd6fe;
+}
+
+[data-accent-theme="orange"] {
+  --accent-primary: #fdba74;
+  --accent-secondary: #fed7aa;
+  --accent-text: #fed7aa;
+  --accent-soft: rgba(251, 146, 60, 0.12);
+  --accent-glow: rgba(251, 146, 60, 0.3);
+  --accent-border: rgba(251, 146, 60, 0.36);
+  --accent-surface: #fdba74;
+  --accent-surface-hover: #fed7aa;
+}
+
+[data-accent-theme="blue"] {
+  --accent-primary: #93c5fd;
+  --accent-secondary: #bfdbfe;
+  --accent-text: #bfdbfe;
+  --accent-soft: rgba(147, 197, 253, 0.11);
+  --accent-glow: rgba(147, 197, 253, 0.3);
+  --accent-border: rgba(147, 197, 253, 0.34);
+  --accent-surface: #93c5fd;
+  --accent-surface-hover: #bfdbfe;
+}
+
+[data-accent-theme="rainbow"] {
+  --accent-primary: #d9f99d;
+  --accent-secondary: #bfdbfe;
+  --accent-text: #f5d0fe;
+  --accent-soft: rgba(217, 249, 157, 0.1);
+  --accent-glow: rgba(125, 211, 252, 0.32);
+  --accent-border: rgba(245, 208, 254, 0.38);
+  --accent-surface: linear-gradient(110deg, #bef264, #67e8f9, #c4b5fd, #f9a8d4, #fdba74);
+  --accent-surface-hover: linear-gradient(110deg, #d9f99d, #a5f3fc, #ddd6fe, #fbcfe8, #fed7aa);
 }
 
 @theme inline {
@@ -27,6 +90,110 @@ button {
 }
 
 ::selection {
-  background: rgba(45, 212, 191, 0.35);
+  background: var(--accent-glow);
   color: #ffffff;
+}
+
+.accent-bg,
+.accent-active {
+  background: var(--accent-surface);
+  color: #09090b;
+  box-shadow: 0 0 24px -14px var(--accent-glow);
+}
+
+.accent-bg:hover,
+.accent-bg-hover:hover,
+.accent-active:hover {
+  background: var(--accent-surface-hover);
+}
+
+.accent-soft {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-text);
+}
+
+.accent-text {
+  color: var(--accent-text);
+}
+
+.accent-text-strong {
+  color: var(--accent-secondary);
+}
+
+.accent-border {
+  border-color: var(--accent-border);
+}
+
+.accent-outline {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-secondary);
+}
+
+.accent-outline:hover,
+.accent-hover:hover {
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  color: var(--accent-secondary);
+}
+
+.accent-link {
+  color: var(--accent-secondary);
+  text-decoration-color: var(--accent-border);
+}
+
+.accent-control {
+  accent-color: var(--accent-primary);
+}
+
+.accent-progress {
+  background: var(--accent-surface);
+}
+
+.accent-focus:focus {
+  border-color: var(--accent-border);
+  box-shadow: 0 0 0 1px var(--accent-border);
+}
+
+.accent-file::file-selector-button {
+  border: 0;
+  border-radius: 0.5rem;
+  background: var(--accent-surface);
+  color: #09090b;
+  font-weight: 700;
+}
+
+.accent-page-glow {
+  background:
+    radial-gradient(circle at top left, var(--accent-glow), transparent 30%),
+    radial-gradient(circle at top right, rgba(96, 165, 250, 0.11), transparent 28%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 40%);
+}
+
+[data-accent-theme="rainbow"] .accent-bg,
+[data-accent-theme="rainbow"] .accent-active,
+[data-accent-theme="rainbow"] .accent-progress {
+  background-size: 260% 260%;
+  animation: accent-rainbow-shift 12s ease infinite;
+}
+
+@keyframes accent-rainbow-shift {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-accent-theme="rainbow"] .accent-bg,
+  [data-accent-theme="rainbow"] .accent-active,
+  [data-accent-theme="rainbow"] .accent-progress {
+    animation: none;
+  }
 }

@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from src import training as training_module
 from src.integrations import hevy_client
+from tests.auth_helpers import configure_test_auth
 
 
 SAMPLE_WORKOUT = {
@@ -30,10 +31,29 @@ SAMPLE_WORKOUT = {
     ],
 }
 
+SUNDAY_RUN_WORKOUT = {
+    "id": "hevy-run-1",
+    "title": "Sunday Treadmill Run",
+    "created_at": "2026-04-26T15:00:00Z",
+    "updated_at": "2026-04-26T15:35:00Z",
+    "start_time": "2026-04-26T15:00:00Z",
+    "end_time": "2026-04-26T15:30:00Z",
+    "exercises": [
+        {
+            "id": "treadmill-run",
+            "title": "Treadmill Run",
+            "sets": [
+                {"index": 0, "duration_seconds": 1800, "distance_meters": 4828},
+            ],
+        }
+    ],
+}
+
 
 class HevySyncTest(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)
+        configure_test_auth(self.client)
 
     def test_upsert_hevy_workout_replaces_existing_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -48,6 +68,17 @@ class HevySyncTest(unittest.TestCase):
         self.assertEqual(len(saved), 2)
         self.assertEqual(saved["hevy_workout_id"].iloc[0], "hevy-workout-1")
         self.assertEqual(saved["sync_source"].iloc[0], "test")
+
+    def test_sunday_hevy_run_normalizes_as_cardio_workout(self):
+        rows = hevy_client.normalize_hevy_workout(SUNDAY_RUN_WORKOUT)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["workout_type"], "Run")
+        self.assertEqual(rows[0]["muscle_group"], "Cardio")
+        self.assertEqual(rows[0]["sets"], 0)
+        self.assertIn("classification=running_cardio", rows[0]["notes"])
+        self.assertIn("distance_miles=3.0", rows[0]["notes"])
+        self.assertEqual(rows[0]["source"], "hevy")
 
     def test_sync_endpoint_returns_polled_result_without_real_hevy_call(self):
         training_log = pd.DataFrame(columns=training_module.TRAINING_COLUMNS)

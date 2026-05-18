@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, save_dataframe
+from src.storage import load_dataframe, mark_dataframe_deletes, save_dataframe
 
 NUTRITION_COLUMNS = [
     "food_log_id",
@@ -323,6 +323,7 @@ def delete_food_log_entry(food_log_id: str) -> dict:
         raise ValueError(f"Food log entry not found: {food_log_id}")
     deleted_entry = entries_df.loc[match].iloc[0].to_dict()
     entries_df = entries_df.loc[~match].reset_index(drop=True)
+    entries_df = mark_dataframe_deletes(entries_df, "nutrition_log", [deleted_entry])
     save_nutrition_log(entries_df)
     return deleted_entry
 
@@ -354,6 +355,7 @@ def clear_food_logs_for_date(date: str) -> dict:
     match = entries_df["date"].astype(str) == selected_date
     removed_items = entries_df.loc[match].to_dict(orient="records")
     entries_df = entries_df.loc[~match].reset_index(drop=True)
+    entries_df = mark_dataframe_deletes(entries_df, "nutrition_log", removed_items)
     save_nutrition_log(entries_df)
     return {"date": selected_date, "removed": len(removed_items), "items": removed_items}
 
@@ -543,13 +545,19 @@ def add_food_shortcut(
         "source": str(source or "manual"),
     }
 
+    removed_shortcuts: list[dict] = []
     if not shortcuts_df.empty:
+        removed_shortcuts = shortcuts_df[
+            (shortcuts_df["shortcut_id"].astype(str) == selected_id)
+            | (shortcuts_df["shortcut_name"].str.lower() == normalized_name.lower())
+        ].to_dict(orient="records")
         shortcuts_df = shortcuts_df[
             (shortcuts_df["shortcut_id"].astype(str) != selected_id)
             & (shortcuts_df["shortcut_name"].str.lower() != normalized_name.lower())
         ]
     shortcuts_df = pd.concat([shortcuts_df, pd.DataFrame([shortcut])], ignore_index=True)
     shortcuts_df = shortcuts_df.sort_values("shortcut_name", kind="stable").reset_index(drop=True)
+    shortcuts_df = mark_dataframe_deletes(shortcuts_df, "food_shortcuts", removed_shortcuts)
     save_food_shortcuts(shortcuts_df)
     return shortcut
 
@@ -590,7 +598,9 @@ def delete_food_shortcut(shortcut_id) -> None:
     """Delete a shortcut by ID."""
     shortcuts_df = load_food_shortcuts()
     selected_id = str(shortcut_id)
+    removed_shortcuts = shortcuts_df[shortcuts_df["shortcut_id"].astype(str) == selected_id].to_dict(orient="records")
     shortcuts_df = shortcuts_df[shortcuts_df["shortcut_id"].astype(str) != selected_id]
+    shortcuts_df = mark_dataframe_deletes(shortcuts_df, "food_shortcuts", removed_shortcuts)
     save_food_shortcuts(shortcuts_df)
 
 
@@ -664,13 +674,18 @@ def add_meal_template(
         "fat": float(fat),
     }
 
+    removed_templates: list[dict] = []
     if not templates_df.empty:
+        removed_templates = templates_df[
+            templates_df["template_name"].str.lower() == normalized_name.lower()
+        ].to_dict(orient="records")
         templates_df = templates_df[
             templates_df["template_name"].str.lower() != normalized_name.lower()
         ]
 
     templates_df = pd.concat([templates_df, pd.DataFrame([template_entry])], ignore_index=True)
     templates_df = templates_df.sort_values("template_name", kind="stable").reset_index(drop=True)
+    templates_df = mark_dataframe_deletes(templates_df, "meal_templates", removed_templates)
     save_meal_templates(templates_df)
 
     return templates_df
@@ -680,7 +695,11 @@ def add_meal_template_items(template_name, foods, default_meal_type="Breakfast")
     """Save multiple parsed foods under one reusable meal template name."""
     templates_df = load_meal_templates()
     normalized_name = str(template_name).strip()
+    removed_templates: list[dict] = []
     if not templates_df.empty:
+        removed_templates = templates_df[
+            templates_df["template_name"].str.lower() == normalized_name.lower()
+        ].to_dict(orient="records")
         templates_df = templates_df[
             templates_df["template_name"].str.lower() != normalized_name.lower()
         ]
@@ -702,6 +721,7 @@ def add_meal_template_items(template_name, foods, default_meal_type="Breakfast")
     if rows:
         templates_df = pd.concat([templates_df, pd.DataFrame(rows)], ignore_index=True)
     templates_df = templates_df.sort_values(["template_name", "food_name"], kind="stable").reset_index(drop=True)
+    templates_df = mark_dataframe_deletes(templates_df, "meal_templates", removed_templates)
     save_meal_templates(templates_df)
     return templates_df
 
@@ -726,8 +746,10 @@ def update_meal_template_name(template_name, new_template_name) -> pd.DataFrame:
     if existing_match.any() and current_name.lower() != normalized_name.lower():
         raise ValueError(f"Meal template already exists: {new_template_name}")
 
+    renamed_records = templates_df.loc[current_match].to_dict(orient="records")
     templates_df.loc[current_match, "template_name"] = normalized_name
     templates_df = templates_df.sort_values(["template_name", "food_name"], kind="stable").reset_index(drop=True)
+    templates_df = mark_dataframe_deletes(templates_df, "meal_templates", renamed_records)
     save_meal_templates(templates_df)
     return templates_df
 

@@ -13,6 +13,7 @@ import pandas as pd
 from src.analytics.strength_trends import calculate_estimated_1rm
 from src.analytics.workout_quality import calculate_workout_quality
 from src.recovery import calculate_recovery_score
+from src.training_schedule import is_run_row
 
 
 LOWER_BODY_TERMS = "leg|quad|hamstring|glute|calf|lower"
@@ -44,10 +45,9 @@ def _date_frame(df: pd.DataFrame | None) -> pd.DataFrame:
 
 
 def _run_mask(df: pd.DataFrame) -> pd.Series:
-    source = df.get("source", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
-    workout_type = df.get("workout_type", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
-    notes = df.get("notes", pd.Series("", index=df.index)).fillna("").astype(str).str.lower()
-    return source.eq("strava") | workout_type.str.contains("run", na=False) | notes.str.contains("strava_activity_id=", na=False)
+    if df.empty:
+        return pd.Series(False, index=df.index)
+    return df.apply(is_run_row, axis=1)
 
 
 def _note_number(note: str, key: str) -> float:

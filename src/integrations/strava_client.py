@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 from src.config import load_settings, save_settings
+from src.storage import mark_dataframe_deletes
 from src.training import TRAINING_COLUMNS, load_training_log, save_training_log
 
 
@@ -80,19 +81,19 @@ def _get_strava_credentials() -> tuple[str, str]:
 
 def _env_strava_tokens() -> dict:
     """Read optional production Strava OAuth tokens from backend env vars."""
-    expires_at = (
-        os.getenv("STRAVA_EXPIRES_AT", "").strip()
-        or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip()
-        or _read_dotenv_value("STRAVA_EXPIRES_AT").strip()
-        or _read_dotenv_value("STRAVA_TOKEN_EXPIRES_AT").strip()
-    )
+    access_token_env = os.getenv("STRAVA_ACCESS_TOKEN", "").strip()
+    refresh_token_env = os.getenv("STRAVA_REFRESH_TOKEN", "").strip()
+    explicit_env_tokens = bool(access_token_env or refresh_token_env)
+    expires_at = os.getenv("STRAVA_EXPIRES_AT", "").strip() or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip()
+    if not expires_at and not explicit_env_tokens:
+        expires_at = _read_dotenv_value("STRAVA_EXPIRES_AT").strip() or _read_dotenv_value("STRAVA_TOKEN_EXPIRES_AT").strip()
     try:
         expires_at_int = int(expires_at or 0)
     except ValueError:
         expires_at_int = 0
     return {
-        "access_token": os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or _read_dotenv_value("STRAVA_ACCESS_TOKEN").strip(),
-        "refresh_token": os.getenv("STRAVA_REFRESH_TOKEN", "").strip() or _read_dotenv_value("STRAVA_REFRESH_TOKEN").strip(),
+        "access_token": access_token_env or _read_dotenv_value("STRAVA_ACCESS_TOKEN").strip(),
+        "refresh_token": refresh_token_env or _read_dotenv_value("STRAVA_REFRESH_TOKEN").strip(),
         "expires_at": expires_at_int,
         "athlete_id": os.getenv("STRAVA_ATHLETE_ID", "").strip() or _read_dotenv_value("STRAVA_ATHLETE_ID").strip(),
         "scopes": os.getenv("STRAVA_SCOPES", "").strip() or _read_dotenv_value("STRAVA_SCOPES").strip() or "read,activity:read_all",
@@ -100,12 +101,15 @@ def _env_strava_tokens() -> dict:
 
 
 def _effective_strava_tokens(settings: dict | None = None) -> dict:
-    """Prefer persisted DB tokens, but allow backend env tokens as a bootstrap."""
+    """Resolve Strava tokens from explicit env vars, persisted settings, or .env."""
     current_settings = settings or load_settings()
     saved_tokens = current_settings.get("metadata", {}).get("strava_tokens", {})
+    explicit_env_tokens = bool(os.getenv("STRAVA_ACCESS_TOKEN", "").strip() and os.getenv("STRAVA_REFRESH_TOKEN", "").strip())
+    env_tokens = _env_strava_tokens()
+    if explicit_env_tokens:
+        return env_tokens
     if saved_tokens.get("access_token") or saved_tokens.get("refresh_token"):
         return saved_tokens
-    env_tokens = _env_strava_tokens()
     return env_tokens if env_tokens.get("access_token") or env_tokens.get("refresh_token") else saved_tokens
 
 
@@ -114,7 +118,9 @@ def get_strava_connection_status() -> str:
     settings = load_settings()
     tokens = _effective_strava_tokens(settings)
     sync_state = settings.get("metadata", {}).get("strava_sync", {})
-    if sync_state.get("needs_reconnect"):
+    env_tokens = _env_strava_tokens()
+    has_env_tokens = bool(env_tokens.get("access_token") and env_tokens.get("refresh_token"))
+    if sync_state.get("needs_reconnect") and not has_env_tokens:
         return "Disconnected"
     integrations = settings.get("integrations", {})
     if tokens.get("access_token") and tokens.get("refresh_token"):
@@ -512,12 +518,15 @@ def import_recent_runs(access_token: str | None = None, per_page: int = 30) -> d
 
         if import_rows:
             upsert_ids = {str(row["external_id"]) for row in import_rows if str(row.get("external_id", "")).strip()}
+            removed_records: list[dict] = []
             if not training_df.empty:
                 existing_row_ids = training_df.apply(_run_activity_id, axis=1)
+                removed_records = training_df[existing_row_ids.isin(upsert_ids)].to_dict(orient="records")
                 training_df = training_df[~existing_row_ids.isin(upsert_ids)].copy()
             import_df = pd.DataFrame(import_rows).reindex(columns=TRAINING_COLUMNS)
             training_df = pd.concat([training_df, import_df], ignore_index=True)
             training_df = training_df.sort_values("date", kind="stable").reset_index(drop=True)
+            training_df = mark_dataframe_deletes(training_df, "training_log", removed_records)
             save_training_log(training_df)
 
         latest_activity_date = ""
