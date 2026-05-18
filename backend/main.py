@@ -82,17 +82,6 @@ def _cors_origins() -> list[str]:
         origins.extend(origin.strip() for origin in configured.split(",") if origin.strip())
     return origins
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=_cors_origins(),
-    allow_origin_regex=r"https://.*\.vercel\.app",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
-)
-
-
 PUBLIC_API_PATHS = {
     "/api/auth/login",
     "/api/auth/logout",
@@ -118,6 +107,23 @@ async def require_session_for_private_api(request: Request, call_next):
         except HTTPException as exc:
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
+
+
+# Registered LAST so CORSMiddleware is the OUTERMOST middleware. Starlette
+# applies the most-recently-added middleware outermost, so this guarantees that
+# even an early-return response from require_session_for_private_api (e.g. a
+# 401) travels back out through CORS and carries Access-Control-Allow-Origin.
+# Without this, the browser blocks the 401 and fetch() surfaces it as a generic
+# network/CORS failure instead of an authentication error.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["Content-Disposition"],
+)
 
 
 @app.get("/health")
