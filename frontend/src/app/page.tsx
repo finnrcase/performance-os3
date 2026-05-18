@@ -1111,8 +1111,11 @@ function readStoredAccentTheme(): AccentTheme {
   return sanitizeAccentTheme(window.localStorage.getItem(ACCENT_THEME_STORAGE_KEY));
 }
 
-const DEFAULT_API_TIMEOUT_MS = 30_000;
-const UPLOAD_API_TIMEOUT_MS = 60_000;
+const DEFAULT_API_TIMEOUT_MS = 90_000;
+const CORE_API_TIMEOUT_MS = 90_000;
+const SETTINGS_API_TIMEOUT_MS = 45_000;
+const UPLOAD_API_TIMEOUT_MS = 120_000;
+const COLD_START_RETRY_DELAY_MS = 6_000;
 // Exponential backoff for HTTP 429 (server-side rate limiting): 1s, 3s, 8s,
 // then give up. A server 429 means the request was rejected, not processed,
 // so retrying it — including POSTs — is safe.
@@ -1175,6 +1178,42 @@ function isAuthFailureReason(reason: string) {
   );
 }
 
+type StartupFailureKind = "auth" | "timeout" | "server" | "network" | "rate_limit" | "invalid_response" | "other";
+
+function classifyStartupFailure(reasons: string[]): StartupFailureKind {
+  const joined = reasons.join(" | ").toLowerCase();
+  if (reasons.some(isAuthFailureReason)) return "auth";
+  if (joined.includes("429") || joined.includes("rate limit") || joined.includes("too many requests")) return "rate_limit";
+  if (joined.includes("invalid json") || joined.includes("unexpected token")) return "invalid_response";
+  if (joined.includes("timed out") || joined.includes("timeout") || joined.includes("abort")) return "timeout";
+  if (joined.includes("returned 500") || joined.includes("returned 502") || joined.includes("returned 503") || joined.includes("returned 504")) return "server";
+  if (joined.includes("failed to fetch") || joined.includes("networkerror") || joined.includes("load failed")) return "network";
+  return "other";
+}
+
+function isColdStartRetryable(kind: StartupFailureKind) {
+  return kind === "timeout" || kind === "network";
+}
+
+function startupFailureHint(kind: StartupFailureKind) {
+  switch (kind) {
+    case "auth":
+      return "Session expired / please log in again.";
+    case "timeout":
+      return "The backend took too long to respond. It may still be waking up; click Retry if it does not recover.";
+    case "server":
+      return "The backend responded with a server error. This usually means the backend crashed while building the response.";
+    case "network":
+      return "Could not reach the backend (network or CORS error).";
+    case "rate_limit":
+      return "The server is temporarily rate limiting requests (not your account). Wait a moment and click Retry.";
+    case "invalid_response":
+      return "The backend responded but the data could not be read (invalid response). Click Retry.";
+    default:
+      return "The backend may be offline or unreachable.";
+  }
+}
+
 function scheduleLoginRedirect() {
   window.setTimeout(() => {
     const loginUrl = new URL("/login", window.location.origin);
@@ -1227,9 +1266,9 @@ async function fetchWithTimeout(
   }
 }
 
-async function apiGet<T>(path: string): Promise<T> {
+async function apiGet<T>(path: string, timeoutMs: number = DEFAULT_API_TIMEOUT_MS): Promise<T> {
   const url = apiUrl(path);
-  const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" });
+  const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" }, timeoutMs);
   if (!response.ok) {
     console.warn(`[apiGet] ${url} -> HTTP ${response.status}`);
     throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
@@ -6825,6 +6864,7 @@ export default function Home() {
   const [hevySync, setHevySync] = useState<HevySyncStatus | null>(null);
   const [hevySyncing, setHevySyncing] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState("Waking backend...");
   const [message, setMessage] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
@@ -6878,7 +6918,7 @@ export default function Home() {
     setApiError(null);
     setMessage(null);
     try {
-      const results = await apiGet<ApiConnectionTestResponse>("/api/integrations/test");
+      const results = await apiGet<ApiConnectionTestResponse>("/api/integrations/test", SETTINGS_API_TIMEOUT_MS);
       setApiConnectionTests(results);
       setMessage("API connection tests complete.");
     } catch (error) {
@@ -6888,7 +6928,8 @@ export default function Home() {
     }
   }, []);
 
-  const refreshAll = useCallback(async () => {
+  const refreshAll = useCallback(async (options?: { allowColdStartRetry?: boolean }) => {
+    const maxAttempts = options?.allowColdStartRetry === false ? 1 : 2;
     setApiError(null);
     setLoadFailures([]);
 
@@ -6910,14 +6951,14 @@ export default function Home() {
         key: "dashboard",
         label: "Dashboard",
         required: true,
-        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard")),
+        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard", CORE_API_TIMEOUT_MS)),
       },
       {
         key: "goals",
         label: "Goals & targets",
         required: true,
         run: async () => {
-          const goalsData = await apiGet<GoalsResponse>("/api/goals");
+          const goalsData = await apiGet<GoalsResponse>("/api/goals", CORE_API_TIMEOUT_MS);
           setForms((state) => ({ ...state, goals: goalsData.goals }));
         },
       },
@@ -6929,7 +6970,7 @@ export default function Home() {
         key: "settings",
         label: "Settings",
         required: false,
-        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status")),
+        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status", SETTINGS_API_TIMEOUT_MS)),
       },
       {
         key: "nutrition_logs",
@@ -7010,45 +7051,54 @@ export default function Home() {
       },
     ];
 
-    const results = await Promise.allSettled(steps.map((step) => step.run()));
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      setLoadingMessage(attempt === 1 ? "Waking backend..." : "Backend is waking up... retrying core data.");
+      const results = await Promise.allSettled(steps.map((step) => step.run()));
 
-    const failures: string[] = [];
-    const requiredFailures: string[] = [];
-    const requiredReasons: string[] = [];
-    results.forEach((result, index) => {
-      if (result.status === "rejected") {
-        const step = steps[index];
-        const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-        console.error(`[startup] ${step.key} failed - backend ${publicApiBaseLabel()} - ${reason}`);
-        failures.push(`${step.label}: ${reason}`);
-        if (step.required) {
-          requiredFailures.push(step.label);
-          requiredReasons.push(reason.toLowerCase());
+      const failures: string[] = [];
+      const requiredFailures: string[] = [];
+      const requiredReasons: string[] = [];
+      results.forEach((result, index) => {
+        if (result.status === "rejected") {
+          const step = steps[index];
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          console.error(`[startup] attempt ${attempt}/${maxAttempts} ${step.key} failed - backend ${publicApiBaseLabel()} - ${reason}`);
+          failures.push(`${step.label}: ${reason}`);
+          if (step.required) {
+            requiredFailures.push(step.label);
+            requiredReasons.push(reason.toLowerCase());
+          }
+        }
+      });
+
+      if (requiredFailures.length > 0) {
+        const failureKind = classifyStartupFailure(requiredReasons);
+        if (attempt < maxAttempts && isColdStartRetryable(failureKind)) {
+          setApiError(null);
+          setLoadFailures([]);
+          setLoading(true);
+          setLoadingMessage(
+            failureKind === "timeout"
+              ? "Waking backend... first response was slow. Retrying in a few seconds."
+              : "Waking backend... reconnecting in a few seconds.",
+          );
+          await sleep(COLD_START_RETRY_DELAY_MS);
+          continue;
+        }
+
+        setLoadFailures(failures);
+        if (failureKind === "auth") {
+          scheduleLoginRedirect();
+        }
+        setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. ${startupFailureHint(failureKind)}`);
+      } else {
+        setLoadFailures(failures);
+        if (failures.length > 0) {
+          setApiError(null);
         }
       }
-    });
-
-    setLoadFailures(failures);
-    if (requiredFailures.length > 0) {
-      const joined = requiredReasons.join(" | ");
-      let hint: string;
-      if (requiredReasons.some(isAuthFailureReason)) {
-        hint = "Session expired / please log in again.";
-        scheduleLoginRedirect();
-      } else if (joined.includes("429") || joined.includes("rate limit") || joined.includes("too many requests")) {
-        hint = "The server is temporarily rate limiting requests (not your account). Wait a moment and click Retry.";
-      } else if (joined.includes("invalid json") || joined.includes("unexpected token")) {
-        hint = "The backend responded but the data could not be read (invalid response). Click Retry.";
-      } else if (joined.includes("timed out") || joined.includes("timeout") || joined.includes("abort")) {
-        hint = "The backend is taking too long to respond (it may be waking up). Wait a moment and click Retry.";
-      } else if (joined.includes("failed to fetch") || joined.includes("networkerror") || joined.includes("load failed")) {
-        hint = "Could not reach the backend (network or CORS error).";
-      } else {
-        hint = "The backend may be offline or unreachable.";
-      }
-      setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. ${hint}`);
-    } else if (failures.length > 0) {
-      setApiError(null);
+      setLoading(false);
+      return;
     }
     setLoading(false);
   }, [applySettingsData, strengthTrendPath]);
@@ -7961,7 +8011,7 @@ export default function Home() {
                 <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
                 <h1 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">{currentPage.label}</h1>
               </div>
-              <button onClick={refreshAll} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200">
+              <button onClick={() => void refreshAll()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200">
                 <RefreshCw className="h-4 w-4" />
                 Refresh
               </button>
@@ -8021,7 +8071,7 @@ export default function Home() {
             {loading ? (
               <Card>
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-sm text-zinc-300">Loading local data...</p>
+                  <p className="text-sm text-zinc-300">{loadingMessage}</p>
                   <button
                     onClick={() => {
                       setLoading(true);
