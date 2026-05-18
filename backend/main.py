@@ -30,17 +30,17 @@ from src.analytics.todays_action import generate_todays_action
 from src.analytics.training_workload import analyze_training_workload
 from src.analytics.weekly_report import generate_weekly_performance_report
 from src.analytics.workout_quality import calculate_workout_quality
-from src.body_metrics import load_body_metrics
+from src.body_metrics import BODY_METRICS_COLUMNS, load_body_metrics
 from src.goals import build_automatic_goals, load_user_goals
-from src.nutrition import calculate_daily_totals, load_nutrition_log
+from src.nutrition import NUTRITION_COLUMNS, calculate_daily_totals, load_nutrition_log
 from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets, load_nutrition_targets
 from src.optimization.adaptive_nutrition_engine import build_adaptive_nutrition_recommendation
 from src.optimization.high_value_features import build_optimization_features
 from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recommendation
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.optimization.run_readiness import generate_extra_run_readiness
-from src.recovery import load_recovery_log, load_sleep_entries
-from src.training import calculate_training_volume, load_training_log
+from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
+from src.training import TRAINING_COLUMNS, calculate_training_volume, load_training_log
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import HevyIntegrationError, sync_hevy_events
 from src.storage import ensure_database_schema, production_storage_warnings, use_database
@@ -250,128 +250,707 @@ def start_hevy_polling() -> None:
     thread.start()
 
 
+def _dashboard_error(block: str, exc: Exception) -> dict:
+    return {
+        "block": block,
+        "type": exc.__class__.__name__,
+        "message": str(exc) or exc.__class__.__name__,
+    }
+
+
+def _safe_dashboard_block(
+    name: str,
+    dashboard_errors: list[dict],
+    dashboard_status: dict[str, bool],
+    dashboard_timings_ms: dict[str, float],
+    fallback,
+    func,
+):
+    started = time.perf_counter()
+    try:
+        result = func()
+        dashboard_status[name] = True
+        return result
+    except Exception as exc:
+        logger.exception("dashboard.%s failed", name)
+        dashboard_errors.append(_dashboard_error(name, exc))
+        dashboard_status[name] = False
+        try:
+            return fallback() if callable(fallback) else fallback
+        except Exception as fallback_exc:
+            logger.exception("dashboard.%s fallback failed", name)
+            dashboard_errors.append(_dashboard_error(f"{name}_fallback", fallback_exc))
+            return None
+    finally:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        dashboard_timings_ms[name] = elapsed_ms
+        logger.info("dashboard.%s completed in %.1f ms", name, elapsed_ms)
+
+
+def _load_dashboard_frame(
+    name: str,
+    loader,
+    columns: list[str],
+    dashboard_errors: list[dict],
+    dashboard_status: dict[str, bool],
+    dashboard_timings_ms: dict[str, float],
+) -> pd.DataFrame:
+    fallback = lambda: pd.DataFrame(columns=columns)
+    value = _safe_dashboard_block(name, dashboard_errors, dashboard_status, dashboard_timings_ms, fallback, loader)
+    if isinstance(value, pd.DataFrame):
+        return value
+    return fallback()
+
+
+def _json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, tuple):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, pd.DataFrame):
+        return dataframe_records(value)
+    if isinstance(value, pd.Series):
+        return [_json_safe(item) for item in value.tolist()]
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    if value is pd.NaT:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, float):
+        return value if value == value and value not in {float("inf"), float("-inf")} else None
+    if hasattr(value, "item") and not isinstance(value, (str, bytes)):
+        try:
+            return _json_safe(value.item())
+        except (TypeError, ValueError, AttributeError):
+            pass
+    return value
+
+
+def _target_number(targets: dict, key: str, default: float = 0.0) -> float:
+    value = targets.get(key, default)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    if parsed != parsed or parsed in {float("inf"), float("-inf")}:
+        return default
+    return parsed
+
+
+def _dashboard_target_macros(targets: dict) -> dict:
+    return {
+        "calories": round(_target_number(targets, "target_calories", 2500)),
+        "protein": round(_target_number(targets, "protein_grams", 180)),
+        "carbs": round(_target_number(targets, "carb_grams", 275)),
+        "fat": round(_target_number(targets, "fat_grams", 75)),
+    }
+
+
+def _fallback_goals() -> dict:
+    return {
+        "current_bodyweight": 180,
+        "goal_bodyweight": 185,
+        "timeline_weeks": 16,
+        "goal_type": "lean_bulk",
+        "training_frequency_per_week": 5,
+        "cardio_frequency_per_week": 1,
+        "estimated_body_fat": None,
+        "activity_level": "moderate",
+        "aggressiveness": "conservative",
+    }
+
+
+def _fallback_targets(goals: dict | None = None) -> dict:
+    bodyweight = _target_number(goals or {}, "current_bodyweight", 180)
+    calories = 2500
+    protein = round(max(160, bodyweight))
+    fat = 75
+    carbs = round(max(200, (calories - protein * 4 - fat * 9) / 4))
+    return {
+        "target_calories": calories,
+        "maintenance_calories": calories,
+        "calorie_adjustment": 0,
+        "protein_grams": protein,
+        "carb_grams": carbs,
+        "fat_grams": fat,
+        "expected_weekly_weight_change": 0,
+        "target_description": "Fallback target while advanced analytics are unavailable.",
+        "timeline_status": "unknown",
+        "timeline_warning": "",
+    }
+
+
+def _fallback_training_workload() -> dict:
+    return {
+        "status": "insufficient data",
+        "summary": "Training workload analytics are unavailable.",
+        "current": {"recovery_demand": "unknown"},
+        "running": {"status": "insufficient data"},
+    }
+
+
+def _fallback_weight_feedback() -> dict:
+    return {
+        "status": "insufficient data",
+        "weekly_change_pct": None,
+        "weekly_change_lb": None,
+        "suggested_adjustment": "hold",
+        "reason": "Weight trend unavailable.",
+        "window_used": "none",
+        "confidence": "low",
+        "calorie_adjustment": 0,
+    }
+
+
+def _fallback_workout_quality() -> dict:
+    return {
+        "status": "missing",
+        "score": None,
+        "score_label": "Unavailable",
+        "confidence": "low",
+        "color": "gray",
+        "explanation": "Workout quality analytics are unavailable.",
+        "comparison": None,
+        "source": "none",
+    }
+
+
+def _fallback_nutrition_adherence() -> dict:
+    return {
+        "average_calories": None,
+        "average_target_calories": None,
+        "average_calories_delta": None,
+        "average_protein": None,
+        "average_target_protein": None,
+        "average_protein_delta": None,
+        "days_over_target": 0,
+        "days_under_target": 0,
+        "consistency_score": None,
+        "logged_days": 0,
+        "missing_days": 0,
+        "confidence": "low",
+        "data_quality_note": "Nutrition adherence unavailable.",
+    }
+
+
+def _fallback_todays_action() -> dict:
+    return {
+        "status": "maintain",
+        "color": "gray",
+        "headline": "Load core dashboard",
+        "reason": "Advanced daily action analytics are unavailable, so keep the current plan stable.",
+    }
+
+
+def _fallback_weekly_report() -> dict:
+    return {
+        "status": "learning",
+        "period_label": "Last 7 days",
+        "summary": "Weekly analytics are unavailable, but core dashboard data is still loaded.",
+        "rows": [],
+        "best_trend": "Unavailable",
+        "watch": "No advanced watch item available.",
+        "recommendation": "Keep logging and refresh later.",
+    }
+
+
+def _fallback_personal_records() -> dict:
+    return {"bench_press": None, "mile_time": None, "history": {"bench_press": [], "mile_time": []}}
+
+
+def _fallback_performance_plan() -> dict:
+    return {
+        "recommendation_summary": "Advanced performance recommendations are unavailable.",
+        "reasoning_explanation": "Core data loaded, but the recommendation engine failed gracefully.",
+    }
+
+
+def _fallback_lean_bulk_decision(targets: dict) -> dict:
+    return {
+        "recommendation": "maintain",
+        "calorie_change": 0,
+        "new_target_calories": _target_number(targets, "target_calories", 2500),
+        "confidence": "low",
+        "weekly_weight_change_pct": None,
+        "fat_gain_risk_score": 0,
+        "reasoning": ["Lean-bulk engine unavailable; holding targets."],
+        "next_check_in_days": 7,
+        "details": {
+            "seven_day_avg_weight": None,
+            "fourteen_day_avg_weight": None,
+            "calorie_average": None,
+            "protein_average": None,
+            "protein_target": _target_number(targets, "protein_grams", 180),
+            "training_trend": "unknown",
+            "recovery_trend": "unknown",
+            "target_weekly_gain_pct": None,
+        },
+    }
+
+
+def _fallback_recovery_signal() -> dict:
+    return {
+        "status": "insufficient data",
+        "confidence": "low",
+        "score": None,
+        "summary": "Recovery analytics are unavailable.",
+        "nutrition_implication": "Hold nutrition targets.",
+        "suggested_action": "Keep logging recovery.",
+        "drivers": [],
+        "metrics": {},
+    }
+
+
+def _fallback_performance_signal() -> dict:
+    return {
+        "label": "insufficient data",
+        "confidence": "low",
+        "summary": "Performance analytics are unavailable.",
+        "recommendation": "Keep logging workouts.",
+        "drivers": [],
+        "muscle_group_drivers": [],
+    }
+
+
+def _fallback_adaptive_recommendation(targets: dict) -> dict:
+    macros = _dashboard_target_macros(targets)
+    return {
+        "recommendedCalories": macros["calories"],
+        "recommendedProtein": macros["protein"],
+        "recommendedCarbs": macros["carbs"],
+        "recommendedFat": macros["fat"],
+        "caloriesTarget": macros["calories"],
+        "proteinTarget": macros["protein"],
+        "carbsTarget": macros["carbs"],
+        "fatTarget": macros["fat"],
+        "calorieAdjustment": 0,
+        "macroChanges": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0},
+        "confidence": "low",
+        "dataQualityScore": 0,
+        "reasoning": ["Adaptive nutrition unavailable; holding current targets."],
+        "warnings": ["Advanced analytics failed, but core dashboard data is still available."],
+        "missingDataWarnings": [],
+        "strategy": "maintain",
+        "currentTarget": macros,
+        "recommendedTargets": targets,
+        "signals": {
+            "weight": {"status": "insufficient data", "confidence": "low", "reason": "Unavailable"},
+            "performance": _fallback_performance_signal(),
+            "recovery": _fallback_recovery_signal(),
+            "trainingLoad": {"status": "insufficient data", "summary": "Training load unavailable."},
+            "runningLoad": {"status": "insufficient data", "summary": "Running load unavailable."},
+            "nutrition": {"days": 0, "calories": None, "protein": None, "carbs": None, "fat": None},
+            "dataQuality": {
+                "score": 0,
+                "confidence": "low",
+                "missingDataWarnings": ["Advanced adaptive calculation failed."],
+            },
+        },
+    }
+
+
+def _fallback_personal_learning() -> dict:
+    return {
+        "status": "insufficient data",
+        "confidence": "low",
+        "summary": "Personal response learning is unavailable.",
+        "window": "none",
+        "data_points": 0,
+        "insights": [],
+    }
+
+
+def _fallback_optimization_features(targets: dict, personal_learning: dict | None = None) -> dict:
+    macros = _dashboard_target_macros(targets)
+    return {
+        "day_type_macros": {
+            "day_type": "baseline",
+            "confidence": "low",
+            "reason": "Advanced day-type macro analytics are unavailable.",
+            "baseline_targets": macros,
+            "adjusted_targets": macros,
+            "delta": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0},
+            "signals": [],
+        },
+        "plateau_detection": {
+            "status": "insufficient data",
+            "summary": "Plateau detection unavailable.",
+            "top_alerts": [],
+            "details": [],
+        },
+        "macro_adherence": {
+            "weekly_score": None,
+            "status": "insufficient data",
+            "summary": "Macro adherence unavailable.",
+            "components": {},
+            "daily": [],
+            "correlations": [],
+        },
+        "personal_baseline": {
+            "status": (personal_learning or {}).get("status", "insufficient data"),
+            "confidence": (personal_learning or {}).get("confidence", "low"),
+            "summary": (personal_learning or {}).get("summary", "Personal baseline unavailable."),
+            "dashboard_insight": None,
+            "insights": [],
+        },
+    }
+
+
+def _fallback_extra_run_readiness() -> dict:
+    return {
+        "status": "insufficient_data",
+        "message": "Extra-run readiness unavailable.",
+        "recommended_run": "No additional run recommended from fallback mode.",
+        "reasoning": ["Advanced run-readiness analytics failed or lacked enough data."],
+    }
+
+
+def _dashboard_context() -> dict:
+    dashboard_errors: list[dict] = []
+    dashboard_status: dict[str, bool] = {}
+    dashboard_timings_ms: dict[str, float] = {}
+    nutrition_df = _load_dashboard_frame("nutrition_loaded", load_nutrition_log, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    recovery_df = _load_dashboard_frame("recovery_loaded", load_recovery_log, RECOVERY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    sleep_df = _load_dashboard_frame("sleep_loaded", load_sleep_entries, SLEEP_ENTRY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", load_training_log, TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    return {
+        "errors": dashboard_errors,
+        "status": dashboard_status,
+        "timings_ms": dashboard_timings_ms,
+        "nutrition_df": nutrition_df,
+        "body_metrics_df": body_metrics_df,
+        "recovery_df": recovery_df,
+        "sleep_df": sleep_df,
+        "training_df": training_df,
+    }
+
+
 @app.get("/api/dashboard")
 def dashboard() -> dict:
     """Return local-first dashboard data for the Next.js frontend."""
-    nutrition_df = load_nutrition_log()
-    body_metrics_df = load_body_metrics()
-    recovery_df = load_recovery_log()
-    sleep_df = load_sleep_entries()
-    training_df = load_training_log()
-    goals = build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=training_df)
-    active_targets = load_nutrition_targets()
-    training_workload = analyze_training_workload(training_df, bodyweight=goals["current_bodyweight"])
-    base_targets = calculate_macro_targets(
-        goals,
-        nutrition_df=nutrition_df,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        body_metrics_df=body_metrics_df,
-        workload_data=training_workload,
-    )
-    targets = active_targets or base_targets
-    daily_nutrition_summary = build_daily_nutrition_summary(nutrition_df, targets)
-    save_daily_nutrition_summary(daily_nutrition_summary)
-    nutrition_for_optimization = get_food_history_for_optimization(daily_nutrition_summary)
+    context = _dashboard_context()
+    dashboard_errors = context["errors"]
+    dashboard_status = context["status"]
+    dashboard_timings_ms = context["timings_ms"]
+    nutrition_df = context["nutrition_df"]
+    body_metrics_df = context["body_metrics_df"]
+    recovery_df = context["recovery_df"]
+    sleep_df = context["sleep_df"]
+    training_df = context["training_df"]
 
     today = pd.Timestamp.today().date().isoformat()
-    nutrition_totals = calculate_daily_totals(nutrition_df, today)
-    weight_feedback = analyze_weight_trend(body_metrics_df, goals)
+    goals = _safe_dashboard_block(
+        "goals",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_goals,
+        lambda: build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=training_df),
+    )
+    if not isinstance(goals, dict):
+        goals = _fallback_goals()
+    active_targets = _safe_dashboard_block(
+        "active_targets",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: None,
+        load_nutrition_targets,
+    )
+    training_workload = _safe_dashboard_block(
+        "training_workload",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_training_workload,
+        lambda: analyze_training_workload(training_df, bodyweight=goals.get("current_bodyweight")),
+    )
+    if not isinstance(training_workload, dict):
+        training_workload = _fallback_training_workload()
+    base_targets = _safe_dashboard_block(
+        "base_targets",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _fallback_targets(goals),
+        lambda: calculate_macro_targets(
+            goals,
+            nutrition_df=nutrition_df,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            body_metrics_df=body_metrics_df,
+            workload_data=training_workload,
+        ),
+    )
+    targets = active_targets or base_targets or _fallback_targets(goals)
+    if not isinstance(targets, dict):
+        targets = _fallback_targets(goals)
+    daily_nutrition_summary = _safe_dashboard_block(
+        "daily_nutrition_summary",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: pd.DataFrame(),
+        lambda: build_daily_nutrition_summary(nutrition_df, targets),
+    )
+    if not isinstance(daily_nutrition_summary, pd.DataFrame):
+        daily_nutrition_summary = pd.DataFrame()
+    _safe_dashboard_block(
+        "save_daily_nutrition_summary",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: None,
+        lambda: save_daily_nutrition_summary(daily_nutrition_summary),
+    )
+    nutrition_for_optimization = _safe_dashboard_block(
+        "food_history_optimization",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: daily_nutrition_summary,
+        lambda: get_food_history_for_optimization(daily_nutrition_summary),
+    )
+    if not isinstance(nutrition_for_optimization, pd.DataFrame):
+        nutrition_for_optimization = daily_nutrition_summary
+
+    nutrition_totals = _safe_dashboard_block(
+        "nutrition_today",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+        lambda: calculate_daily_totals(nutrition_df, today),
+    )
+    weight_feedback = _safe_dashboard_block(
+        "weight_feedback",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_weight_feedback,
+        lambda: analyze_weight_trend(body_metrics_df, goals),
+    )
+    if not isinstance(weight_feedback, dict):
+        weight_feedback = _fallback_weight_feedback()
 
     latest_bodyweight = None
     bodyweight_trend = []
-    if not body_metrics_df.empty:
+
+    def build_bodyweight_trend():
+        if body_metrics_df.empty:
+            return None, []
         bodyweight_clean = body_metrics_df.copy()
-        bodyweight_clean["date"] = pd.to_datetime(bodyweight_clean["date"], errors="coerce")
-        bodyweight_clean["bodyweight"] = pd.to_numeric(bodyweight_clean["bodyweight"], errors="coerce")
+        bodyweight_clean["date"] = pd.to_datetime(bodyweight_clean.get("date"), errors="coerce")
+        bodyweight_clean["bodyweight"] = pd.to_numeric(bodyweight_clean.get("bodyweight"), errors="coerce")
         bodyweight_clean = bodyweight_clean.dropna(subset=["date", "bodyweight"]).sort_values("date")
-        if not bodyweight_clean.empty:
-            latest_bodyweight = float(bodyweight_clean.iloc[-1]["bodyweight"])
-            bodyweight_clean["date"] = bodyweight_clean["date"].dt.date.astype(str)
-            bodyweight_trend = dataframe_records(bodyweight_clean.tail(30))
+        if bodyweight_clean.empty:
+            return None, []
+        latest = float(bodyweight_clean.iloc[-1]["bodyweight"])
+        bodyweight_clean["date"] = bodyweight_clean["date"].dt.date.astype(str)
+        return latest, dataframe_records(bodyweight_clean.tail(30))
+
+    latest_bodyweight, bodyweight_trend = _safe_dashboard_block(
+        "bodyweight_trend",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: (None, []),
+        build_bodyweight_trend,
+    )
 
     latest_recovery = None
     recovery_trend = []
-    if not recovery_df.empty:
+
+    def build_recovery_trend():
+        if recovery_df.empty:
+            return None, []
         recovery_analytics = calculate_advanced_recovery_score(
             recovery_df=recovery_df,
             training_df=training_df,
             nutrition_df=nutrition_df,
-            target_calories=targets["target_calories"],
+            target_calories=targets.get("target_calories"),
         )
-        if not recovery_analytics.empty:
-            recovery_analytics["date"] = pd.to_datetime(recovery_analytics["date"], errors="coerce").dt.date.astype(str)
-            latest_recovery = dataframe_records(recovery_analytics.tail(1))[0]
-            recovery_trend = dataframe_records(recovery_analytics.tail(30))
+        if recovery_analytics.empty:
+            return None, []
+        recovery_analytics["date"] = pd.to_datetime(recovery_analytics["date"], errors="coerce").dt.date.astype(str)
+        return dataframe_records(recovery_analytics.tail(1))[0], dataframe_records(recovery_analytics.tail(30))
+
+    latest_recovery, recovery_trend = _safe_dashboard_block(
+        "recovery_engine",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: (None, []),
+        build_recovery_trend,
+    )
 
     latest_workout = None
     strength_trend_summary = {"label": "insufficient data", "exercise": "", "summary": "Log workouts to calculate strength trends."}
     muscle_balance_warning = None
-    if not training_df.empty:
-        latest_workout = dataframe_records(training_df.sort_values("date").tail(1))[0]
-        exercises = training_df["exercise"].fillna("").astype(str).str.strip()
+
+    def build_training_snapshot():
+        latest = None
+        strength_summary = {"label": "insufficient data", "exercise": "", "summary": "Log workouts to calculate strength trends."}
+        if training_df.empty:
+            return latest, strength_summary
+        training_clean = training_df.copy()
+        training_clean["date"] = pd.to_datetime(training_clean.get("date"), errors="coerce")
+        training_clean = training_clean.dropna(subset=["date"])
+        if training_clean.empty:
+            return latest, strength_summary
+        latest = dataframe_records(training_clean.sort_values("date").tail(1))[0]
+        exercises = training_clean.get("exercise", pd.Series("", index=training_clean.index)).fillna("").astype(str).str.strip()
         exercises = exercises[exercises != ""]
         if not exercises.empty:
             selected_exercise = exercises.value_counts().index[0]
-            trend = calculate_strength_trend(training_df, selected_exercise)
-            strength_trend_summary = {
+            trend = calculate_strength_trend(training_clean, selected_exercise)
+            strength_summary = {
                 "exercise": selected_exercise,
                 "label": trend.get("label", "insufficient data"),
                 "summary": trend.get("summary", ""),
             }
-        balance = analyze_muscle_balance(
-            training_df,
-            latest_recovery_score=latest_recovery.get("recovery_score") if latest_recovery else None,
-        )
-        muscle_balance_warning = balance["flags"][0] if balance.get("flags") else None
+        return latest, strength_summary
 
-    volume_df = calculate_training_volume(training_df)
-    performance_plan = generate_performance_recommendations(
-        recovery_df=recovery_df,
-        training_df=training_df,
-        nutrition_df=nutrition_df,
-        body_metrics_df=body_metrics_df,
-        target_calories=targets["target_calories"],
-        target_protein=targets["protein_grams"],
-        goal=goals["goal_type"],
+    latest_workout, strength_trend_summary = _safe_dashboard_block(
+        "strength_trends",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: (None, {"label": "insufficient data", "exercise": "", "summary": "Log workouts to calculate strength trends."}),
+        build_training_snapshot,
     )
-    personal_records_data = update_personal_records_from_logs(training_df)
-    lean_bulk_decision = generate_lean_bulk_calorie_recommendation(
-        body_metrics_df=body_metrics_df,
-        nutrition_df=nutrition_for_optimization,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        user_goals=goals,
+    muscle_balance_warning = _safe_dashboard_block(
+        "muscle_balance",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: None,
+        lambda: (
+            (lambda balance: balance["flags"][0] if balance.get("flags") else None)(
+                analyze_muscle_balance(training_df, latest_recovery_score=latest_recovery.get("recovery_score") if latest_recovery else None)
+            )
+            if not training_df.empty
+            else None
+        ),
     )
-    adaptive_recommendation = build_adaptive_nutrition_recommendation(
-        user_goals=goals,
-        body_metrics_df=body_metrics_df,
-        nutrition_df=daily_nutrition_summary,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        current_targets=targets,
-        sleep_df=sleep_df,
-        today=today,
+
+    volume_df = _safe_dashboard_block(
+        "training_volume",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: pd.DataFrame(),
+        lambda: calculate_training_volume(training_df),
     )
-    personal_learning = generate_personal_response_learning(
-        body_metrics_df=body_metrics_df,
-        nutrition_df=daily_nutrition_summary,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        sleep_df=sleep_df,
-        current_targets=targets,
+    if not isinstance(volume_df, pd.DataFrame):
+        volume_df = pd.DataFrame()
+    performance_plan = _safe_dashboard_block(
+        "performance_plan",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_performance_plan,
+        lambda: generate_performance_recommendations(
+            recovery_df=recovery_df,
+            training_df=training_df,
+            nutrition_df=nutrition_df,
+            body_metrics_df=body_metrics_df,
+            target_calories=targets.get("target_calories"),
+            target_protein=targets.get("protein_grams"),
+            goal=goals.get("goal_type"),
+        ),
     )
-    optimization_features = build_optimization_features(
-        nutrition_summary_df=daily_nutrition_summary,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        sleep_df=sleep_df,
-        body_metrics_df=body_metrics_df,
-        targets=targets,
-        personal_learning=personal_learning,
-        today=today,
+    if not isinstance(performance_plan, dict):
+        performance_plan = _fallback_performance_plan()
+    personal_records_data = _safe_dashboard_block(
+        "personal_records",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_personal_records,
+        lambda: update_personal_records_from_logs(training_df),
     )
-    adjusted_targets = optimization_features["day_type_macros"].get("adjusted_targets") or {}
+    if not isinstance(personal_records_data, dict):
+        personal_records_data = _fallback_personal_records()
+    lean_bulk_decision = _safe_dashboard_block(
+        "lean_bulk_decision",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _fallback_lean_bulk_decision(targets),
+        lambda: generate_lean_bulk_calorie_recommendation(
+            body_metrics_df=body_metrics_df,
+            nutrition_df=nutrition_for_optimization,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            user_goals=goals,
+        ),
+    )
+    if not isinstance(lean_bulk_decision, dict):
+        lean_bulk_decision = _fallback_lean_bulk_decision(targets)
+    adaptive_recommendation = _safe_dashboard_block(
+        "adaptive_recommendation",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _fallback_adaptive_recommendation(targets),
+        lambda: build_adaptive_nutrition_recommendation(
+            user_goals=goals,
+            body_metrics_df=body_metrics_df,
+            nutrition_df=daily_nutrition_summary,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            current_targets=targets,
+            sleep_df=sleep_df,
+            today=today,
+        ),
+    )
+    if not isinstance(adaptive_recommendation, dict):
+        adaptive_recommendation = _fallback_adaptive_recommendation(targets)
+    personal_learning = _safe_dashboard_block(
+        "personal_learning",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_personal_learning,
+        lambda: generate_personal_response_learning(
+            body_metrics_df=body_metrics_df,
+            nutrition_df=daily_nutrition_summary,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            sleep_df=sleep_df,
+            current_targets=targets,
+        ),
+    )
+    if not isinstance(personal_learning, dict):
+        personal_learning = _fallback_personal_learning()
+    optimization_features = _safe_dashboard_block(
+        "optimization_features",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _fallback_optimization_features(targets, personal_learning),
+        lambda: build_optimization_features(
+            nutrition_summary_df=daily_nutrition_summary,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            sleep_df=sleep_df,
+            body_metrics_df=body_metrics_df,
+            targets=targets,
+            personal_learning=personal_learning,
+            today=today,
+        ),
+    )
+    if not isinstance(optimization_features, dict):
+        optimization_features = _fallback_optimization_features(targets, personal_learning)
+    adjusted_targets = (optimization_features.get("day_type_macros") or {}).get("adjusted_targets") or {}
     dashboard_targets = {
         **targets,
         "target_calories": adjusted_targets.get("calories", targets.get("target_calories")),
@@ -379,43 +958,122 @@ def dashboard() -> dict:
         "carb_grams": adjusted_targets.get("carbs", targets.get("carb_grams")),
         "fat_grams": adjusted_targets.get("fat", targets.get("fat_grams")),
     }
-    food_tile = _food_dashboard_tile(nutrition_totals, dashboard_targets)
-    weight_tile = _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today)
-    recovery_tile = _recovery_dashboard_tile(recovery_df, latest_recovery, today)
-    recovery_tile["extra_run_readiness"] = generate_extra_run_readiness(
-        recovery_data=recovery_tile if recovery_tile.get("connected") else recovery_df,
-        training_df=training_df,
-        strava_df=training_df[training_df["source"].astype(str).str.lower() == "strava"] if not training_df.empty and "source" in training_df.columns else None,
-        nutrition_summary=daily_nutrition_summary,
-        user_goals=goals,
-        today_date=today,
+    food_tile = _safe_dashboard_block(
+        "food_tile",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _food_dashboard_tile({"calories": 0, "protein": 0, "carbs": 0, "fat": 0}, dashboard_targets),
+        lambda: _food_dashboard_tile(nutrition_totals, dashboard_targets),
     )
-    lift_tile = _lift_performance_tile(training_df, today)
-    workout_quality = calculate_workout_quality(training_df, today)
-    nutrition_adherence = calculate_calorie_adherence(daily_nutrition_summary)
-    todays_action = generate_todays_action(
-        workout_quality=workout_quality,
-        recovery_tile=recovery_tile,
-        sleep_df=sleep_df,
-        weight_feedback=weight_feedback,
-        nutrition_adherence=nutrition_adherence,
-        training_workload=training_workload,
-        adaptive_recommendation=adaptive_recommendation,
+    if not isinstance(food_tile, dict):
+        food_tile = _food_dashboard_tile({"calories": 0, "protein": 0, "carbs": 0, "fat": 0}, dashboard_targets)
+    weight_tile = _safe_dashboard_block(
+        "weight_tile",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today),
+        lambda: _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today),
     )
-    weekly_report = generate_weekly_performance_report(
-        body_metrics_df=body_metrics_df,
-        nutrition_df=daily_nutrition_summary,
-        training_df=training_df,
-        recovery_df=recovery_df,
-        sleep_df=sleep_df,
-        today=today,
+    if not isinstance(weight_tile, dict):
+        weight_tile = _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today)
+    recovery_tile = _safe_dashboard_block(
+        "recovery_tile",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today),
+        lambda: _recovery_dashboard_tile(recovery_df, latest_recovery, today),
     )
+    if not isinstance(recovery_tile, dict):
+        recovery_tile = _recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today)
+    recovery_tile["extra_run_readiness"] = _safe_dashboard_block(
+        "run_readiness",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_extra_run_readiness,
+        lambda: generate_extra_run_readiness(
+            recovery_data=recovery_tile if recovery_tile.get("connected") else recovery_df,
+            training_df=training_df,
+            strava_df=training_df[training_df["source"].astype(str).str.lower() == "strava"] if not training_df.empty and "source" in training_df.columns else None,
+            nutrition_summary=daily_nutrition_summary,
+            user_goals=goals,
+            today_date=today,
+        ),
+    )
+    lift_tile = _safe_dashboard_block(
+        "lift_performance_tile",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today),
+        lambda: _lift_performance_tile(training_df, today),
+    )
+    if not isinstance(lift_tile, dict):
+        lift_tile = _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today)
+    workout_quality = _safe_dashboard_block(
+        "workout_quality",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_workout_quality,
+        lambda: calculate_workout_quality(training_df, today),
+    )
+    if not isinstance(workout_quality, dict):
+        workout_quality = _fallback_workout_quality()
+    nutrition_adherence = _safe_dashboard_block(
+        "nutrition_adherence",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_nutrition_adherence,
+        lambda: calculate_calorie_adherence(daily_nutrition_summary),
+    )
+    if not isinstance(nutrition_adherence, dict):
+        nutrition_adherence = _fallback_nutrition_adherence()
+    todays_action = _safe_dashboard_block(
+        "todays_action",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_todays_action,
+        lambda: generate_todays_action(
+            workout_quality=workout_quality,
+            recovery_tile=recovery_tile,
+            sleep_df=sleep_df,
+            weight_feedback=weight_feedback,
+            nutrition_adherence=nutrition_adherence,
+            training_workload=training_workload,
+            adaptive_recommendation=adaptive_recommendation,
+        ),
+    )
+    if not isinstance(todays_action, dict):
+        todays_action = _fallback_todays_action()
+    weekly_report = _safe_dashboard_block(
+        "weekly_report",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_weekly_report,
+        lambda: generate_weekly_performance_report(
+            body_metrics_df=body_metrics_df,
+            nutrition_df=daily_nutrition_summary,
+            training_df=training_df,
+            recovery_df=recovery_df,
+            sleep_df=sleep_df,
+            today=today,
+        ),
+    )
+    if not isinstance(weekly_report, dict):
+        weekly_report = _fallback_weekly_report()
     prs_tile = {
         "bench_press": personal_records_data.get("bench_press"),
         "mile_time": personal_records_data.get("mile_time"),
     }
 
-    return {
+    payload = {
         "date": today,
         "food": food_tile,
         "weight": weight_tile,
@@ -452,7 +1110,40 @@ def dashboard() -> dict:
             "recovery": len(recovery_df),
             "training": len(training_df),
         },
+        "errors": dashboard_errors,
+        "debug": {
+            "status": dashboard_status,
+            "timings_ms": dashboard_timings_ms,
+        },
     }
+    return _json_safe(payload)
+
+
+@app.get("/api/dashboard/debug")
+def dashboard_debug() -> dict:
+    """Return dashboard subsystem status without making the app fail hard."""
+    payload = dashboard()
+    debug = payload.get("debug", {})
+    return _json_safe(
+        {
+            "nutrition_loaded": bool(debug.get("status", {}).get("nutrition_loaded")),
+            "training_loaded": bool(debug.get("status", {}).get("training_loaded")),
+            "body_metrics_loaded": bool(debug.get("status", {}).get("body_metrics_loaded")),
+            "recovery_loaded": bool(debug.get("status", {}).get("recovery_loaded")),
+            "sleep_loaded": bool(debug.get("status", {}).get("sleep_loaded")),
+            "adaptive_recommendation_ok": bool(debug.get("status", {}).get("adaptive_recommendation")),
+            "weekly_report_ok": bool(debug.get("status", {}).get("weekly_report")),
+            "optimization_features_ok": bool(debug.get("status", {}).get("optimization_features")),
+            "personal_learning_ok": bool(debug.get("status", {}).get("personal_learning")),
+            "workout_quality_ok": bool(debug.get("status", {}).get("workout_quality")),
+            "run_readiness_ok": bool(debug.get("status", {}).get("run_readiness")),
+            "muscle_balance_ok": bool(debug.get("status", {}).get("muscle_balance")),
+            "status": debug.get("status", {}),
+            "timings_ms": debug.get("timings_ms", {}),
+            "errors": payload.get("errors", []),
+            "counts": payload.get("counts", {}),
+        }
+    )
 
 
 def _left(actual: float, target: float | None) -> dict:

@@ -577,6 +577,12 @@ def _corr(df: pd.DataFrame, left: str, right: str) -> float | None:
     return None if pd.isna(value) else float(value)
 
 
+def _numeric_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if df is None or df.empty or column not in df.columns:
+        return pd.Series(pd.NA, index=df.index if df is not None else None, dtype="Float64")
+    return pd.to_numeric(df[column], errors="coerce")
+
+
 def personal_baseline_learning(
     summary_df: pd.DataFrame,
     training_df: pd.DataFrame,
@@ -598,16 +604,19 @@ def personal_baseline_learning(
 
     weekly = _weekly_baseline_frame(summary_df, training_df, body_metrics_df, recovery_df, sleep_df)
     if len(weekly) >= 4:
-        strength_values = pd.to_numeric(weekly.get("strength_index"), errors="coerce")
-        strong_cutoff = strength_values.quantile(0.7)
-        strong = weekly[strength_values >= strong_cutoff].copy()
+        strength_values = _numeric_column(weekly, "strength_index")
+        strength_history = strength_values.dropna()
+        strong = pd.DataFrame()
+        if len(strength_history) >= 2:
+            strong_cutoff = strength_history.quantile(0.7)
+            strong = weekly[strength_values >= strong_cutoff].copy()
         if len(strong) >= 2:
-            carbs = strong["carbs"].dropna()
-            calories = strong["calories"].dropna()
-            sleep = strong["sleep_hours"].dropna()
-            miles = strong["miles"].dropna()
-            recovery = strong["recovery_score"].dropna()
-            gain = strong["weight_gain"].dropna()
+            carbs = _numeric_column(strong, "carbs").dropna()
+            calories = _numeric_column(strong, "calories").dropna()
+            sleep = _numeric_column(strong, "sleep_hours").dropna()
+            miles = _numeric_column(strong, "miles").dropna()
+            recovery = _numeric_column(strong, "recovery_score").dropna()
+            gain = _numeric_column(strong, "weight_gain").dropna()
             confidence = "medium" if len(weekly) >= 8 else "low"
             if not carbs.empty:
                 insights.append({"title": "Carb baseline", "summary": f"Your strongest training weeks average about {_round(carbs.mean(), 0)}g carbs/day.", "confidence": confidence, "metric": "carbs"})
@@ -622,10 +631,12 @@ def personal_baseline_learning(
             if not recovery.empty:
                 insights.append({"title": "Recovery baseline", "summary": f"Strong weeks average {_round(recovery.mean(), 0)}/100 recovery.", "confidence": confidence, "metric": "recovery"})
 
-        low_sleep = weekly[pd.to_numeric(weekly.get("sleep_hours"), errors="coerce") < 7]
-        if len(low_sleep) >= 2:
-            low_strength = _num(low_sleep["strength_index"].mean())
-            normal_strength = _num(weekly[pd.to_numeric(weekly.get("sleep_hours"), errors="coerce") >= 7]["strength_index"].mean())
+        sleep_values = _numeric_column(weekly, "sleep_hours")
+        low_sleep = weekly[sleep_values < 7]
+        normal_sleep = weekly[sleep_values >= 7]
+        if len(low_sleep) >= 2 and len(normal_sleep) >= 1:
+            low_strength = _num(_numeric_column(low_sleep, "strength_index").mean())
+            normal_strength = _num(_numeric_column(normal_sleep, "strength_index").mean())
             if normal_strength > 0 and low_strength < normal_strength * 0.95:
                 insights.append({"title": "Sleep sensitivity", "summary": "Sleep below 7h has lined up with softer performance/recovery weeks.", "confidence": "low", "metric": "sleep"})
 
