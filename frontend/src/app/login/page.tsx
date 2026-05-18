@@ -7,6 +7,7 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [setupError, setSetupError] = useState("");
+  const [setupMessage, setSetupMessage] = useState("");
 
   useEffect(() => {
     fetch("/api/access/login", { credentials: "include" })
@@ -15,6 +16,8 @@ export default function LoginPage() {
         if (data?.configured === false) {
           const missing = Array.isArray(data.missing) && data.missing.length ? ` Missing: ${data.missing.join(", ")}.` : "";
           setSetupError(`${data.message ?? "Performance OS access is not configured."}${missing}`);
+        } else if (data?.message) {
+          setSetupMessage(data.message);
         }
       })
       .catch(() => undefined);
@@ -50,6 +53,7 @@ export default function LoginPage() {
         <p className="text-xs font-semibold uppercase tracking-[0.18em] text-cyan-300/80">Private Access</p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Performance OS</h1>
         <p className="mt-2 text-sm leading-6 text-zinc-400">Enter your access password to open your private dashboard.</p>
+        {setupMessage && !setupError ? <p className="mt-4 rounded-lg border border-emerald-300/20 bg-emerald-300/10 p-3 text-sm text-emerald-100">{setupMessage}</p> : null}
         {setupError ? <p className="mt-4 rounded-lg border border-amber-300/30 bg-amber-300/10 p-3 text-sm text-amber-100">{setupError}</p> : null}
         <label className="mt-6 block space-y-2 text-sm text-zinc-400">
           <span>Password</span>

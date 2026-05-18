@@ -1,19 +1,8 @@
 import type { NextConfig } from "next";
 
-const backendApiUrl = (process.env.NEXT_PUBLIC_API_URL ?? process.env.BACKEND_API_URL ?? "").replace(/\/$/, "");
-
 const nextConfig: NextConfig = {
-  async rewrites() {
-    if (!backendApiUrl) {
-      return [];
-    }
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendApiUrl}/api/:path*`,
-      },
-    ];
-  },
+  // API forwarding is handled by src/app/api/[...path]/route.ts so auth checks
+  // and session-cookie handling always run before requests reach FastAPI.
 };
 
 export default nextConfig;

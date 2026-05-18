@@ -2,25 +2,67 @@ import { NextResponse } from "next/server";
 import { backendApiBaseUrl } from "@/lib/backend-api";
 import { ACCESS_COOKIE, SESSION_MAX_AGE_SECONDS, createSessionToken } from "@/lib/session-auth";
 
-function missingAuthVariables() {
-  return [
-    process.env.SESSION_SECRET ? "" : "SESSION_SECRET",
-    process.env.BACKEND_API_URL || process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_API_BASE_URL ? "" : "NEXT_PUBLIC_API_URL or BACKEND_API_URL",
-  ].filter(Boolean);
+type AuthConfig =
+  | {
+      ok: true;
+      sessionSecret: string;
+      backendUrl: string;
+    }
+  | {
+      ok: false;
+      missing: string[];
+      message: string;
+      backendUrlError?: string;
+    };
+
+function resolveAuthConfig(): AuthConfig {
+  const sessionSecret = process.env.SESSION_SECRET?.trim();
+  const missing: string[] = [];
+  let backendUrl = "";
+  let backendUrlError = "";
+
+  if (!sessionSecret) {
+    missing.push("SESSION_SECRET");
+  }
+
+  try {
+    backendUrl = backendApiBaseUrl();
+  } catch (error) {
+    backendUrlError = error instanceof Error ? error.message : "Backend API URL resolver failed.";
+    missing.push("BACKEND_API_URL");
+  }
+
+  if (!sessionSecret || !backendUrl) {
+    const messageParts = [];
+    if (!sessionSecret) {
+      messageParts.push("SESSION_SECRET is not configured on Vercel.");
+    }
+    if (!backendUrl) {
+      messageParts.push(`Backend URL resolver failed: ${backendUrlError}`);
+    }
+    return {
+      ok: false,
+      missing,
+      message: messageParts.join(" "),
+      backendUrlError,
+    };
+  }
+
+  return { ok: true, sessionSecret, backendUrl };
 }
 
-function setupErrorResponse() {
-  const missing = missingAuthVariables();
-  const message = missing.includes("SESSION_SECRET")
-    ? "SESSION_SECRET is not configured"
-    : "Backend API URL is not configured";
+function missingAuthVariables(config: AuthConfig = resolveAuthConfig()) {
+  return config.ok ? [] : config.missing;
+}
 
+function setupErrorResponse(config: Exclude<AuthConfig, { ok: true }>) {
   return NextResponse.json(
     {
       ok: false,
       configured: false,
-      missing,
-      message,
+      missing: missingAuthVariables(config),
+      message: config.message,
+      backendUrlError: config.backendUrlError,
     },
     { status: 500 },
   );
@@ -31,24 +73,18 @@ function clearAccessCookie(response: NextResponse) {
     name: ACCESS_COOKIE,
     value: "",
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 0,
   });
 }
 
-async function authenticateWithBackend(password: string): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  let target: string;
-  try {
-    target = `${backendApiBaseUrl()}/api/auth/login`;
-  } catch {
-    return {
-      ok: false,
-      status: 500,
-      message: "Backend API URL is not configured. Set NEXT_PUBLIC_API_URL or BACKEND_API_URL on Vercel.",
-    };
-  }
+async function authenticateWithBackend(
+  backendUrl: string,
+  password: string,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const target = `${backendUrl}/api/auth/login`;
 
   try {
     const response = await fetch(target, {
@@ -76,22 +112,16 @@ async function authenticateWithBackend(password: string): Promise<{ ok: true } |
     return {
       ok: false,
       status: 502,
-      message: "Could not reach the Railway backend login endpoint. Confirm NEXT_PUBLIC_API_URL points to the live FastAPI service.",
+      message: `Backend unreachable: could not reach ${backendUrl}. Confirm the Railway FastAPI service is live and reachable from Vercel.`,
     };
   }
 }
 
-async function verifyBackendSession(sessionToken: string): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
-  let target: string;
-  try {
-    target = `${backendApiBaseUrl()}/api/auth/session`;
-  } catch {
-    return {
-      ok: false,
-      status: 500,
-      message: "Backend API URL is not configured. Set NEXT_PUBLIC_API_URL or BACKEND_API_URL on Vercel.",
-    };
-  }
+async function verifyBackendSession(
+  backendUrl: string,
+  sessionToken: string,
+): Promise<{ ok: true } | { ok: false; status: number; message: string }> {
+  const target = `${backendUrl}/api/auth/session`;
 
   try {
     const response = await fetch(target, {
@@ -123,48 +153,47 @@ async function verifyBackendSession(sessionToken: string): Promise<{ ok: true } 
     return {
       ok: false,
       status: 502,
-      message: "Could not verify the session with the Railway backend. Confirm NEXT_PUBLIC_API_URL points to the live FastAPI service.",
+      message: `Backend unreachable: could not verify the session with ${backendUrl}. Confirm the Railway FastAPI service is live and reachable from Vercel.`,
     };
   }
 }
 
 export async function GET() {
-  const missing = missingAuthVariables();
+  const config = resolveAuthConfig();
+  const missing = missingAuthVariables(config);
   return NextResponse.json({
     ok: true,
-    configured: missing.length === 0,
+    configured: config.ok,
     missing,
-    message: missing.includes("SESSION_SECRET")
-      ? "SESSION_SECRET is not configured"
-      : missing.length
-        ? "Backend API URL is not configured."
-        : "Access gate is configured.",
+    backendUrl: config.ok ? config.backendUrl : null,
+    backendUrlError: config.ok ? null : config.backendUrlError,
+    message: config.ok ? "Access gate is configured." : config.message,
   });
 }
 
 export async function POST(request: Request) {
-  const sessionSecret = process.env.SESSION_SECRET;
+  const config = resolveAuthConfig();
 
   if (process.env.NODE_ENV === "development") {
-    console.info("[auth] SESSION_SECRET present:", Boolean(sessionSecret));
+    console.info("[auth] SESSION_SECRET present:", config.ok || !missingAuthVariables(config).includes("SESSION_SECRET"));
   }
 
-  if (missingAuthVariables().length || !sessionSecret) {
-    return setupErrorResponse();
+  if (!config.ok) {
+    return setupErrorResponse(config);
   }
 
   const body = await request.json().catch(() => ({}));
   const password = String(body.password ?? "");
 
-  const backendAuth = await authenticateWithBackend(password);
+  const backendAuth = await authenticateWithBackend(config.backendUrl, password);
   if (!backendAuth.ok) {
     const response = NextResponse.json({ ok: false, message: backendAuth.message }, { status: backendAuth.status });
     clearAccessCookie(response);
     return response;
   }
 
-  const sessionToken = await createSessionToken(sessionSecret);
-  const backendCheck = await verifyBackendSession(sessionToken);
+  const sessionToken = await createSessionToken(config.sessionSecret);
+  const backendCheck = await verifyBackendSession(config.backendUrl, sessionToken);
   if (!backendCheck.ok) {
     const response = NextResponse.json({ ok: false, message: backendCheck.message }, { status: backendCheck.status });
     clearAccessCookie(response);
@@ -176,7 +205,7 @@ export async function POST(request: Request) {
     name: ACCESS_COOKIE,
     value: sessionToken,
     httpOnly: true,
-    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    sameSite: "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: SESSION_MAX_AGE_SECONDS,
