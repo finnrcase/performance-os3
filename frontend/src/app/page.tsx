@@ -3054,9 +3054,46 @@ function FoodPage({
     }
   };
 
+  const compactMacroRows = [
+    { label: "Calories", unit: "", consumed: selectedDateTotals.calories, target: displayTargets?.target_calories ?? 0, bar: "bg-lime-300" },
+    { label: "Protein", unit: "g", consumed: selectedDateTotals.protein, target: displayTargets?.protein_grams ?? 0, bar: "bg-teal-300" },
+    { label: "Carbs", unit: "g", consumed: selectedDateTotals.carbs, target: displayTargets?.carb_grams ?? 0, bar: "bg-blue-300" },
+    { label: "Fat", unit: "g", consumed: selectedDateTotals.fat, target: displayTargets?.fat_grams ?? 0, bar: "bg-amber-300" },
+  ];
+
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(300px,340px)_minmax(0,1fr)]">
-      <Card className="min-w-0 xl:self-start">
+      <div className="min-w-0 space-y-4 xl:self-start">
+        <Card>
+          <SectionHeader eyebrow="Today" title={`Macros · ${selectedDateLabel}`} />
+          {hasMacroTargets ? (
+            <div className="space-y-3">
+              {compactMacroRows.map((row) => {
+                const consumed = Math.round(row.consumed);
+                const target = Math.round(row.target);
+                const remaining = Math.max(0, target - consumed);
+                const percent = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
+                return (
+                  <div key={row.label}>
+                    <div className="flex items-baseline justify-between text-sm">
+                      <span className="font-medium text-zinc-200">{row.label}</span>
+                      <span className="text-zinc-400">{consumed}{row.unit} / {target}{row.unit}</span>
+                    </div>
+                    <div className="mt-1 h-1.5 rounded-full bg-white/10">
+                      <div className={cx("h-1.5 rounded-full", row.bar)} style={{ width: `${percent}%` }} />
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500">{remaining}{row.unit} remaining</p>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-sm text-zinc-400">Set macro targets in Goals to see today&apos;s progress here.</p>
+          )}
+        </Card>
+      </div>
+      <div className="min-w-0 space-y-4">
+      <Card className="min-w-0">
         <SectionHeader eyebrow="Food" title="Manual food entry" />
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
@@ -3555,6 +3592,7 @@ function FoodPage({
             ) : null}
           </div>
         </Card>
+      </div>
       </div>
     </div>
   );
