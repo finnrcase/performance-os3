@@ -52,27 +52,25 @@ forwarded to FastAPI.
 
 ## Private Access Gate
 
-The frontend includes a simple password gate for private personal access. The login password is controlled by:
+The frontend includes a simple private access gate. Railway validates the login
+password; Vercel only signs and stores the frontend session cookie.
 
 ```bash
-APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
 ```
 
-`APP_PASSWORD` is the value you type into the Performance OS login page.
-`SESSION_SECRET` signs the private access cookie after a successful login. Both
-variables are read server-side only by the Next.js login API/proxy and must not
-be prefixed with `NEXT_PUBLIC_`.
+`SESSION_SECRET` signs the private access cookie after a successful backend
+login check. It must match the Railway `SESSION_SECRET` and must not be
+prefixed with `NEXT_PUBLIC_`.
 
 For local development, create `frontend/.env.local`:
 
 ```bash
-APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
 NEXT_PUBLIC_API_URL=http://localhost:8001
 ```
 
-If either `APP_PASSWORD` or `SESSION_SECRET` is missing, the login page shows a
+If `SESSION_SECRET` or the backend API URL is missing, the login page shows a
 setup error so the gate does not fail silently.
 
 Restart `npm run dev` after editing `frontend/.env.local`; Next.js loads these
@@ -85,7 +83,6 @@ Create a Vercel project with `frontend/` as the project root.
 Set these frontend environment variables:
 
 ```bash
-APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
 NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
 NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app

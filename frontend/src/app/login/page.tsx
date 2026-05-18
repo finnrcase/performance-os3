@@ -9,7 +9,7 @@ export default function LoginPage() {
   const [setupError, setSetupError] = useState("");
 
   useEffect(() => {
-    fetch("/api/access/login")
+    fetch("/api/access/login", { credentials: "include" })
       .then((response) => response.json())
       .then((data) => {
         if (data?.configured === false) {
@@ -27,6 +27,7 @@ export default function LoginPage() {
     setError("");
     const response = await fetch("/api/access/login", {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ password }),
     });

@@ -19,6 +19,10 @@ function forwardedHeaders(request: NextRequest) {
   return headers;
 }
 
+function isPublicBackendApiPath(path: string[]) {
+  return path.join("/") === "auth/login" || path.join("/") === "auth/logout";
+}
+
 async function proxyToBackend(request: NextRequest, context: RouteContext) {
   const sessionSecret = process.env.SESSION_SECRET;
   if (!sessionSecret) {
@@ -26,11 +30,11 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
   }
 
   const token = request.cookies.get(ACCESS_COOKIE)?.value;
-  if (!(await isValidSessionToken(token, sessionSecret))) {
+  const { path } = await context.params;
+  if (!isPublicBackendApiPath(path) && !(await isValidSessionToken(token, sessionSecret))) {
     return jsonUnauthorized(token ? "Session expired" : "Authentication required");
   }
 
-  const { path } = await context.params;
   try {
     const target = new URL(`${backendApiBaseUrl()}/api/${path.map(encodeURIComponent).join("/")}`);
     request.nextUrl.searchParams.forEach((value, key) => {

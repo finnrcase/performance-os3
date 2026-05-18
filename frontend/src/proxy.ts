@@ -2,11 +2,10 @@ import { NextResponse, type NextRequest } from "next/server";
 import { ACCESS_COOKIE, isValidSessionToken } from "@/lib/session-auth";
 
 export async function proxy(request: NextRequest) {
-  const accessPassword = process.env.APP_PASSWORD;
   const sessionSecret = process.env.SESSION_SECRET;
   const isLoginPage = request.nextUrl.pathname === "/login";
 
-  if (!accessPassword || !sessionSecret) {
+  if (!sessionSecret) {
     if (isLoginPage) {
       return NextResponse.next();
     }

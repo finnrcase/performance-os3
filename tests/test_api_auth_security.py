@@ -47,6 +47,28 @@ class ApiAuthSecurityTest(unittest.TestCase):
         self.assertEqual(authenticated.status_code, 200)
         self.assertEqual(authenticated.json(), {"ok": True, "status": "authenticated"})
 
+    def test_backend_login_sets_secure_cross_site_cookie_in_production(self):
+        with patch.dict(
+            os.environ,
+            {
+                "APP_PASSWORD": TEST_APP_PASSWORD,
+                "SESSION_SECRET": TEST_SESSION_SECRET,
+                "RAILWAY_ENVIRONMENT": "production",
+            },
+            clear=True,
+        ):
+            invalid = self.client.post("/api/auth/login", json={"password": "wrong"})
+            response = self.client.post("/api/auth/login", json={"password": TEST_APP_PASSWORD})
+
+        self.assertEqual(invalid.status_code, 401)
+        self.assertEqual(response.status_code, 200)
+        cookie = response.headers.get("set-cookie", "")
+        self.assertIn(f"{ACCESS_COOKIE}=", cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertIn("Secure", cookie)
+        self.assertIn("SameSite=none", cookie)
+        self.assertIn("Path=/", cookie)
+
     def test_all_private_api_write_routes_require_session_cookie(self):
         failures = []
         with patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True):

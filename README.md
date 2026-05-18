@@ -86,15 +86,14 @@ Development command: npm run dev
 Set these Vercel environment variables:
 
 ```bash
-APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
 NEXT_PUBLIC_API_URL=https://api-production-b3ff.up.railway.app
 NEXT_PUBLIC_APP_URL=https://performance-os-rho.vercel.app
 ```
 
-`APP_PASSWORD` is the password entered on the Performance OS login page.
-`SESSION_SECRET` signs the private access cookie after a successful login. Both
-are server-side only and must not use the `NEXT_PUBLIC_` prefix.
+`SESSION_SECRET` signs the private access cookie after a successful Railway
+login check. It must match the Railway `SESSION_SECRET` and must not use the
+`NEXT_PUBLIC_` prefix. `APP_PASSWORD` belongs on Railway, not Vercel.
 
 `NEXT_PUBLIC_API_URL` is the public Railway backend URL used by the Next.js
 same-origin `/api` rewrite and OAuth callback forwarding routes. Browser calls
@@ -106,13 +105,13 @@ Do not put backend API keys or OAuth secrets in the Vercel frontend project.
 Keep `OPENAI_API_KEY`, `STRAVA_CLIENT_SECRET`, `HEVY_API_KEY`, and similar keys
 on the backend host only.
 
-### Local Frontend Password
+### Local Frontend Session
 
-The Next.js login gate reads `APP_PASSWORD` and `SESSION_SECRET` server-side from
-the frontend environment. For local development, create `frontend/.env.local`:
+The Next.js login gate reads `SESSION_SECRET` server-side and asks the FastAPI
+backend to validate the password. For local development, create
+`frontend/.env.local`:
 
 ```bash
-APP_PASSWORD=your-private-password
 SESSION_SECRET=your-long-random-session-secret
 NEXT_PUBLIC_API_URL=http://localhost:8001
 ```
@@ -123,12 +122,12 @@ Then run the frontend from `frontend/`:
 npm run dev
 ```
 
-If either `APP_PASSWORD` or `SESSION_SECRET` is missing, the login page shows a
+If `SESSION_SECRET` or the backend API URL is missing, the login page shows a
 setup error instead of silently accepting or rejecting access.
 
 After editing `frontend/.env.local`, restart `npm run dev` so Next.js reloads
-the password. `APP_PASSWORD` is read only by server-side code and should never
-be prefixed with `NEXT_PUBLIC_`.
+the session config. `APP_PASSWORD` is validated by FastAPI and should never be
+stored in the Vercel frontend project.
 
 ### Backend on Railway or Render
 
@@ -167,8 +166,8 @@ FRONTEND_ORIGIN=https://performance-os-rho.vercel.app
 
 Production ownership rules:
 
-- Vercel gets only frontend/session config: `APP_PASSWORD`,
-  `SESSION_SECRET`, `NEXT_PUBLIC_API_URL`, and `NEXT_PUBLIC_APP_URL`.
+- Vercel gets only frontend/session config: `SESSION_SECRET`,
+  `NEXT_PUBLIC_API_URL`, and `NEXT_PUBLIC_APP_URL`.
 - Railway gets all backend secrets and integrations: `DATABASE_URL`,
   `APP_PASSWORD`, `SESSION_SECRET`, `OPENAI_API_KEY`, `STRAVA_CLIENT_ID`,
   `STRAVA_CLIENT_SECRET`, `STRAVA_ACCESS_TOKEN`, `STRAVA_REFRESH_TOKEN`,

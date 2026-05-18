@@ -7,13 +7,14 @@ import threading
 import time
 
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training, withings
-from backend.routes.utils import dataframe_records, require_authenticated_request
+from backend.routes.utils import ACCESS_COOKIE, SESSION_MAX_AGE_SECONDS, create_session_token, dataframe_records, require_authenticated_request
 from src.analytics.food_history import (
     build_daily_nutrition_summary,
     calculate_calorie_adherence,
@@ -93,6 +94,8 @@ app.add_middleware(
 
 
 PUBLIC_API_PATHS = {
+    "/api/auth/login",
+    "/api/auth/logout",
     "/api/strava/callback",
     "/api/integrations/strava/callback",
     "/api/withings/callback",
@@ -149,6 +152,62 @@ def health() -> dict:
 def auth_session() -> dict:
     """Return a lightweight success response after middleware validates auth."""
     return {"ok": True, "status": "authenticated"}
+
+
+class AuthLoginPayload(BaseModel):
+    password: str = ""
+
+
+def _production_like() -> bool:
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("VERCEL")
+        or os.getenv("RENDER")
+        or os.getenv("ENVIRONMENT", "").lower() in {"production", "prod"}
+    )
+
+
+def _session_cookie_options() -> dict:
+    production = _production_like()
+    return {
+        "httponly": True,
+        "secure": production,
+        "samesite": "none" if production else "lax",
+        "path": "/",
+        "max_age": SESSION_MAX_AGE_SECONDS,
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(payload: AuthLoginPayload, response: Response) -> dict:
+    """Validate the private access password and issue the backend session cookie."""
+    configured_password = os.getenv("APP_PASSWORD", "")
+    session_secret = os.getenv("SESSION_SECRET", "")
+    if not configured_password:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="APP_PASSWORD is not configured on the backend")
+    if not session_secret:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="SESSION_SECRET is not configured on the backend")
+    if payload.password != configured_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
+
+    response.set_cookie(
+        key=ACCESS_COOKIE,
+        value=create_session_token(session_secret),
+        **_session_cookie_options(),
+    )
+    return {"ok": True, "status": "authenticated"}
+
+
+@app.post("/api/auth/logout")
+def auth_logout(response: Response) -> dict:
+    """Clear the backend session cookie."""
+    response.delete_cookie(
+        key=ACCESS_COOKIE,
+        path="/",
+        secure=_production_like(),
+        samesite="none" if _production_like() else "lax",
+    )
+    return {"ok": True}
 
 
 @app.on_event("startup")

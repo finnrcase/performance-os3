@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
-
-const ACCESS_COOKIE = "performance_os_access";
+import { ACCESS_COOKIE } from "@/lib/session-auth";
 
 export async function POST() {
   const response = NextResponse.json({ ok: true });
@@ -8,7 +7,7 @@ export async function POST() {
     name: ACCESS_COOKIE,
     value: "",
     httpOnly: true,
-    sameSite: "lax",
+    sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
     secure: process.env.NODE_ENV === "production",
     path: "/",
     maxAge: 0,
