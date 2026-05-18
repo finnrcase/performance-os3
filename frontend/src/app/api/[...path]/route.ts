@@ -31,12 +31,11 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
   }
 
   const { path } = await context.params;
-  const target = new URL(`${backendApiBaseUrl()}/api/${path.map(encodeURIComponent).join("/")}`);
-  request.nextUrl.searchParams.forEach((value, key) => {
-    target.searchParams.append(key, value);
-  });
-
   try {
+    const target = new URL(`${backendApiBaseUrl()}/api/${path.map(encodeURIComponent).join("/")}`);
+    request.nextUrl.searchParams.forEach((value, key) => {
+      target.searchParams.append(key, value);
+    });
     const method = request.method.toUpperCase();
     const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
     const backendResponse = await fetch(target, {

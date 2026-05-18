@@ -1179,7 +1179,9 @@ function scheduleLoginRedirect() {
   window.setTimeout(() => {
     const loginUrl = new URL("/login", window.location.origin);
     loginUrl.searchParams.set("next", window.location.pathname);
-    window.location.assign(loginUrl.toString());
+    void fetch("/api/access/logout", { method: "POST", credentials: "include" })
+      .catch(() => undefined)
+      .finally(() => window.location.assign(loginUrl.toString()));
   }, 250);
 }
 

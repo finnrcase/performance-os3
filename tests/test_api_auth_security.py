@@ -5,8 +5,8 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.main import PUBLIC_API_PATHS, app
-from tests.auth_helpers import TEST_APP_PASSWORD, TEST_SESSION_SECRET
+from backend.main import PUBLIC_API_PATHS, _cors_origins, app
+from tests.auth_helpers import ACCESS_COOKIE, TEST_APP_PASSWORD, TEST_SESSION_SECRET, create_session_token
 
 
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
@@ -37,6 +37,16 @@ class ApiAuthSecurityTest(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["detail"], "Authentication required")
 
+    def test_backend_session_check_accepts_signed_cookie(self):
+        with patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True):
+            missing = self.client.get("/api/auth/session")
+            self.client.cookies.set(ACCESS_COOKIE, create_session_token(TEST_SESSION_SECRET))
+            authenticated = self.client.get("/api/auth/session")
+
+        self.assertEqual(missing.status_code, 401)
+        self.assertEqual(authenticated.status_code, 200)
+        self.assertEqual(authenticated.json(), {"ok": True, "status": "authenticated"})
+
     def test_all_private_api_write_routes_require_session_cookie(self):
         failures = []
         with patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True):
@@ -62,6 +72,9 @@ class ApiAuthSecurityTest(unittest.TestCase):
         self.assertEqual(strava.status_code, 303)
         self.assertEqual(withings.status_code, 200)
         self.assertEqual(withings.json()["provider"], "withings")
+
+    def test_cors_includes_production_vercel_origin(self):
+        self.assertIn("https://performance-os-rho.vercel.app", _cors_origins())
 
 
 if __name__ == "__main__":

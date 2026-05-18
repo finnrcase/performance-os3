@@ -75,6 +75,7 @@ def _cors_origins() -> list[str]:
         "http://127.0.0.1:3000",
         "http://127.0.0.1:3001",
         "http://127.0.0.1:3002",
+        "https://performance-os-rho.vercel.app",
     ]
     if configured:
         origins.extend(origin.strip() for origin in configured.split(",") if origin.strip())
@@ -142,6 +143,12 @@ def health() -> dict:
         ),
         "warnings": warnings,
     }
+
+
+@app.get("/api/auth/session")
+def auth_session() -> dict:
+    """Return a lightweight success response after middleware validates auth."""
+    return {"ok": True, "status": "authenticated"}
 
 
 @app.on_event("startup")
