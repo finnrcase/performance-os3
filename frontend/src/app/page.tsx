@@ -1150,6 +1150,39 @@ function retryAfterMs(header: string | null): number | null {
   return null;
 }
 
+class ApiRequestError extends Error {
+  readonly status: number;
+  readonly path: string;
+
+  constructor(path: string, status: number, detail: string) {
+    super(`${path} returned ${status}: ${detail}`);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.path = path;
+  }
+}
+
+function isAuthFailureReason(reason: string) {
+  const lowered = reason.toLowerCase();
+  return (
+    lowered.includes("returned 401")
+    || lowered.includes("returned 403")
+    || lowered.includes("authentication required")
+    || lowered.includes("session expired")
+    || lowered.includes("invalid session")
+    || lowered.includes("unauthor")
+    || lowered.includes("forbidden")
+  );
+}
+
+function scheduleLoginRedirect() {
+  window.setTimeout(() => {
+    const loginUrl = new URL("/login", window.location.origin);
+    loginUrl.searchParams.set("next", window.location.pathname);
+    window.location.assign(loginUrl.toString());
+  }, 250);
+}
+
 async function fetchWithTimeout(
   input: RequestInfo | URL,
   init: RequestInit = {},
@@ -1197,7 +1230,7 @@ async function apiGet<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" });
   if (!response.ok) {
     console.warn(`[apiGet] ${url} -> HTTP ${response.status}`);
-    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
+    throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
   }
   const text = await response.text();
   try {
@@ -1231,7 +1264,7 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
     body: JSON.stringify(body),
   });
   if (!response.ok) {
-    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
+    throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
   }
   return response.json() as Promise<T>;
 }
@@ -1239,7 +1272,7 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
 async function apiDelete<T>(path: string): Promise<T> {
   const response = await fetchWithTimeout(apiUrl(path), { method: "DELETE", credentials: "include" });
   if (!response.ok) {
-    throw new Error(`${path} returned ${response.status}: ${await apiErrorMessage(response)}`);
+    throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
   }
   return response.json() as Promise<T>;
 }
@@ -1255,8 +1288,7 @@ async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
     UPLOAD_API_TIMEOUT_MS,
   );
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`${path} returned ${response.status}: ${text}`);
+    throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
   }
   return response.json() as Promise<T>;
 }
@@ -6998,10 +7030,11 @@ export default function Home() {
     if (requiredFailures.length > 0) {
       const joined = requiredReasons.join(" | ");
       let hint: string;
-      if (joined.includes("429") || joined.includes("rate limit") || joined.includes("too many requests")) {
+      if (requiredReasons.some(isAuthFailureReason)) {
+        hint = "Session expired / please log in again.";
+        scheduleLoginRedirect();
+      } else if (joined.includes("429") || joined.includes("rate limit") || joined.includes("too many requests")) {
         hint = "The server is temporarily rate limiting requests (not your account). Wait a moment and click Retry.";
-      } else if (joined.includes("401") || joined.includes("403") || joined.includes("unauthor") || joined.includes("forbidden")) {
-        hint = "Your session may have expired — please log in again.";
       } else if (joined.includes("invalid json") || joined.includes("unexpected token")) {
         hint = "The backend responded but the data could not be read (invalid response). Click Retry.";
       } else if (joined.includes("timed out") || joined.includes("timeout") || joined.includes("abort")) {

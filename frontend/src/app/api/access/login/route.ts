@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-
-const ACCESS_COOKIE = "performance_os_access";
-const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30;
+import { ACCESS_COOKIE, SESSION_MAX_AGE_SECONDS, createSessionToken } from "@/lib/session-auth";
 
 function missingAuthVariables() {
   return [
@@ -25,18 +23,6 @@ function setupErrorResponse() {
     },
     { status: 500 },
   );
-}
-
-async function signSession(timestamp: string, secret: string) {
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signature = await crypto.subtle.sign("HMAC", key, encoder.encode(timestamp));
-  return btoa(String.fromCharCode(...new Uint8Array(signature))).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
-}
-
-async function createSessionToken(secret: string) {
-  const timestamp = Date.now().toString();
-  return `${timestamp}.${await signSession(timestamp, secret)}`;
 }
 
 export async function GET() {

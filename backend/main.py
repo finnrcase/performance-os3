@@ -58,7 +58,16 @@ app = FastAPI(
 
 
 def _cors_origins() -> list[str]:
-    configured = os.getenv("CORS_ALLOW_ORIGINS", "") or os.getenv("FRONTEND_ORIGIN", "")
+    configured = ",".join(
+        value
+        for value in [
+            os.getenv("CORS_ALLOW_ORIGINS", ""),
+            os.getenv("FRONTEND_ORIGIN", ""),
+            os.getenv("NEXT_PUBLIC_APP_URL", ""),
+            f"https://{os.getenv('VERCEL_URL', '').strip()}" if os.getenv("VERCEL_URL", "").strip() else "",
+        ]
+        if value
+    )
     origins = [
         "http://localhost:3000",
         "http://localhost:3001",
