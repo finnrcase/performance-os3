@@ -1,17 +1,19 @@
+import path from "node:path";
 import { defineConfig, devices } from "@playwright/test";
 
 const frontendPort = Number(process.env.PLAYWRIGHT_FRONTEND_PORT ?? 3000);
 const backendPort = Number(process.env.PLAYWRIGHT_BACKEND_PORT ?? 8001);
 const appPassword = process.env.PLAYWRIGHT_APP_PASSWORD ?? "playwright-password";
 const sessionSecret = process.env.PLAYWRIGHT_SESSION_SECRET ?? "playwright-session-secret-for-performance-os";
+const repoRoot = path.resolve(process.cwd(), "..");
 const backendUrl = `http://127.0.0.1:${backendPort}`;
 const frontendUrl = `http://127.0.0.1:${frontendPort}`;
-const dataDir = process.env.PLAYWRIGHT_DATA_DIR ?? `${process.cwd()}/.playwright-data`;
+const dataDir = process.env.PLAYWRIGHT_DATA_DIR ?? path.join(repoRoot, ".playwright-data");
 const baseEnv = { ...process.env };
 delete baseEnv.FORCE_COLOR;
 const frontendCommand =
   process.env.PLAYWRIGHT_FRONTEND_COMMAND ??
-  `npm --prefix frontend run start -- --hostname 127.0.0.1 --port ${frontendPort}`;
+  `npm run start -- --hostname 127.0.0.1 --port ${frontendPort}`;
 
 const sharedEnv = {
   ...baseEnv,
@@ -28,7 +30,7 @@ const sharedEnv = {
 };
 
 export default defineConfig({
-  testDir: "./e2e",
+  testDir: "../e2e",
   timeout: 120_000,
   expect: { timeout: 20_000 },
   fullyParallel: false,
@@ -45,6 +47,7 @@ export default defineConfig({
       url: `${backendUrl}/health`,
       timeout: 120_000,
       reuseExistingServer: !process.env.CI,
+      cwd: repoRoot,
       env: sharedEnv,
     },
     {
@@ -52,6 +55,7 @@ export default defineConfig({
       url: frontendUrl,
       timeout: 120_000,
       reuseExistingServer: !process.env.CI,
+      cwd: process.cwd(),
       env: sharedEnv,
     },
   ],
