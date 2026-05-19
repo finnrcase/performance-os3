@@ -66,6 +66,7 @@ DOCUMENT_TABLES = {
 
 ALL_DATASET_TABLES = sorted({*DATAFRAME_TABLES.values(), *DOCUMENT_TABLES.values()})
 DB_CONNECT_TIMEOUT_SECONDS = 10
+MAX_STATEMENT_TIMEOUT_MS = 120_000
 
 LOWERCASE_KEY_FIELDS = {
     "food_name",
@@ -87,6 +88,10 @@ def _stable_text(value: Any, *, lowercase: bool = False) -> str:
     if text.lower() in {"", "nan", "none", "<na>", "nat"}:
         return ""
     return text.lower() if lowercase else text
+
+
+def _statement_timeout_ms(value: int | str | None) -> int:
+    return max(1, min(int(value or 1), MAX_STATEMENT_TIMEOUT_MS))
 
 
 def _composite_key(dataset: str, record: dict[str, Any], fields: list[str]) -> str | None:
@@ -384,7 +389,8 @@ def load_dataframe_recent(
             with _connect() as conn:
                 with conn.cursor() as cur:
                     if statement_timeout_ms:
-                        cur.execute("SET LOCAL statement_timeout = %s", (f"{max(int(statement_timeout_ms), 1)}ms",))
+                        timeout_ms = _statement_timeout_ms(statement_timeout_ms)
+                        cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{timeout_ms}ms",))
                     cur.execute(
                         f"""
                         SELECT data

@@ -12,6 +12,7 @@ class FakeCursor:
     def __init__(self):
         self.executed: list[tuple[str, object]] = []
         self.batches: list[tuple[str, list[object]]] = []
+        self.rows: list[tuple[object]] = []
 
     def __enter__(self):
         return self
@@ -24,6 +25,9 @@ class FakeCursor:
 
     def executemany(self, sql, params):
         self.batches.append((" ".join(str(sql).split()), list(params)))
+
+    def fetchall(self):
+        return self.rows
 
 
 class FakeConnection:
@@ -80,6 +84,18 @@ class StoragePostgresAdapterTest(unittest.TestCase):
         self.assertIn("ON CONFLICT (row_key) WHERE row_key IS NOT NULL", statements)
         self.assertNotIn("TRUNCATE", statements)
         self.assertTrue(fake.committed)
+
+    def test_recent_dataframe_sets_local_statement_timeout_with_set_config(self):
+        fake = FakeConnection()
+
+        with patch("src.storage.use_database", return_value=True), patch("src.storage.ensure_database_schema", return_value=None), patch("src.storage._connect", return_value=fake):
+            result = storage.load_dataframe_recent("nutrition_log", Path("unused.csv"), ["date", "calories"], days=2, max_rows=10, statement_timeout_ms=999999)
+
+        self.assertTrue(result.empty)
+        timeout_sql, timeout_params = fake.cursor_obj.executed[0]
+        self.assertEqual(timeout_sql, "SELECT set_config('statement_timeout', %s, true)")
+        self.assertEqual(timeout_params, ("120000ms",))
+        self.assertNotIn("SET LOCAL", " ".join(sql for sql, _ in fake.cursor_obj.executed))
 
 
 if __name__ == "__main__":

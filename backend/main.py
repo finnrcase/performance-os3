@@ -1353,7 +1353,7 @@ def _build_dashboard_core_payload() -> dict:
         dashboard_timings_ms,
         lambda: _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today),
         lambda: _lift_performance_tile_core(training_df, today),
-        timeout_ms=400,
+        timeout_ms=2000,
     )
     if not isinstance(lift_tile, dict):
         lift_tile = _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today)
