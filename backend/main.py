@@ -134,8 +134,8 @@ CORE_TRAINING_DAYS = 90
 CORE_TRAINING_MAX_ROWS = 5000
 GOALS_TRAINING_DAYS = 90
 WORKLOAD_TRAINING_DAYS = 84
-CORE_BLOCK_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_BLOCK_TIMEOUT_MS", "900"))
-CORE_DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_DB_TIMEOUT_MS", "750"))
+CORE_BLOCK_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_BLOCK_TIMEOUT_MS", "3000"))
+CORE_DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_DB_TIMEOUT_MS", "2500"))
 CORE_BLOCK_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("DASHBOARD_CORE_WORKERS", "4")), thread_name_prefix="dashboard-core")
 CORE_REQUIRED_BLOCKS = {
     "dashboard_core",
@@ -1353,7 +1353,7 @@ def _build_dashboard_core_payload() -> dict:
         dashboard_timings_ms,
         lambda: _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today),
         lambda: _lift_performance_tile_core(training_df, today),
-        timeout_ms=400,
+        timeout_ms=2000,
     )
     if not isinstance(lift_tile, dict):
         lift_tile = _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today)
