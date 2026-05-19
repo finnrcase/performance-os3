@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Download,
   Dumbbell,
+  ExternalLink,
   Gauge,
   HeartPulse,
   Pencil,
@@ -1369,6 +1370,9 @@ async function trackedApiGet<T>(
 
   try {
     const url = apiUrl(meta.path);
+    if (meta.key === "dashboard_core") {
+      console.info("[startup] requesting dashboard core", url);
+    }
     const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" }, timeoutMs);
     const responseText = await response.text();
     const durationMs = Math.round(performance.now() - started);
@@ -7372,10 +7376,16 @@ function StartupDebugPage({
           eyebrow="Diagnostics"
           title="Startup Debug"
           action={
-            <button type="button" onClick={onRetry} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-              <RefreshCw className="h-4 w-4" />
-              Retry startup
-            </button>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => window.open("/api/debug/proxy", "_blank", "noopener,noreferrer")} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                <ExternalLink className="h-4 w-4" />
+                Proxy probe
+              </button>
+              <button type="button" onClick={onRetry} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                <RefreshCw className="h-4 w-4" />
+                Retry startup
+              </button>
+            </div>
           }
         />
         {latest.length ? (
