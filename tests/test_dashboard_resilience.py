@@ -68,6 +68,36 @@ class DashboardResilienceTest(unittest.TestCase):
         self.assertEqual(debug.json()["status"], "degraded")
         self.assertTrue(any(block["block"] == "adaptive_recommendation" for block in debug.json()["blocks"]))
 
+    def test_dashboard_core_skips_expensive_analytics(self):
+        def should_not_run(*args, **kwargs):
+            raise AssertionError("advanced analytics should not run during dashboard core startup")
+
+        with (
+            patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True),
+            patch("backend.main.load_nutrition_log", return_value=pd.DataFrame(columns=NUTRITION_COLUMNS)),
+            patch("backend.main.load_body_metrics", return_value=pd.DataFrame(columns=BODY_METRICS_COLUMNS)),
+            patch("backend.main.load_training_log", return_value=pd.DataFrame(columns=TRAINING_COLUMNS)),
+            patch("backend.main.load_recovery_log", side_effect=should_not_run),
+            patch("backend.main.load_sleep_entries", side_effect=should_not_run),
+            patch("backend.main.build_adaptive_nutrition_recommendation", side_effect=should_not_run),
+            patch("backend.main.build_optimization_features", side_effect=should_not_run),
+            patch("backend.main.generate_personal_response_learning", side_effect=should_not_run),
+            patch("backend.main.generate_weekly_performance_report", side_effect=should_not_run),
+            patch("backend.main.analyze_muscle_balance", side_effect=should_not_run),
+            patch("backend.main.generate_extra_run_readiness", side_effect=should_not_run),
+            patch("backend.main.load_hevy_sync_state", return_value={"last_sync_at": "", "last_event_cursor": "", "last_error": "", "last_result": {}}),
+        ):
+            self.client.cookies.set(ACCESS_COOKIE, create_session_token(TEST_SESSION_SECRET))
+            response = self.client.get("/api/dashboard/core")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["debug"]["mode"], "core")
+        self.assertEqual(payload["counts"]["nutrition"], 0)
+        self.assertIn("nutrition_today", payload)
+        self.assertIn("latest_workout", payload)
+        self.assertEqual(payload["strength_trend_summary"]["label"], "deferred")
+
     def test_dashboard_malformed_rows_do_not_500(self):
         nutrition_row = {column: None for column in NUTRITION_COLUMNS}
         nutrition_row.update({"date": "not-a-date", "food_name": "bad row", "calories": "NaN-ish", "protein": object()})

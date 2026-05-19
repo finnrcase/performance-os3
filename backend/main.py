@@ -792,6 +792,155 @@ def _dashboard_context() -> dict:
     }
 
 
+def _bodyweight_snapshot(body_metrics_df: pd.DataFrame) -> tuple[float | None, list[dict]]:
+    if body_metrics_df.empty:
+        return None, []
+    bodyweight_clean = body_metrics_df.copy()
+    bodyweight_clean["date"] = pd.to_datetime(bodyweight_clean.get("date"), errors="coerce")
+    bodyweight_clean["bodyweight"] = pd.to_numeric(bodyweight_clean.get("bodyweight"), errors="coerce")
+    bodyweight_clean = bodyweight_clean.dropna(subset=["date", "bodyweight"]).sort_values("date")
+    if bodyweight_clean.empty:
+        return None, []
+    latest = float(bodyweight_clean.iloc[-1]["bodyweight"])
+    bodyweight_clean["date"] = bodyweight_clean["date"].dt.date.astype(str)
+    return latest, dataframe_records(bodyweight_clean.tail(30))
+
+
+def _latest_workout_snapshot(training_df: pd.DataFrame) -> dict | None:
+    if training_df.empty:
+        return None
+    training_clean = training_df.copy()
+    training_clean["date"] = pd.to_datetime(training_clean.get("date"), errors="coerce")
+    training_clean = training_clean.dropna(subset=["date"])
+    if training_clean.empty:
+        return None
+    return dataframe_records(training_clean.sort_values("date").tail(1))[0]
+
+
+def _build_dashboard_core_payload() -> dict:
+    """Return a fast startup dashboard payload without expensive analytics."""
+    started = time.perf_counter()
+    today = pd.Timestamp.today().date().isoformat()
+    dashboard_errors: list[dict] = []
+    dashboard_status: dict[str, bool] = {}
+    dashboard_timings_ms: dict[str, float] = {}
+
+    nutrition_df = _load_dashboard_frame("nutrition_loaded", load_nutrition_log, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", load_training_log, TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+
+    goals = _safe_dashboard_block(
+        "goals_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        _fallback_goals,
+        lambda: build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=pd.DataFrame(columns=TRAINING_COLUMNS)),
+    )
+    if not isinstance(goals, dict):
+        goals = _fallback_goals()
+    targets = _safe_dashboard_block(
+        "targets_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _fallback_targets(goals),
+        lambda: load_nutrition_targets() or _fallback_targets(goals),
+    )
+    if not isinstance(targets, dict):
+        targets = _fallback_targets(goals)
+    nutrition_totals = _safe_dashboard_block(
+        "nutrition_today_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
+        lambda: calculate_daily_totals(nutrition_df, today),
+    )
+    latest_bodyweight, bodyweight_trend = _safe_dashboard_block(
+        "bodyweight_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: (None, []),
+        lambda: _bodyweight_snapshot(body_metrics_df),
+    )
+    latest_workout = _safe_dashboard_block(
+        "latest_workout_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: None,
+        lambda: _latest_workout_snapshot(training_df),
+    )
+
+    food_tile = _food_dashboard_tile(nutrition_totals, targets)
+    weight_tile = _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today)
+    lift_tile = _safe_dashboard_block(
+        "lift_tile_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today),
+        lambda: _lift_performance_tile(training_df, today),
+    )
+    if not isinstance(lift_tile, dict):
+        lift_tile = _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today)
+
+    payload = {
+        "date": today,
+        "food": food_tile,
+        "weight": weight_tile,
+        "lift_performance": lift_tile,
+        "workout_quality": _fallback_workout_quality(),
+        "todays_action": _fallback_todays_action(),
+        "weekly_report": _fallback_weekly_report(),
+        "recovery": {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        "prs": {"bench_press": None, "mile_time": None},
+        "goals": goals,
+        "targets": targets,
+        "base_targets": targets,
+        "training_workload": _fallback_training_workload(),
+        "nutrition_today": nutrition_totals,
+        "latest_bodyweight": latest_bodyweight,
+        "bodyweight_trend": bodyweight_trend,
+        "weight_feedback": _fallback_weight_feedback(),
+        "latest_recovery": None,
+        "recovery_trend": [],
+        "latest_workout": latest_workout,
+        "strength_trend_summary": {"exercise": "", "label": "deferred", "summary": "Strength trends hydrate after startup."},
+        "muscle_balance_warning": None,
+        "ai_insight_preview": None,
+        "training_volume": [],
+        "personal_records": _fallback_personal_records(),
+        "lean_bulk_decision": _fallback_lean_bulk_decision(targets),
+        "adaptive_recommendation": _fallback_adaptive_recommendation(targets),
+        "personal_learning": _fallback_personal_learning(),
+        "optimization": _fallback_optimization_features(targets),
+        "recommendation": _fallback_performance_plan(),
+        "counts": {
+            "nutrition": len(nutrition_df),
+            "body_metrics": len(body_metrics_df),
+            "recovery": 0,
+            "sleep": 0,
+            "training": len(training_df),
+        },
+        "errors": _failed_dashboard_blocks(dashboard_errors),
+        "debug": {
+            "dashboard_status": _dashboard_status_label(dashboard_errors),
+            "mode": "core",
+            "errors": _failed_dashboard_blocks(dashboard_errors),
+            "blocks": dashboard_errors,
+            "hevy_sync": _safe_hevy_sync_debug(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "status": dashboard_status,
+            "timings_ms": dashboard_timings_ms,
+            "total_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        },
+    }
+    return payload
+
+
 def _build_dashboard_payload() -> dict:
     """Return local-first dashboard data for the Next.js frontend."""
     context = _dashboard_context()
@@ -1282,6 +1431,26 @@ def _build_dashboard_payload() -> dict:
         },
     }
     return payload
+
+
+@app.get("/api/dashboard/core")
+def dashboard_core() -> dict:
+    """Return the fast startup dashboard payload with no advanced analytics."""
+    started = time.perf_counter()
+    logger.info("Dashboard core request started.")
+    try:
+        payload = _build_dashboard_core_payload()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Dashboard core request fell back to core-safe payload.")
+        payload = _core_dashboard_fallback(exc, elapsed_ms)
+        payload.setdefault("debug", {})["mode"] = "core_fallback"
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    payload.setdefault("debug", {})
+    payload["debug"]["total_duration_ms"] = elapsed_ms
+    status_label = payload.get("debug", {}).get("dashboard_status", "ok")
+    logger.info("Dashboard core request completed in %.1f ms with status=%s", elapsed_ms, status_label)
+    return _json_safe(payload)
 
 
 @app.get("/api/dashboard")

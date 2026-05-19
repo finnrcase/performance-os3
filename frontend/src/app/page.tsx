@@ -44,8 +44,6 @@ import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 function apiUrl(path: string) {
   return publicApiUrl(path);
 }
-let hevyAutoSyncStarted = false;
-
 const navigation = [
   { id: "dashboard", label: "Dashboard", icon: Gauge },
   { id: "food", label: "Food", icon: Utensils },
@@ -1132,8 +1130,8 @@ function readStoredAccentTheme(): AccentTheme {
   return sanitizeAccentTheme(window.localStorage.getItem(ACCENT_THEME_STORAGE_KEY));
 }
 
-const DEFAULT_API_TIMEOUT_MS = 90_000;
-const CORE_API_TIMEOUT_MS = 90_000;
+const DEFAULT_API_TIMEOUT_MS = 120_000;
+const STARTUP_API_TIMEOUT_MS = 120_000;
 const SETTINGS_API_TIMEOUT_MS = 45_000;
 const UPLOAD_API_TIMEOUT_MS = 120_000;
 const COLD_START_RETRY_DELAY_MS = 6_000;
@@ -7136,7 +7134,6 @@ export default function Home() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
   const [rateLimited, setRateLimited] = useState(false);
-  const hevyAutoSyncRef = useRef(false);
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
@@ -7195,6 +7192,109 @@ export default function Home() {
     }
   }, []);
 
+  const loadDeferredData = useCallback(async () => {
+    const deferredSteps: Array<{
+      key: string;
+      label: string;
+      run: () => Promise<void>;
+    }> = [
+      {
+        key: "dashboard_full",
+        label: "Advanced dashboard",
+        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard", DEFAULT_API_TIMEOUT_MS)),
+      },
+      {
+        key: "integration_status",
+        label: "Integration status",
+        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status?external_checks=false", SETTINGS_API_TIMEOUT_MS)),
+      },
+      {
+        key: "nutrition_logs",
+        label: "Nutrition logs",
+        run: async () => {
+          const data = await apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs");
+          setNutritionLogs(data.items);
+        },
+      },
+      {
+        key: "nutrition_history",
+        label: "Nutrition history",
+        run: async () => {
+          const data = await apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history");
+          setNutritionHistory(data.items);
+          setNutritionAdherence(data.adherence);
+        },
+      },
+      {
+        key: "nutrition_shortcuts",
+        label: "Nutrition shortcuts",
+        run: async () => setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts")),
+      },
+      {
+        key: "body_metrics",
+        label: "Body metrics",
+        run: async () => {
+          const data = await apiGet<{ items: BodyMetricEntry[] }>("/api/body-metrics");
+          setBodyMetrics(data.items);
+        },
+      },
+      {
+        key: "recovery_logs",
+        label: "Recovery logs",
+        run: async () => {
+          const data = await apiGet<{ items: RecoveryEntry[] }>("/api/recovery/logs");
+          setRecoveryLogs(data.items);
+        },
+      },
+      {
+        key: "sleep",
+        label: "Sleep",
+        run: async () => {
+          const data = await apiGet<{ items: SleepEntry[] }>("/api/recovery/sleep");
+          setSleepEntries(data.items);
+        },
+      },
+      {
+        key: "training_history",
+        label: "Training history",
+        run: async () => {
+          const data = await apiGet<{ items: WorkoutGroup[] }>("/api/training/history");
+          setWorkoutHistory(data.items);
+        },
+      },
+      {
+        key: "strength_trends",
+        label: "Strength trends",
+        run: async () => {
+          const data = await apiGet<StrengthTrendResponse>(strengthTrendPath());
+          setStrengthTrends(data);
+          setSelectedExercise((current) => current || data.selected_exercise || data.exercise_options[0] || "");
+        },
+      },
+      {
+        key: "hevy_sync_status",
+        label: "Hevy sync status",
+        run: async () => setHevySync(await apiGet<HevySyncStatus>("/api/training/sync/hevy/status")),
+      },
+    ];
+
+    const failures: string[] = [];
+    for (const step of deferredSteps) {
+      const started = performance.now();
+      try {
+        await step.run();
+        console.info(`[startup] ${step.key} loaded in ${Math.round(performance.now() - started)} ms`);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        console.error(`[startup] deferred ${step.key} failed - backend ${publicApiBaseLabel()} - ${reason}`);
+        failures.push(`${step.label}: ${reason}`);
+      }
+    }
+    if (failures.length > 0) {
+      setLoadFailures((current) => Array.from(new Set([...current, ...failures])));
+    }
+  }, [applySettingsData, strengthTrendPath]);
+
   const refreshAll = useCallback(async (options?: { allowColdStartRetry?: boolean }) => {
     const maxAttempts = options?.allowColdStartRetry === false ? 1 : 2;
     setApiError(null);
@@ -7215,112 +7315,37 @@ export default function Home() {
       run: () => Promise<void>;
     }> = [
       {
-        key: "dashboard",
+        key: "dashboard_core",
         label: "Dashboard",
         required: true,
-        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard", CORE_API_TIMEOUT_MS)),
+        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard/core", STARTUP_API_TIMEOUT_MS)),
       },
       {
         key: "goals",
         label: "Goals & targets",
         required: true,
         run: async () => {
-          const goalsData = await apiGet<GoalsResponse>("/api/goals", CORE_API_TIMEOUT_MS);
+          const goalsData = await apiGet<GoalsResponse>("/api/goals", STARTUP_API_TIMEOUT_MS);
           setForms((state) => ({ ...state, goals: goalsData.goals }));
         },
       },
       {
-        // Settings/integrations status is NOT core dashboard data — it only
-        // powers the Integrations page. It can also be slow (the backend does
-        // live OAuth token refreshes), so a failure here is a soft warning,
-        // never the red "core data failed / backend offline" banner.
         key: "settings",
         label: "Settings",
         required: false,
-        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status", SETTINGS_API_TIMEOUT_MS)),
-      },
-      {
-        key: "nutrition_logs",
-        label: "Nutrition logs",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs");
-          setNutritionLogs(data.items);
-        },
-      },
-      {
-        key: "nutrition_history",
-        label: "Nutrition history",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history");
-          setNutritionHistory(data.items);
-          setNutritionAdherence(data.adherence);
-        },
-      },
-      {
-        key: "nutrition_shortcuts",
-        label: "Nutrition shortcuts",
-        required: false,
-        run: async () => setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts")),
-      },
-      {
-        key: "body_metrics",
-        label: "Body metrics",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: BodyMetricEntry[] }>("/api/body-metrics");
-          setBodyMetrics(data.items);
-        },
-      },
-      {
-        key: "recovery_logs",
-        label: "Recovery logs",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: RecoveryEntry[] }>("/api/recovery/logs");
-          setRecoveryLogs(data.items);
-        },
-      },
-      {
-        key: "sleep",
-        label: "Sleep",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: SleepEntry[] }>("/api/recovery/sleep");
-          setSleepEntries(data.items);
-        },
-      },
-      {
-        key: "training_history",
-        label: "Training history",
-        required: false,
-        run: async () => {
-          const data = await apiGet<{ items: WorkoutGroup[] }>("/api/training/history");
-          setWorkoutHistory(data.items);
-        },
-      },
-      {
-        key: "strength_trends",
-        label: "Strength trends",
-        required: false,
-        run: async () => {
-          const data = await apiGet<StrengthTrendResponse>(strengthTrendPath());
-          setStrengthTrends(data);
-          setSelectedExercise((current) => current || data.selected_exercise || data.exercise_options[0] || "");
-        },
-      },
-      {
-        key: "hevy_sync_status",
-        label: "Hevy sync status",
-        required: false,
-        run: async () => setHevySync(await apiGet<HevySyncStatus>("/api/training/sync/hevy/status")),
+        run: async () => applySettingsData(await apiGet<SettingsData>("/api/settings", SETTINGS_API_TIMEOUT_MS)),
       },
     ];
 
+    const runStartupStep = async (step: (typeof steps)[number]) => {
+      const started = performance.now();
+      await step.run();
+      console.info(`[startup] ${step.key} loaded in ${Math.round(performance.now() - started)} ms`);
+    };
+
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      setLoadingMessage(attempt === 1 ? "Waking backend..." : "Backend is waking up... retrying core data.");
-      const results = await Promise.allSettled(steps.map((step) => step.run()));
+      setLoadingMessage(attempt === 1 ? "Loading core dashboard..." : "Retrying core dashboard...");
+      const results = await Promise.allSettled(steps.map(runStartupStep));
 
       const failures: string[] = [];
       const requiredFailures: string[] = [];
@@ -7346,8 +7371,8 @@ export default function Home() {
           setLoading(true);
           setLoadingMessage(
             failureKind === "timeout"
-              ? "Waking backend... first response was slow. Retrying in a few seconds."
-              : "Waking backend... reconnecting in a few seconds.",
+              ? "Core startup data was slow. Retrying in a few seconds."
+              : "Reconnecting to core startup data in a few seconds.",
           );
           await sleep(COLD_START_RETRY_DELAY_MS);
           continue;
@@ -7363,12 +7388,15 @@ export default function Home() {
         if (failures.length > 0) {
           setApiError(null);
         }
+        window.setTimeout(() => {
+          void loadDeferredData();
+        }, 250);
       }
       setLoading(false);
       return;
     }
     setLoading(false);
-  }, [applySettingsData, strengthTrendPath]);
+  }, [applySettingsData, loadDeferredData]);
 
   useEffect(() => {
     const id = window.setTimeout(() => {
@@ -7446,15 +7474,6 @@ export default function Home() {
       setHevySyncing(false);
     }
   }, [refreshAll]);
-
-  useEffect(() => {
-    if (hevyAutoSyncStarted || hevyAutoSyncRef.current || (activePage !== "dashboard" && activePage !== "training")) {
-      return;
-    }
-    hevyAutoSyncStarted = true;
-    hevyAutoSyncRef.current = true;
-    void syncHevyNow(false);
-  }, [activePage, syncHevyNow]);
 
   const validateNutritionForm = () => {
     const entry = forms.nutrition;
