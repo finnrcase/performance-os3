@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, mark_dataframe_deletes, save_dataframe
+from src.storage import load_dataframe, load_dataframe_recent, mark_dataframe_deletes, save_dataframe
 
 NUTRITION_COLUMNS = [
     "food_log_id",
@@ -274,7 +274,16 @@ def calculate_daily_totals(entries_df, date) -> dict:
 def load_nutrition_log() -> pd.DataFrame:
     """Load the local nutrition log, creating an empty frame if needed."""
     entries_df = load_dataframe("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS)
+    return _normalize_nutrition_log(entries_df, persist_backfill=True)
 
+
+def load_recent_nutrition_log(days: int = 14, max_rows: int = 5000) -> pd.DataFrame:
+    """Load a bounded nutrition slice for startup/dashboard requests."""
+    entries_df = load_dataframe_recent("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS, days=days, max_rows=max_rows)
+    return _normalize_nutrition_log(entries_df, persist_backfill=False)
+
+
+def _normalize_nutrition_log(entries_df: pd.DataFrame, *, persist_backfill: bool) -> pd.DataFrame:
     needs_id_backfill = False
     for column in NUTRITION_COLUMNS:
         if column not in entries_df.columns:
@@ -341,7 +350,7 @@ def load_nutrition_log() -> pd.DataFrame:
         .isin(["true", "1", "yes"])
     )
 
-    if needs_id_backfill:
+    if needs_id_backfill and persist_backfill:
         save_nutrition_log(entries_df)
 
     return entries_df

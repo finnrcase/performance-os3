@@ -36,12 +36,18 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
   }
 
   try {
-    const target = new URL(`${backendApiBaseUrl()}/api/${path.map(encodeURIComponent).join("/")}`);
+    const joinedPath = path.map(encodeURIComponent).join("/");
+    const target = new URL(`${backendApiBaseUrl()}/api/${joinedPath}`);
     request.nextUrl.searchParams.forEach((value, key) => {
       target.searchParams.append(key, value);
     });
     const method = request.method.toUpperCase();
     const body = method === "GET" || method === "HEAD" ? undefined : await request.arrayBuffer();
+    const shouldTraceDashboardCore = joinedPath === "dashboard/core";
+    const started = performance.now();
+    if (shouldTraceDashboardCore) {
+      console.info(`[api-proxy] ${method} /api/dashboard/core -> ${target.toString()}`);
+    }
     const backendResponse = await fetch(target, {
       method,
       headers: forwardedHeaders(request),
@@ -49,6 +55,9 @@ async function proxyToBackend(request: NextRequest, context: RouteContext) {
       cache: "no-store",
       redirect: "manual",
     });
+    if (shouldTraceDashboardCore) {
+      console.info(`[api-proxy] ${method} /api/dashboard/core <- ${backendResponse.status} in ${Math.round(performance.now() - started)}ms`);
+    }
 
     const responseHeaders = new Headers(backendResponse.headers);
     responseHeaders.delete("content-encoding");

@@ -33,7 +33,7 @@ from src.analytics.weekly_report import generate_weekly_performance_report
 from src.analytics.workout_quality import calculate_workout_quality
 from src.body_metrics import BODY_METRICS_COLUMNS, load_body_metrics
 from src.goals import build_automatic_goals, load_user_goals
-from src.nutrition import NUTRITION_COLUMNS, calculate_daily_totals, load_nutrition_log
+from src.nutrition import NUTRITION_COLUMNS, calculate_daily_totals, load_nutrition_log, load_recent_nutrition_log
 from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets, load_nutrition_targets
 from src.optimization.adaptive_nutrition_engine import build_adaptive_nutrition_recommendation
 from src.optimization.high_value_features import build_optimization_features
@@ -426,6 +426,10 @@ def _load_dashboard_frame(
     value = _safe_dashboard_block(name, dashboard_errors, dashboard_status, dashboard_timings_ms, fallback, loader)
     if isinstance(value, pd.DataFrame):
         logger.info("%s rows: %s", name, len(value))
+        for entry in reversed(dashboard_errors):
+            if entry.get("block") == name:
+                entry["rows"] = len(value)
+                break
         return value
     return fallback()
 
@@ -969,7 +973,14 @@ def _build_dashboard_core_payload() -> dict:
     dashboard_status: dict[str, bool] = {}
     dashboard_timings_ms: dict[str, float] = {}
 
-    nutrition_df = _load_dashboard_frame("nutrition_loaded", load_nutrition_log, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    logger.info(
+        "Dashboard core blocks configured: nutrition_recent=%sd/%s rows, training_recent=%sd/%s rows; advanced analytics disabled.",
+        7,
+        2000,
+        CORE_TRAINING_DAYS,
+        CORE_TRAINING_MAX_ROWS,
+    )
+    nutrition_df = _load_dashboard_frame("nutrition_loaded", lambda: load_recent_nutrition_log(days=7, max_rows=2000), NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(CORE_TRAINING_DAYS, CORE_TRAINING_MAX_ROWS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
 
@@ -1018,8 +1029,26 @@ def _build_dashboard_core_payload() -> dict:
         lambda: _latest_workout_snapshot(training_df),
     )
 
-    food_tile = _food_dashboard_tile(nutrition_totals, targets)
-    weight_tile = _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today)
+    food_tile = _safe_dashboard_block(
+        "food_tile_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _food_dashboard_tile({"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}, targets),
+        lambda: _food_dashboard_tile(nutrition_totals, targets),
+    )
+    if not isinstance(food_tile, dict):
+        food_tile = _food_dashboard_tile({"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}, targets)
+    weight_tile = _safe_dashboard_block(
+        "weight_tile_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today),
+        lambda: _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today),
+    )
+    if not isinstance(weight_tile, dict):
+        weight_tile = _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today)
     lift_tile = _safe_dashboard_block(
         "lift_tile_core",
         dashboard_errors,
@@ -1039,7 +1068,14 @@ def _build_dashboard_core_payload() -> dict:
         "workout_quality": _fallback_workout_quality(),
         "todays_action": _fallback_todays_action(),
         "weekly_report": _fallback_weekly_report(),
-        "recovery": {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        "recovery": _safe_dashboard_block(
+            "recovery_tile_core",
+            dashboard_errors,
+            dashboard_status,
+            dashboard_timings_ms,
+            lambda: {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+            lambda: {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        ),
         "prs": {"bench_press": None, "mile_time": None},
         "goals": goals,
         "targets": targets,
@@ -1079,6 +1115,8 @@ def _build_dashboard_core_payload() -> dict:
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": dashboard_status,
             "timings_ms": dashboard_timings_ms,
+            "core_route": "/api/dashboard/core",
+            "advanced_analytics_disabled": True,
             "total_duration_ms": round((time.perf_counter() - started) * 1000, 1),
         },
     }

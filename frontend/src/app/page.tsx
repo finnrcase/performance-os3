@@ -1372,6 +1372,9 @@ async function trackedApiGet<T>(
     const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" }, timeoutMs);
     const responseText = await response.text();
     const durationMs = Math.round(performance.now() - started);
+    if (meta.key === "dashboard_core") {
+      console.info(`[startup] /api/dashboard/core returned ${response.status} in ${durationMs}ms`, responseText.slice(0, 2000));
+    }
     if (!response.ok) {
       const message = apiErrorMessageFromText(responseText, response.statusText);
       record({
@@ -1417,6 +1420,9 @@ async function trackedApiGet<T>(
     const durationMs = Math.round(performance.now() - started);
     const status = classifyRequestDebugStatus(error);
     const errorMessage = error instanceof Error ? error.message : String(error);
+    if (meta.key === "dashboard_core") {
+      console.error(`[startup] /api/dashboard/core ${status} after ${durationMs}ms: ${errorMessage}`);
+    }
     record({
       ...meta,
       status,

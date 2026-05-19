@@ -75,6 +75,7 @@ class DashboardResilienceTest(unittest.TestCase):
         with (
             patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True),
             patch("backend.main.load_nutrition_log", return_value=pd.DataFrame(columns=NUTRITION_COLUMNS)),
+            patch("backend.main.load_recent_nutrition_log", return_value=pd.DataFrame(columns=NUTRITION_COLUMNS)),
             patch("backend.main.load_body_metrics", return_value=pd.DataFrame(columns=BODY_METRICS_COLUMNS)),
             patch("backend.main.load_training_log", return_value=pd.DataFrame(columns=TRAINING_COLUMNS)),
             patch("backend.main.load_recovery_log", side_effect=should_not_run),
