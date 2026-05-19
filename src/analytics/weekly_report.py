@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
-from src.training_schedule import is_run_row, is_strength_row
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile
 
 
 def _empty_report() -> dict:
@@ -64,10 +64,11 @@ def _note_number(note: str, key: str) -> float:
 def _source_mask(df: pd.DataFrame, source_name: str) -> pd.Series:
     if df.empty:
         return pd.Series(False, index=df.index)
+    profile = load_training_schedule_profile()
     if source_name == "hevy":
-        return df.apply(is_strength_row, axis=1)
+        return df.apply(lambda row: is_strength_row(row, profile=profile), axis=1)
     if source_name == "strava":
-        return df.apply(is_run_row, axis=1)
+        return df.apply(lambda row: is_run_row(row, profile=profile), axis=1)
     return pd.Series(False, index=df.index)
 
 

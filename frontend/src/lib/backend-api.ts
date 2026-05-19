@@ -22,7 +22,10 @@ export function backendApiBaseUrl() {
     throw new Error(`Backend API URL is invalid: ${cleaned}`, { cause: error });
   }
   if (process.env.NODE_ENV === "production") {
-    if (["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
+    const allowLocalBackend =
+      process.env.ALLOW_LOCAL_BACKEND_API_URL === "1" ||
+      process.env.ALLOW_LOCAL_BACKEND_API_URL === "true";
+    if (!allowLocalBackend && ["localhost", "127.0.0.1", "::1"].includes(parsed.hostname)) {
       throw new Error("Production backend API URL cannot point to localhost.");
     }
   }

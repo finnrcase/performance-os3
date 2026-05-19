@@ -19,6 +19,7 @@ class BodyMetricEntry(BaseModel):
     bodyweight: float
     waist: float | None = None
     estimated_body_fat: float | None = None
+    body_fat_percent: float | None = None
     lean_mass: float | None = None
     fat_mass: float | None = None
     muscle_mass: float | None = None

@@ -102,7 +102,7 @@ class TrainingHistoryConsolidationTest(unittest.TestCase):
         weekly = pd.DataFrame([{"period_start": "2026-01-05", "workout_count": 3}])
         prs = pd.DataFrame([{"exercise": "Bench Press", "estimated_1rm": 275}])
 
-        with patch("backend.routes.training.load_training_log", return_value=raw), patch("backend.routes.training.load_weekly_training_summary", return_value=weekly), patch("backend.routes.training.load_exercise_pr_history", return_value=prs), patch("backend.routes.training._training_summary_status", return_value={"raw_window_days": 180, "total_raw_rows": 1, "recent_raw_rows": 1, "older_raw_rows": 0}):
+        with patch("backend.routes.training.load_training_log", return_value=raw), patch("backend.routes.training.load_raw_hevy_workouts", return_value=pd.DataFrame()), patch("backend.routes.training.load_raw_hevy_sets", return_value=pd.DataFrame()), patch("backend.routes.training.load_weekly_training_summary", return_value=weekly), patch("backend.routes.training.load_exercise_pr_history", return_value=prs), patch("backend.routes.training._training_summary_status", return_value={"raw_window_days": 180, "total_raw_rows": 1, "recent_raw_rows": 1, "older_raw_rows": 0}):
             response = client.get("/api/training/export/hevy-raw")
 
         self.assertEqual(response.status_code, 200)
@@ -112,6 +112,29 @@ class TrainingHistoryConsolidationTest(unittest.TestCase):
         self.assertIn("workouts_summary", workbook.sheetnames)
         self.assertIn("exercise_prs", workbook.sheetnames)
         self.assertIn("weekly_summary", workbook.sheetnames)
+        self.assertIn("metadata", workbook.sheetnames)
+
+    def test_normalized_training_export_returns_excel_workbook(self):
+        client = TestClient(app)
+        configure_test_auth(client)
+        raw = pd.DataFrame([_row(10, "Bench Press", "Chest", "recent-1")], columns=training_module.TRAINING_COLUMNS)
+        weekly = pd.DataFrame([{"period_start": "2026-01-05", "workout_count": 3}])
+        monthly = pd.DataFrame([{"period_start": "2026-01-01", "workout_count": 12}])
+        prs = pd.DataFrame([{"exercise": "Bench Press", "estimated_1rm": 275}])
+        muscle = pd.DataFrame([{"period_type": "weekly", "muscle_group": "Chest"}])
+
+        with patch("backend.routes.training.load_training_log", return_value=raw), patch("backend.routes.training.load_weekly_training_summary", return_value=weekly), patch("backend.routes.training.load_monthly_training_summary", return_value=monthly), patch("backend.routes.training.load_exercise_pr_history", return_value=prs), patch("backend.routes.training.load_muscle_group_volume_history", return_value=muscle), patch("backend.routes.training._training_summary_status", return_value={"cache_health": "ready", "normalized_sets": 1}):
+            response = client.get("/api/training/export/normalized")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("training_normalized_export_", response.headers["content-disposition"])
+        workbook = load_workbook(BytesIO(response.content), read_only=True)
+        self.assertIn("normalized_sets", workbook.sheetnames)
+        self.assertIn("workouts", workbook.sheetnames)
+        self.assertIn("weekly_summary", workbook.sheetnames)
+        self.assertIn("monthly_summary", workbook.sheetnames)
+        self.assertIn("exercise_prs", workbook.sheetnames)
+        self.assertIn("muscle_volume", workbook.sheetnames)
         self.assertIn("metadata", workbook.sheetnames)
 
 

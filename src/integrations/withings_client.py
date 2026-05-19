@@ -411,6 +411,7 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
                 "bodyweight": weight_lb,
                 "waist": None,
                 "estimated_body_fat": round(float(fat_percent), 2) if fat_percent is not None else None,
+                "body_fat_percent": round(float(fat_percent), 2) if fat_percent is not None else None,
                 "lean_mass": lean_mass_lb,
                 "fat_mass": fat_mass_lb,
                 "muscle_mass": parsed.get("muscle_mass_lb"),

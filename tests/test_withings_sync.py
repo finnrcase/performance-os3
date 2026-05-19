@@ -63,6 +63,7 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertAlmostEqual(float(saved["bodyweight"].iloc[0]), 181.88, places=2)
         self.assertAlmostEqual(float(saved["estimated_body_fat"].iloc[0]), 18.75, places=2)
+        self.assertAlmostEqual(float(saved["body_fat_percent"].iloc[0]), 18.75, places=2)
         self.assertAlmostEqual(float(saved["fat_mass"].iloc[0]), 34.1, places=2)
         self.assertAlmostEqual(float(saved["lean_mass"].iloc[0]), 147.78, places=2)
         self.assertAlmostEqual(float(saved["muscle_mass"].iloc[0]), 136.69, places=2)

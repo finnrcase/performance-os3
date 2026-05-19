@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from src.training_schedule import is_run_row, is_strength_row
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile
 
 
 RECOVERY_ANALYTICS_COLUMNS = [
@@ -112,8 +112,9 @@ def _daily_training(training_df: pd.DataFrame) -> pd.DataFrame:
         daily_df["notes"] = ""
     if "workout_type" not in daily_df.columns:
         daily_df["workout_type"] = ""
-    daily_df["is_strength"] = daily_df.apply(is_strength_row, axis=1)
-    daily_df["is_run"] = daily_df.apply(is_run_row, axis=1)
+    profile = load_training_schedule_profile()
+    daily_df["is_strength"] = daily_df.apply(lambda row: is_strength_row(row, profile=profile), axis=1)
+    daily_df["is_run"] = daily_df.apply(lambda row: is_run_row(row, profile=profile), axis=1)
 
     daily_df["volume"] = np.where(
         daily_df["is_strength"],

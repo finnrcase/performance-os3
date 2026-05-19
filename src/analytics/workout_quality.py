@@ -7,7 +7,7 @@ import math
 import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
-from src.training_schedule import is_run_row, is_strength_row
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile
 
 
 def _empty(status: str = "missing") -> dict:
@@ -72,13 +72,15 @@ def _clean_training(training_df: pd.DataFrame) -> pd.DataFrame:
 def _is_run(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(False, index=df.index)
-    return df.apply(is_run_row, axis=1)
+    profile = load_training_schedule_profile()
+    return df.apply(lambda row: is_run_row(row, profile=profile), axis=1)
 
 
 def _is_strength(df: pd.DataFrame) -> pd.Series:
     if df.empty:
         return pd.Series(False, index=df.index)
-    return df.apply(is_strength_row, axis=1)
+    profile = load_training_schedule_profile()
+    return df.apply(lambda row: is_strength_row(row, profile=profile), axis=1)
 
 
 def _pct(current: float, baseline: float) -> float | None:

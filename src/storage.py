@@ -38,6 +38,8 @@ DATAFRAME_TABLES = {
     "monthly_training_summary": "monthly_training_summary",
     "exercise_pr_history": "exercise_pr_history",
     "muscle_group_volume_history": "muscle_group_volume_history",
+    "raw_hevy_workouts": "raw_hevy_workouts",
+    "raw_hevy_sets": "raw_hevy_sets",
 }
 DATAFRAME_DATE_TABLES = {
     "nutrition_log",
@@ -46,6 +48,8 @@ DATAFRAME_DATE_TABLES = {
     "recovery_log",
     "sleep_entries",
     "daily_nutrition_summary",
+    "raw_hevy_workouts",
+    "raw_hevy_sets",
 }
 
 DOCUMENT_TABLES = {
@@ -57,6 +61,7 @@ DOCUMENT_TABLES = {
     "hevy_sync_state": "integration_sync_state",
     "training_schedule_profile": "training_schedule_profiles",
     "training_summary_state": "training_summary_state",
+    "training_cache_metadata": "training_cache_metadata",
 }
 
 ALL_DATASET_TABLES = sorted({*DATAFRAME_TABLES.values(), *DOCUMENT_TABLES.values()})
@@ -120,6 +125,10 @@ def dataframe_row_key(dataset: str, record: dict[str, Any], row_index: int | Non
         return _composite_key(dataset, record, ["exercise", "date", "workout_id"])
     if dataset == "muscle_group_volume_history":
         return _composite_key(dataset, record, ["period_type", "period_start", "muscle_group"])
+    if dataset == "raw_hevy_workouts":
+        return _composite_key(dataset, record, ["hevy_workout_id"])
+    if dataset == "raw_hevy_sets":
+        return _composite_key(dataset, record, ["external_id"]) or _composite_key(dataset, record, ["hevy_workout_id", "exercise_id", "set_index"])
     if dataset in {"ai_food_cache", "usda_food_cache", "verified_food_cache"}:
         for fields in (["cache_key"], ["query"], ["normalized_name"], ["food_name"], ["fdc_id"]):
             key = _composite_key(dataset, record, fields)

@@ -6,7 +6,7 @@ import pandas as pd
 
 from src.analytics.exercise_muscle_map import get_exercise_muscle_group
 from src.analytics.strength_trends import calculate_estimated_1rm, calculate_muscle_group_trend, calculate_strength_trend
-from src.training_schedule import is_run_row, is_strength_row
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile
 
 
 WINDOWS = (7, 14, 28)
@@ -66,10 +66,14 @@ def _note_number(note: str, key: str) -> float:
 def _source_mask(df: pd.DataFrame, value: str) -> pd.Series:
     if df.empty:
         return pd.Series(False, index=df.index)
+    cached_column = "_is_strength_row" if value == "hevy" else "_is_run_row" if value == "strava" else ""
+    if cached_column and cached_column in df.columns:
+        return df[cached_column].fillna(False).astype(bool)
+    profile = load_training_schedule_profile()
     if value == "hevy":
-        return df.apply(is_strength_row, axis=1)
+        return df.apply(lambda row: is_strength_row(row, profile=profile), axis=1)
     if value == "strava":
-        return df.apply(is_run_row, axis=1)
+        return df.apply(lambda row: is_run_row(row, profile=profile), axis=1)
     return pd.Series(False, index=df.index)
 
 
@@ -87,6 +91,14 @@ def _prepare_training(training_df: pd.DataFrame) -> pd.DataFrame:
         df[column] = pd.to_numeric(values, errors="coerce").fillna(0)
     df["volume"] = df["sets"].clip(lower=0) * df["reps"].clip(lower=0) * df["weight"].clip(lower=0)
     df["notes"] = df["notes"].fillna("").astype(str) if "notes" in df.columns else pd.Series("", index=df.index)
+    profile = load_training_schedule_profile()
+    df["_is_run_row"] = df.apply(lambda row: is_run_row(row, profile=profile), axis=1)
+    source = df["source"].fillna("").astype(str).str.lower() if "source" in df.columns else pd.Series("", index=df.index)
+    workout_type = df["workout_type"].fillna("").astype(str).str.lower() if "workout_type" in df.columns else pd.Series("", index=df.index)
+    notes = df["notes"].fillna("").astype(str).str.lower()
+    df["_is_strength_row"] = (~df["_is_run_row"]) & (
+        (source == "hevy") | notes.str.contains("hevy_workout_id=", regex=False) | (workout_type == "strength")
+    )
     return df.sort_values("date")
 
 

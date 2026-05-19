@@ -18,6 +18,7 @@ from src.analytics.training_workload import analyze_training_workload
 from src.integrations.hevy_client import (
     HevyIntegrationError,
     handle_hevy_webhook,
+    has_local_hevy_cache,
     import_hevy_workouts,
     is_hevy_api_configured,
     load_hevy_sync_state,
@@ -36,15 +37,19 @@ from src.training import (
     TRAINING_LOG_PATH,
     add_training_entry,
     consolidate_old_training_history,
+    load_raw_hevy_sets,
+    load_raw_hevy_workouts,
     load_exercise_pr_history,
     load_live_training_log,
     load_monthly_training_summary,
     load_muscle_group_volume_history,
+    load_training_cache_metadata,
     load_training_log,
     load_training_summary_state,
     load_weekly_training_summary,
     move_workout_date,
     recent_training_window,
+    refresh_training_cache_metadata,
     training_raw_window_days,
 )
 from src.storage import count_dataframe_rows
@@ -227,11 +232,33 @@ def _training_summary_status() -> dict:
     prs = load_exercise_pr_history()
     muscle = load_muscle_group_volume_history()
     state = load_training_summary_state()
+    cache_metadata = load_training_cache_metadata()
+    sync_state = load_hevy_sync_state()
+    last_sync_result = sync_state.get("last_result", {}) if isinstance(sync_state.get("last_result", {}), dict) else {}
+    hevy_summary = _hevy_training_summary(recent_df)
+    raw_workout_count = int(cache_metadata.get("raw_workout_count") or 0)
+    raw_set_count = int(cache_metadata.get("raw_set_count") or 0)
     return {
         "raw_window_days": raw_window_days,
         "total_raw_rows": int(total_rows),
         "recent_raw_rows": recent_rows,
         "older_raw_rows": max(int(total_rows) - recent_rows, 0),
+        "last_hevy_sync": cache_metadata.get("last_hevy_sync", ""),
+        "last_hevy_check": sync_state.get("last_sync_at", ""),
+        "last_hevy_error": sync_state.get("last_error", ""),
+        "last_hevy_result": last_sync_result,
+        "last_hevy_new_workouts": int(last_sync_result.get("new_workouts") or 0),
+        "last_hevy_updated_workouts": int(last_sync_result.get("updated_workouts") or 0),
+        "last_hevy_deleted_rows": int(last_sync_result.get("deleted_rows") or 0),
+        "last_hevy_failures": last_sync_result.get("failures", []) if isinstance(last_sync_result.get("failures", []), list) else [],
+        "latest_hevy_workout_date": hevy_summary.get("latest_workout_date", ""),
+        "latest_hevy_workout_title": hevy_summary.get("latest_workout_title", ""),
+        "last_cache_refresh": cache_metadata.get("last_cache_refresh", ""),
+        "raw_hevy_workouts": raw_workout_count,
+        "raw_hevy_sets": raw_set_count,
+        "normalized_workouts": int(cache_metadata.get("normalized_workout_count") or 0),
+        "normalized_sets": int(cache_metadata.get("normalized_set_count") or total_rows),
+        "cache_health": cache_metadata.get("cache_health", "unknown"),
         "weekly_summaries": int(len(weekly)),
         "monthly_summaries": int(len(monthly)),
         "exercise_prs": int(len(prs)),
@@ -257,6 +284,13 @@ def _training_summary_status() -> dict:
                 "workout_id",
                 "source",
             ],
+        },
+        "architecture": {
+            "hevy_role": "ingestion_source_only",
+            "hevy_sync_mode": "incremental_events_manual_webhook_or_external_cron",
+            "startup_source": "local_normalized_training_cache",
+            "live_raw_window_days": raw_window_days,
+            "historical_source": "weekly_monthly_summary_cache",
         },
     }
 
@@ -388,6 +422,7 @@ def consolidate_training_history(cutoff_days: int | None = None) -> dict:
     started = time.perf_counter()
     result = consolidate_old_training_history(cutoff_days=cutoff_days)
     result["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    refresh_training_cache_metadata(load_hevy_sync_state().get("last_sync_at", ""))
     result["status_summary"] = _training_summary_status()
     return result
 
@@ -403,8 +438,17 @@ def export_hevy_raw_training_data():
     """Export all raw training rows and consolidated Hevy summaries."""
     started = time.perf_counter()
     today = pd.Timestamp.today().date().isoformat()
-    raw_df = _expand_note_markers(load_training_log())
-    workouts_df = pd.DataFrame(grouped_workout_history(raw_df)) if not raw_df.empty else pd.DataFrame()
+    raw_workouts_df = load_raw_hevy_workouts()
+    raw_sets_df = load_raw_hevy_sets()
+    normalized_hevy_df = _expand_note_markers(load_training_log())
+    if not normalized_hevy_df.empty:
+        source = normalized_hevy_df["source"].fillna("").astype(str).str.lower() if "source" in normalized_hevy_df.columns else pd.Series("", index=normalized_hevy_df.index)
+        hevy_id = normalized_hevy_df["hevy_workout_id"].fillna("").astype(str).str.strip() if "hevy_workout_id" in normalized_hevy_df.columns else pd.Series("", index=normalized_hevy_df.index)
+        normalized_hevy_df = normalized_hevy_df[(source == "hevy") | (hevy_id != "")]
+    # Backward compatible fallback for deployments that have normalized Hevy rows
+    # but have not rebuilt the raw cache yet.
+    raw_df = raw_sets_df if not raw_sets_df.empty else normalized_hevy_df
+    workouts_df = raw_workouts_df if not raw_workouts_df.empty else pd.DataFrame(grouped_workout_history(normalized_hevy_df)) if not normalized_hevy_df.empty else pd.DataFrame()
     if not workouts_df.empty and "details" in workouts_df.columns:
         workouts_df = workouts_df.drop(columns=["details"])
     weekly = load_weekly_training_summary()
@@ -423,6 +467,8 @@ def export_hevy_raw_training_data():
         buffer = BytesIO()
         with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
             _excel_ready(raw_df).to_excel(writer, sheet_name="raw_sets", index=False)
+            _excel_ready(raw_workouts_df).to_excel(writer, sheet_name="raw_workouts", index=False)
+            _excel_ready(normalized_hevy_df).to_excel(writer, sheet_name="normalized_sets", index=False)
             _excel_ready(workouts_df).to_excel(writer, sheet_name="workouts_summary", index=False)
             _excel_ready(prs).to_excel(writer, sheet_name="exercise_prs", index=False)
             _excel_ready(weekly).to_excel(writer, sheet_name="weekly_summary", index=False)
@@ -444,6 +490,56 @@ def export_hevy_raw_training_data():
             headers={"Content-Disposition": f'attachment; filename="hevy_raw_export_{today}.csv"'},
         )
 
+
+@router.get("/api/training/export/normalized")
+def export_normalized_training_data():
+    """Export the local normalized training database and summary caches."""
+    started = time.perf_counter()
+    today = pd.Timestamp.today().date().isoformat()
+    normalized_df = _expand_note_markers(load_training_log())
+    workouts_df = pd.DataFrame(grouped_workout_history(normalized_df)) if not normalized_df.empty else pd.DataFrame()
+    if not workouts_df.empty and "details" in workouts_df.columns:
+        workouts_df = workouts_df.drop(columns=["details"])
+    weekly = load_weekly_training_summary()
+    monthly = load_monthly_training_summary()
+    prs = load_exercise_pr_history()
+    muscle = load_muscle_group_volume_history()
+    metadata = pd.DataFrame([
+        {
+            **_training_summary_status(),
+            "generated_at": pd.Timestamp.now(tz="UTC").isoformat(),
+            "export_duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    ])
+    filename = f"training_normalized_export_{today}.xlsx"
+    try:
+        import openpyxl  # noqa: F401
+
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            _excel_ready(normalized_df).to_excel(writer, sheet_name="normalized_sets", index=False)
+            _excel_ready(workouts_df).to_excel(writer, sheet_name="workouts", index=False)
+            _excel_ready(weekly).to_excel(writer, sheet_name="weekly_summary", index=False)
+            _excel_ready(monthly).to_excel(writer, sheet_name="monthly_summary", index=False)
+            _excel_ready(prs).to_excel(writer, sheet_name="exercise_prs", index=False)
+            _excel_ready(muscle).to_excel(writer, sheet_name="muscle_volume", index=False)
+            _excel_ready(metadata).to_excel(writer, sheet_name="metadata", index=False)
+        buffer.seek(0)
+        return StreamingResponse(
+            buffer,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:
+        logger.warning("Excel normalized training export failed; falling back to CSV: %s", exc)
+        text_buffer = StringIO()
+        _excel_ready(normalized_df).to_csv(text_buffer, index=False)
+        csv_buffer = BytesIO(text_buffer.getvalue().encode("utf-8"))
+        return StreamingResponse(
+            csv_buffer,
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="training_normalized_export_{today}.csv"'},
+        )
 
 @router.get("/api/training/schedule")
 def get_training_schedule() -> dict:
@@ -481,6 +577,7 @@ def get_training_exercises() -> dict:
 @router.get("/api/training/strength-trends")
 def get_strength_trends(exercise_name: str = "", date_range: str = "12w", muscle_group: str = "", days: int | None = None) -> dict:
     """Return exercise-level and muscle-group strength trend analytics."""
+    started = time.perf_counter()
     window_days = int(days) if days is not None else 84
     if date_range.endswith("w") and date_range[:-1].isdigit():
         window_days = int(date_range[:-1]) * 7
@@ -488,17 +585,36 @@ def get_strength_trends(exercise_name: str = "", date_range: str = "12w", muscle
         window_days = int(date_range[:-1])
     window_days = max(28, min(window_days, training_raw_window_days()))
     training_df = load_live_training_log(days=window_days, max_rows=12000)
+    load_duration_ms = round((time.perf_counter() - started) * 1000, 1)
     if not exercise_name and not training_df.empty:
         exercise_counts = training_df["exercise"].fillna("").astype(str).str.strip()
         exercise_counts = exercise_counts[exercise_counts != ""]
         if not exercise_counts.empty:
             exercise_name = exercise_counts.value_counts().index[0]
+    trend = calculate_strength_trend(training_df, exercise_name)
+    volume_by_exercise = calculate_volume_by_exercise(training_df)
+    muscle_group_trends = calculate_muscle_group_trend(training_df, date_range=date_range, muscle_group=muscle_group)
+    total_duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    logger.info(
+        "training/strength-trends rows=%s exercise=%s range=%s load=%.1fms total=%.1fms",
+        len(training_df),
+        exercise_name or "(none)",
+        date_range,
+        load_duration_ms,
+        total_duration_ms,
+    )
     return {
         "exercise_options": sorted(training_df["exercise"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()) if not training_df.empty else [],
         "selected_exercise": exercise_name,
-        "trend": calculate_strength_trend(training_df, exercise_name),
-        "volume_by_exercise": dataframe_records(calculate_volume_by_exercise(training_df)),
-        "muscle_group_trends": calculate_muscle_group_trend(training_df, date_range=date_range, muscle_group=muscle_group),
+        "trend": trend,
+        "volume_by_exercise": dataframe_records(volume_by_exercise),
+        "muscle_group_trends": muscle_group_trends,
+        "debug": {
+            "rows": len(training_df),
+            "window_days": window_days,
+            "load_duration_ms": load_duration_ms,
+            "duration_ms": total_duration_ms,
+        },
     }
 
 
@@ -590,7 +706,11 @@ def import_strava(payload: StravaImportRequest) -> dict:
 
 @router.post("/api/training/sync/hevy")
 def sync_hevy_now() -> dict:
-    """Manually sync Hevy events and import recent workouts as a fallback."""
+    """Incrementally check Hevy and update the local cache.
+
+    This route is safe for a manual button or external Railway cron. It must
+    not be called by FastAPI startup; app UI and analytics read local storage.
+    """
     if not is_hevy_api_configured():
         message = "Missing Hevy API key. Enter a key or set HEVY_API_KEY."
         state = save_hevy_sync_state({"last_error": message, "last_result": {"status": "error", "source": "manual_sync"}})
@@ -611,8 +731,12 @@ def sync_hevy_now() -> dict:
     failures: list[str] = []
     events = 0
     event_saved_workouts = 0
+    event_new_workouts = 0
+    event_updated_workouts = 0
     deleted_rows = 0
     imported_workouts = 0
+    imported_new_workouts = 0
+    imported_updated_workouts = 0
     imported_rows = 0
     replaced_rows = 0
     training_df = pd.DataFrame(columns=TRAINING_COLUMNS)
@@ -621,6 +745,8 @@ def sync_hevy_now() -> dict:
         event_result = sync_hevy_events()
         events = int(event_result.get("events", 0) or 0)
         event_saved_workouts = int(event_result.get("saved_workouts", 0) or 0)
+        event_new_workouts = int(event_result.get("new_workouts", 0) or 0)
+        event_updated_workouts = int(event_result.get("updated_workouts", 0) or 0)
         deleted_rows = int(event_result.get("deleted_rows", 0) or 0)
         failures.extend(str(item) for item in event_result.get("failures", []) if str(item).strip())
         if isinstance(event_result.get("training_log"), pd.DataFrame):
@@ -632,36 +758,65 @@ def sync_hevy_now() -> dict:
         logger.exception("Unexpected manual Hevy event sync failure; falling back to recent import.")
         failures.append(f"event sync: {exc}")
 
-    try:
-        import_result = import_hevy_workouts(page_size=10, pages=1)
-        imported_workouts = int(import_result.get("imported_workouts", 0) or 0)
-        imported_rows = int(import_result.get("imported_rows", 0) or 0)
-        replaced_rows = int(import_result.get("skipped_duplicates", 0) or 0)
-        failures.extend(str(item) for item in import_result.get("failures", []) if str(item).strip())
-        if isinstance(import_result.get("training_log"), pd.DataFrame):
-            training_df = import_result["training_log"]
-    except HevyIntegrationError as exc:
-        logger.warning("Manual Hevy recent import failed: %s", exc)
-        failures.append(f"recent import: {exc}")
-    except Exception as exc:
-        logger.exception("Unexpected manual Hevy recent import failure.")
-        failures.append(f"recent import: {exc}")
+    should_fallback_recent_import = bool(failures) or not has_local_hevy_cache()
+    if should_fallback_recent_import:
+        try:
+            import_result = import_hevy_workouts(page_size=10, pages=1)
+            imported_workouts = int(import_result.get("imported_workouts", 0) or 0)
+            imported_new_workouts = int(import_result.get("new_workouts", 0) or 0)
+            imported_updated_workouts = int(import_result.get("updated_workouts", 0) or 0)
+            imported_rows = int(import_result.get("imported_rows", 0) or 0)
+            replaced_rows = int(import_result.get("skipped_duplicates", 0) or 0)
+            failures.extend(str(item) for item in import_result.get("failures", []) if str(item).strip())
+            if isinstance(import_result.get("training_log"), pd.DataFrame):
+                training_df = import_result["training_log"]
+        except HevyIntegrationError as exc:
+            logger.warning("Manual Hevy recent import failed: %s", exc)
+            failures.append(f"recent import: {exc}")
+        except Exception as exc:
+            logger.exception("Unexpected manual Hevy recent import failure.")
+            failures.append(f"recent import: {exc}")
+    else:
+        logger.info("Skipping recent Hevy page import; event sync reported no changes and local cache exists.")
 
     saved_workouts = event_saved_workouts + imported_workouts
+    new_workouts = event_new_workouts + imported_new_workouts
+    updated_workouts = event_updated_workouts + imported_updated_workouts
     status_value = "ok" if saved_workouts > 0 or deleted_rows > 0 or not failures else "error"
     message = "" if status_value == "ok" else failures[0] if failures else "Hevy sync failed."
     summary = _hevy_training_summary(training_df)
+    cache_metadata = {}
+    try:
+        if saved_workouts > 0 or deleted_rows > 0:
+            consolidate_old_training_history(training_df=training_df)
+        cache_metadata = refresh_training_cache_metadata(last_hevy_sync=load_hevy_sync_state().get("last_sync_at", ""))
+    except Exception as exc:
+        logger.warning("Training cache refresh after Hevy sync failed: %s", exc)
+    recent_items = recent_training_window(training_df, training_raw_window_days())
+    personal_records = {}
+    if saved_workouts > 0 or deleted_rows > 0:
+        try:
+            personal_records = update_personal_records_from_logs(recent_items)
+        except Exception as exc:
+            logger.warning("Personal record update after Hevy sync failed: %s", exc)
     last_result = {
         "status": status_value,
         "source": "manual_sync",
+        "checked_hevy": True,
+        "sync_mode": "incremental_events",
+        "fallback_recent_import": should_fallback_recent_import,
         "events": events,
         "saved_workouts": saved_workouts,
+        "new_workouts": new_workouts,
+        "updated_workouts": updated_workouts,
         "event_saved_workouts": event_saved_workouts,
         "imported_workouts": imported_workouts,
         "imported_rows": imported_rows,
         "replaced_rows": replaced_rows,
         "deleted_rows": deleted_rows,
         "failures": failures,
+        "cache": cache_metadata,
+        "personal_records_updated": bool(personal_records),
         **summary,
     }
     state = save_hevy_sync_state({"last_error": message, "last_result": last_result})
@@ -669,16 +824,23 @@ def sync_hevy_now() -> dict:
     return {
         "status": status_value,
         "message": message,
+        "checked_hevy": True,
+        "sync_mode": "incremental_events",
+        "fallback_recent_import": should_fallback_recent_import,
         "events": events,
         "saved_workouts": saved_workouts,
+        "new_workouts": new_workouts,
+        "updated_workouts": updated_workouts,
         "event_saved_workouts": event_saved_workouts,
         "imported_workouts": imported_workouts,
         "imported_rows": imported_rows,
         "replaced_rows": replaced_rows,
         "deleted_rows": deleted_rows,
         "failures": failures,
-        "items": dataframe_records(recent_training_window(training_df, training_raw_window_days())),
+        "personal_records": personal_records,
+        "items": dataframe_records(recent_items),
         "last_synced_at": last_synced_at,
+        "cache": cache_metadata,
         **summary,
     }
 
@@ -697,6 +859,8 @@ def hevy_sync_status() -> dict:
         "last_error": last_error,
         "last_result": state.get("last_result", {}),
         "safe_mode": bool(state.get("safe_mode")),
+        "cache": load_training_cache_metadata(),
+        "checked_hevy": bool(state.get("last_sync_at")),
         **summary,
     }
 
@@ -716,6 +880,34 @@ async def hevy_webhook(request: Request) -> dict:
     except Exception as exc:
         logger.exception("Unexpected Hevy webhook failure.")
         raise HTTPException(status_code=503, detail="Hevy webhook sync failed safely. Retry later.") from exc
+    cache_metadata = {}
+    personal_records_updated = False
+    training_df = result.get("training_log")
+    if isinstance(training_df, pd.DataFrame):
+        try:
+            consolidate_old_training_history(training_df=training_df)
+            cache_metadata = refresh_training_cache_metadata(load_hevy_sync_state().get("last_sync_at", ""))
+            recent_items = recent_training_window(training_df, training_raw_window_days())
+            personal_records_updated = bool(update_personal_records_from_logs(recent_items))
+            save_hevy_sync_state(
+                {
+                    "last_error": "",
+                    "last_result": {
+                        "status": result.get("status", "ok"),
+                        "source": "webhook",
+                        "action": result.get("action", "processed"),
+                        "workout_id": result.get("workout_id"),
+                        "saved_workouts": 1 if result.get("saved_rows", 0) else 0,
+                        "new_workouts": 1 if result.get("action") == "upserted" and not result.get("replaced_rows", 0) else 0,
+                        "updated_workouts": 1 if result.get("replaced_rows", 0) else 0,
+                        "deleted_rows": result.get("deleted_rows", 0),
+                        "cache": cache_metadata,
+                        "personal_records_updated": personal_records_updated,
+                    },
+                }
+            )
+        except Exception as exc:
+            logger.warning("Hevy webhook local cache refresh failed after safe upsert/delete: %s", exc)
     return {
         "status": result.get("status", "ok"),
         "action": result.get("action", "processed"),
@@ -723,6 +915,8 @@ async def hevy_webhook(request: Request) -> dict:
         "saved_rows": result.get("saved_rows", 0),
         "replaced_rows": result.get("replaced_rows", 0),
         "deleted_rows": result.get("deleted_rows", 0),
+        "cache": cache_metadata,
+        "personal_records_updated": personal_records_updated,
     }
 
 
@@ -762,10 +956,18 @@ def import_hevy(payload: HevyImportRequest) -> dict:
 
     summary = _hevy_training_summary(result["training_log"])
     recent_items = recent_training_window(result["training_log"], training_raw_window_days())
+    cache_metadata = {}
+    try:
+        consolidate_old_training_history(training_df=result["training_log"])
+        cache_metadata = refresh_training_cache_metadata(result.get("last_synced_at", ""))
+    except Exception as exc:
+        logger.warning("Training cache refresh after Hevy import failed: %s", exc)
     return {
         "status": "ok",
         "imported_workouts": result["imported_workouts"],
         "imported_rows": result["imported_rows"],
+        "raw_workouts": result.get("raw_workouts", result["imported_workouts"]),
+        "raw_sets": result.get("raw_sets", result["imported_rows"]),
         "skipped_duplicates": result["skipped_duplicates"],
         "skipped_workouts": result["skipped_workouts"],
         "failures": result["failures"],
@@ -773,5 +975,6 @@ def import_hevy(payload: HevyImportRequest) -> dict:
         "personal_records": update_personal_records_from_logs(recent_items),
         "items": dataframe_records(recent_items),
         "last_synced_at": result.get("last_synced_at", ""),
+        "cache": cache_metadata or result.get("cache", {}),
         **summary,
     }

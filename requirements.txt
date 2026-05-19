@@ -10,3 +10,7 @@ python-dotenv
 python-multipart
 psycopg[binary]
 openpyxl
+sentry-sdk[fastapi]
+pyinstrument
+line-profiler
+memory-profiler

@@ -19,6 +19,7 @@ BODY_METRICS_COLUMNS = [
     "bodyweight",
     "waist",
     "estimated_body_fat",
+    "body_fat_percent",
     "lean_mass",
     "fat_mass",
     "muscle_mass",
@@ -37,6 +38,7 @@ BODY_METRICS_NUMERIC_COLUMNS = [
     "bodyweight",
     "waist",
     "estimated_body_fat",
+    "body_fat_percent",
     "lean_mass",
     "fat_mass",
     "muscle_mass",
@@ -62,6 +64,11 @@ def load_body_metrics() -> pd.DataFrame:
         if column not in metrics_df.columns:
             metrics_df[column] = np.nan
 
+    metrics_df["estimated_body_fat"] = pd.to_numeric(metrics_df["estimated_body_fat"], errors="coerce")
+    metrics_df["body_fat_percent"] = pd.to_numeric(metrics_df["body_fat_percent"], errors="coerce")
+    metrics_df["estimated_body_fat"] = metrics_df["estimated_body_fat"].combine_first(metrics_df["body_fat_percent"])
+    metrics_df["body_fat_percent"] = metrics_df["body_fat_percent"].combine_first(metrics_df["estimated_body_fat"])
+
     metrics_df = metrics_df[BODY_METRICS_COLUMNS]
 
     for column in BODY_METRICS_NUMERIC_COLUMNS:
@@ -84,6 +91,7 @@ def add_body_metric_entry(
     bodyweight,
     waist=None,
     estimated_body_fat=None,
+    body_fat_percent=None,
     lean_mass=None,
     fat_mass=None,
     muscle_mass=None,
@@ -93,12 +101,16 @@ def add_body_metric_entry(
 ) -> pd.DataFrame:
     """Add a body metric entry and return the updated table."""
     metrics_df = load_body_metrics()
+    body_fat_value = estimated_body_fat if estimated_body_fat is not None else body_fat_percent
     entry = {
         "date": str(date),
         "bodyweight": float(bodyweight),
         "waist": np.nan if waist is None else float(waist),
         "estimated_body_fat": (
-            np.nan if estimated_body_fat is None else float(estimated_body_fat)
+            np.nan if body_fat_value is None else float(body_fat_value)
+        ),
+        "body_fat_percent": (
+            np.nan if body_fat_value is None else float(body_fat_value)
         ),
         "lean_mass": np.nan if lean_mass is None else float(lean_mass),
         "fat_mass": np.nan if fat_mass is None else float(fat_mass),
@@ -142,6 +154,7 @@ def upsert_withings_measurements(rows: list[dict]) -> dict:
             "bodyweight": row.get("bodyweight"),
             "waist": row.get("waist"),
             "estimated_body_fat": row.get("estimated_body_fat"),
+            "body_fat_percent": row.get("body_fat_percent", row.get("estimated_body_fat")),
             "lean_mass": row.get("lean_mass"),
             "fat_mass": row.get("fat_mass"),
             "muscle_mass": row.get("muscle_mass"),

@@ -10,13 +10,14 @@ This module handles:
 import pandas as pd
 import numpy as np
 import os
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, load_dataframe_recent, load_document, mark_dataframe_deletes, save_dataframe, save_document
-from src.training_schedule import is_run_row
+from src.storage import count_dataframe_rows, load_dataframe, load_dataframe_recent, load_document, mark_dataframe_deletes, save_dataframe, save_document
+from src.training_schedule import is_run_row, load_training_schedule_profile
 
 TRAINING_COLUMNS = [
     "workout_id",
@@ -40,11 +41,51 @@ TRAINING_COLUMNS = [
 ]
 
 TRAINING_LOG_PATH = processed_data_path("training_log.csv")
+RAW_HEVY_WORKOUTS_PATH = processed_data_path("raw_hevy_workouts.csv")
+RAW_HEVY_SETS_PATH = processed_data_path("raw_hevy_sets.csv")
 WEEKLY_TRAINING_SUMMARY_PATH = processed_data_path("weekly_training_summary.csv")
 MONTHLY_TRAINING_SUMMARY_PATH = processed_data_path("monthly_training_summary.csv")
 EXERCISE_PR_HISTORY_PATH = processed_data_path("exercise_pr_history.csv")
 MUSCLE_GROUP_VOLUME_HISTORY_PATH = processed_data_path("muscle_group_volume_history.csv")
 TRAINING_SUMMARY_STATE_PATH = processed_data_path("training_summary_state.json")
+TRAINING_CACHE_METADATA_PATH = processed_data_path("training_cache_metadata.json")
+
+RAW_HEVY_WORKOUT_COLUMNS = [
+    "hevy_workout_id",
+    "title",
+    "date",
+    "start_time",
+    "end_time",
+    "created_at",
+    "updated_at",
+    "duration_minutes",
+    "workout_type",
+    "exercise_count",
+    "set_count",
+    "normalized_row_count",
+    "raw_payload",
+    "imported_at",
+    "normalized_at",
+]
+
+RAW_HEVY_SET_COLUMNS = [
+    "external_id",
+    "hevy_workout_id",
+    "date",
+    "workout_title",
+    "exercise_id",
+    "exercise",
+    "set_index",
+    "set_number",
+    "reps",
+    "weight_kg",
+    "weight_lb",
+    "rpe",
+    "duration_seconds",
+    "distance_meters",
+    "raw_payload",
+    "imported_at",
+]
 
 TRAINING_SUMMARY_COLUMNS = [
     "period_start",
@@ -115,6 +156,24 @@ def _default_training_summary_state() -> dict:
     }
 
 
+def _default_training_cache_metadata() -> dict:
+    return {
+        "last_hevy_sync": "",
+        "last_cache_refresh": "",
+        "raw_workout_count": 0,
+        "raw_set_count": 0,
+        "normalized_workout_count": 0,
+        "normalized_set_count": 0,
+        "recent_raw_rows": 0,
+        "summary_weeks": 0,
+        "summary_months": 0,
+        "exercise_prs": 0,
+        "muscle_group_periods": 0,
+        "raw_window_days": training_raw_window_days(),
+        "cache_health": "unknown",
+    }
+
+
 def load_training_summary_state() -> dict:
     state = _default_training_summary_state()
     state.update(load_document("training_summary_state", TRAINING_SUMMARY_STATE_PATH, state))
@@ -125,6 +184,18 @@ def save_training_summary_state(state: dict) -> dict:
     payload = _default_training_summary_state()
     payload.update(state or {})
     return save_document("training_summary_state", TRAINING_SUMMARY_STATE_PATH, payload)
+
+
+def load_training_cache_metadata() -> dict:
+    metadata = _default_training_cache_metadata()
+    metadata.update(load_document("training_cache_metadata", TRAINING_CACHE_METADATA_PATH, metadata))
+    return metadata
+
+
+def save_training_cache_metadata(metadata: dict) -> dict:
+    payload = _default_training_cache_metadata()
+    payload.update(metadata or {})
+    return save_document("training_cache_metadata", TRAINING_CACHE_METADATA_PATH, payload)
 
 
 def _empty_training_log() -> pd.DataFrame:
@@ -158,6 +229,7 @@ def _hydrate_legacy_import_metadata(training_df: pd.DataFrame) -> pd.DataFrame:
         return training_df
 
     df = training_df.copy()
+    profile = load_training_schedule_profile()
     for index, row in df.iterrows():
         note = str(row.get("notes", ""))
         source = str(row.get("source", "") or "").strip().lower()
@@ -182,7 +254,7 @@ def _hydrate_legacy_import_metadata(training_df: pd.DataFrame) -> pd.DataFrame:
                     df.at[index, "weight"] = round(float(weight) * 2.2046226218, 2)
                     df.at[index, "notes"] = f"{note} | legacy_weight_converted_kg_to_lb=true | weight_unit=lb"
 
-            if is_run_row(df.loc[index].to_dict()):
+            if is_run_row(df.loc[index].to_dict(), profile=profile):
                 df.at[index, "workout_type"] = "Run"
                 df.at[index, "muscle_group"] = "Cardio"
                 if "classification=running_cardio" not in str(df.at[index, "notes"]).lower():
@@ -274,6 +346,210 @@ def load_live_training_log(days: int | None = None, max_rows: int = 20000, state
 def save_training_log(df) -> None:
     """Save training entries to local CSV."""
     save_dataframe("training_log", TRAINING_LOG_PATH, df, TRAINING_COLUMNS)
+
+
+def load_raw_hevy_workouts() -> pd.DataFrame:
+    """Load raw Hevy workout payload metadata imported during sync."""
+    return load_dataframe("raw_hevy_workouts", RAW_HEVY_WORKOUTS_PATH, RAW_HEVY_WORKOUT_COLUMNS)
+
+
+def save_raw_hevy_workouts(df: pd.DataFrame) -> None:
+    save_dataframe("raw_hevy_workouts", RAW_HEVY_WORKOUTS_PATH, df, RAW_HEVY_WORKOUT_COLUMNS)
+
+
+def load_raw_hevy_sets() -> pd.DataFrame:
+    """Load raw Hevy set payload metadata imported during sync."""
+    return load_dataframe("raw_hevy_sets", RAW_HEVY_SETS_PATH, RAW_HEVY_SET_COLUMNS)
+
+
+def save_raw_hevy_sets(df: pd.DataFrame) -> None:
+    save_dataframe("raw_hevy_sets", RAW_HEVY_SETS_PATH, df, RAW_HEVY_SET_COLUMNS)
+
+
+def _json_payload(value) -> str:
+    return json.dumps(value, separators=(",", ":"), default=str)
+
+
+def _number_or_none(value) -> float | None:
+    parsed = pd.to_numeric(value, errors="coerce")
+    return None if pd.isna(parsed) else float(parsed)
+
+
+def _number_or_zero(value) -> float:
+    parsed = _number_or_none(value)
+    return 0.0 if parsed is None else parsed
+
+
+def _raw_hevy_workout_record(workout: dict, normalized_rows: list[dict], imported_at: str) -> dict:
+    workout_id = str(workout.get("id", "") or "").strip()
+    start_time = str(workout.get("start_time") or "").strip()
+    end_time = str(workout.get("end_time") or "").strip()
+    exercises = workout.get("exercises", []) or []
+    return {
+        "hevy_workout_id": workout_id,
+        "title": str(workout.get("title") or "Hevy Workout"),
+        "date": str(normalized_rows[0].get("date") if normalized_rows else "") or str(workout.get("created_at") or "")[:10],
+        "start_time": start_time,
+        "end_time": end_time,
+        "created_at": str(workout.get("created_at") or ""),
+        "updated_at": str(workout.get("updated_at") or workout.get("modified_at") or ""),
+        "duration_minutes": float(normalized_rows[0].get("duration_minutes") or 0) if normalized_rows else 0,
+        "workout_type": str(normalized_rows[0].get("workout_type") if normalized_rows else ""),
+        "exercise_count": len(exercises),
+        "set_count": sum(len(exercise.get("sets", []) or []) for exercise in exercises if isinstance(exercise, dict)),
+        "normalized_row_count": len(normalized_rows),
+        "raw_payload": _json_payload(workout),
+        "imported_at": imported_at,
+        "normalized_at": imported_at,
+    }
+
+
+def _raw_hevy_set_records(workout: dict, normalized_rows: list[dict], imported_at: str) -> list[dict]:
+    workout_id = str(workout.get("id", "") or "").strip()
+    workout_title = str(workout.get("title") or "Hevy Workout")
+    workout_date = str(normalized_rows[0].get("date") if normalized_rows else "") or str(workout.get("created_at") or "")[:10]
+    by_external_id = {str(row.get("external_id", "") or ""): row for row in normalized_rows}
+    records: list[dict] = []
+    for exercise_index, exercise in enumerate(workout.get("exercises", []) or []):
+        if not isinstance(exercise, dict):
+            continue
+        exercise_name = str(exercise.get("title") or "Unknown Exercise")
+        exercise_id = ""
+        for key in ("id", "exercise_id", "exercise_template_id"):
+            exercise_id = str(exercise.get(key) or "").strip()
+            if exercise_id:
+                break
+        if not exercise_id:
+            exercise_id = exercise_name.lower().replace(" ", "-") or f"exercise-{exercise_index + 1}"
+        for set_position, set_item in enumerate(exercise.get("sets", []) or []):
+            if not isinstance(set_item, dict):
+                continue
+            try:
+                set_index = int(float(set_item.get("index") if set_item.get("index") is not None else set_position))
+            except (TypeError, ValueError):
+                set_index = set_position
+            external_id = f"{workout_id}:{exercise_id}:{set_index}"
+            normalized = by_external_id.get(external_id, {})
+            weight_kg = _number_or_none(set_item.get("weight_kg"))
+            weight_lb = _number_or_none(normalized.get("weight"))
+            records.append(
+                {
+                    "external_id": external_id,
+                    "hevy_workout_id": workout_id,
+                    "date": workout_date,
+                    "workout_title": workout_title,
+                    "exercise_id": exercise_id,
+                    "exercise": exercise_name,
+                    "set_index": set_index,
+                    "set_number": int(normalized.get("set_number") or set_index + 1),
+                    "reps": int(_number_or_zero(set_item.get("reps"))),
+                    "weight_kg": weight_kg,
+                    "weight_lb": weight_lb,
+                    "rpe": _number_or_zero(set_item.get("rpe")),
+                    "duration_seconds": _number_or_zero(set_item.get("duration_seconds")),
+                    "distance_meters": _number_or_zero(set_item.get("distance_meters")),
+                    "raw_payload": _json_payload(set_item),
+                    "imported_at": imported_at,
+                }
+            )
+    if records:
+        return records
+    return [
+        {
+            "external_id": f"{workout_id}:workout",
+            "hevy_workout_id": workout_id,
+            "date": workout_date,
+            "workout_title": workout_title,
+            "exercise_id": "workout",
+            "exercise": workout_title,
+            "set_index": 0,
+            "set_number": 1,
+            "reps": 0,
+            "weight_kg": None,
+            "weight_lb": None,
+            "rpe": 0,
+            "duration_seconds": 0,
+            "distance_meters": 0,
+            "raw_payload": _json_payload(workout),
+            "imported_at": imported_at,
+        }
+    ]
+
+
+def upsert_raw_hevy_import(workout: dict, normalized_rows: list[dict], imported_at: str | None = None) -> dict:
+    """Persist raw Hevy workout/set payloads idempotently for export/debugging."""
+    workout_id = str(workout.get("id", "") or "").strip()
+    if not workout_id:
+        return {"raw_workouts_saved": 0, "raw_sets_saved": 0, "raw_sets_replaced": 0}
+    now = imported_at or datetime.now(timezone.utc).isoformat()
+    workout_record = _raw_hevy_workout_record(workout, normalized_rows, now)
+    set_records = _raw_hevy_set_records(workout, normalized_rows, now)
+
+    workouts_df = load_raw_hevy_workouts()
+    if not workouts_df.empty:
+        workouts_df = workouts_df[workouts_df["hevy_workout_id"].fillna("").astype(str) != workout_id].copy()
+    workouts_df = pd.concat([workouts_df, pd.DataFrame([workout_record])], ignore_index=True)
+    workouts_df = workouts_df.sort_values("date", kind="stable").reset_index(drop=True)
+    save_raw_hevy_workouts(workouts_df)
+
+    sets_df = load_raw_hevy_sets()
+    replaced = 0
+    if not sets_df.empty:
+        keep_mask = sets_df["hevy_workout_id"].fillna("").astype(str) != workout_id
+        replaced = int((~keep_mask).sum())
+        sets_df = sets_df[keep_mask].copy()
+    sets_df = pd.concat([sets_df, pd.DataFrame(set_records)], ignore_index=True)
+    sets_df = sets_df.sort_values(["date", "hevy_workout_id", "set_number"], kind="stable").reset_index(drop=True)
+    save_raw_hevy_sets(sets_df)
+    return {"raw_workouts_saved": 1, "raw_sets_saved": len(set_records), "raw_sets_replaced": replaced}
+
+
+def delete_raw_hevy_import(workout_id: str) -> dict:
+    """Delete raw Hevy cache rows for one workout when a webhook reports deletion."""
+    workout_id = str(workout_id or "").strip()
+    if not workout_id:
+        return {"raw_workouts_deleted": 0, "raw_sets_deleted": 0}
+    workouts_df = load_raw_hevy_workouts()
+    sets_df = load_raw_hevy_sets()
+    workouts_deleted = 0
+    sets_deleted = 0
+    if not workouts_df.empty:
+        keep = workouts_df["hevy_workout_id"].fillna("").astype(str) != workout_id
+        workouts_deleted = int((~keep).sum())
+        save_raw_hevy_workouts(workouts_df[keep].copy())
+    if not sets_df.empty:
+        keep = sets_df["hevy_workout_id"].fillna("").astype(str) != workout_id
+        sets_deleted = int((~keep).sum())
+        save_raw_hevy_sets(sets_df[keep].copy())
+    return {"raw_workouts_deleted": workouts_deleted, "raw_sets_deleted": sets_deleted}
+
+
+def refresh_training_cache_metadata(last_hevy_sync: str = "") -> dict:
+    """Refresh cheap cache counts used by the UI and diagnostics."""
+    raw_window_days = training_raw_window_days()
+    weekly_count = count_dataframe_rows("weekly_training_summary", WEEKLY_TRAINING_SUMMARY_PATH)
+    monthly_count = count_dataframe_rows("monthly_training_summary", MONTHLY_TRAINING_SUMMARY_PATH)
+    metadata = {
+        "last_hevy_sync": last_hevy_sync or load_training_cache_metadata().get("last_hevy_sync", ""),
+        "last_cache_refresh": datetime.now(timezone.utc).isoformat(),
+        "raw_workout_count": count_dataframe_rows("raw_hevy_workouts", RAW_HEVY_WORKOUTS_PATH),
+        "raw_set_count": count_dataframe_rows("raw_hevy_sets", RAW_HEVY_SETS_PATH),
+        "normalized_set_count": count_dataframe_rows("training_log", TRAINING_LOG_PATH),
+        "recent_raw_rows": int(len(load_live_training_log(days=raw_window_days, max_rows=100000))),
+        "summary_weeks": weekly_count,
+        "summary_months": monthly_count,
+        "exercise_prs": count_dataframe_rows("exercise_pr_history", EXERCISE_PR_HISTORY_PATH),
+        "muscle_group_periods": count_dataframe_rows("muscle_group_volume_history", MUSCLE_GROUP_VOLUME_HISTORY_PATH),
+        "raw_window_days": raw_window_days,
+    }
+    try:
+        live = load_live_training_log(days=raw_window_days, max_rows=100000)
+        workout_count = int(live["workout_id"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().nunique()) if not live.empty else 0
+    except Exception:
+        workout_count = 0
+    metadata["normalized_workout_count"] = workout_count
+    metadata["cache_health"] = "ready" if metadata["normalized_set_count"] or metadata["raw_set_count"] else "empty"
+    return save_training_cache_metadata(metadata)
 
 
 def load_weekly_training_summary() -> pd.DataFrame:

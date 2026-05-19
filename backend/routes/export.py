@@ -39,7 +39,16 @@ from src.optimization.high_value_features import build_optimization_features
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.recovery import RECOVERY_COLUMNS, RECOVERY_LOG_PATH, SLEEP_ENTRIES_PATH, SLEEP_ENTRY_COLUMNS, calculate_recovery_score, load_recovery_log, load_sleep_entries
 from src.storage import load_dataframe, load_document, save_dataframe, save_document
-from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, load_training_log
+from src.training import (
+    RAW_HEVY_SET_COLUMNS,
+    RAW_HEVY_SETS_PATH,
+    RAW_HEVY_WORKOUT_COLUMNS,
+    RAW_HEVY_WORKOUTS_PATH,
+    TRAINING_CACHE_METADATA_PATH,
+    TRAINING_COLUMNS,
+    TRAINING_LOG_PATH,
+    load_training_log,
+)
 
 
 router = APIRouter(prefix="/api/export", tags=["export"])
@@ -101,6 +110,8 @@ BACKUP_DATASETS = {
     "food_shortcuts": (FOOD_SHORTCUTS_PATH, FOOD_SHORTCUT_COLUMNS),
     "meal_templates": (MEAL_TEMPLATES_PATH, MEAL_TEMPLATE_COLUMNS),
     "body_metrics": (BODY_METRICS_PATH, BODY_METRICS_COLUMNS),
+    "raw_hevy_workouts": (RAW_HEVY_WORKOUTS_PATH, RAW_HEVY_WORKOUT_COLUMNS),
+    "raw_hevy_sets": (RAW_HEVY_SETS_PATH, RAW_HEVY_SET_COLUMNS),
     "training_log": (TRAINING_LOG_PATH, TRAINING_COLUMNS),
     "recovery_log": (RECOVERY_LOG_PATH, RECOVERY_COLUMNS),
     "sleep_entries": (SLEEP_ENTRIES_PATH, SLEEP_ENTRY_COLUMNS),
@@ -114,6 +125,7 @@ BACKUP_DOCUMENTS = {
     "nutrition_recommendation_history": NUTRITION_RECOMMENDATION_HISTORY_PATH,
     "personal_records": PERSONAL_RECORDS_PATH,
     "hevy_sync_state": HEVY_SYNC_STATE_PATH,
+    "training_cache_metadata": TRAINING_CACHE_METADATA_PATH,
 }
 
 BACKUP_DEDUPE_KEYS = {
@@ -122,6 +134,8 @@ BACKUP_DEDUPE_KEYS = {
     "food_shortcuts": ["shortcut_id"],
     "meal_templates": ["template_name", "food_name", "calories", "protein", "carbs", "fat"],
     "body_metrics": ["date", "bodyweight", "estimated_body_fat", "notes"],
+    "raw_hevy_workouts": ["hevy_workout_id"],
+    "raw_hevy_sets": ["external_id"],
     "training_log": ["workout_id", "external_id", "exercise", "set_number", "date"],
     "recovery_log": ["date"],
     "sleep_entries": ["id", "date"],

@@ -22,7 +22,15 @@ import pandas as pd
 from src.config import load_settings
 from src.paths import PROJECT_ROOT, processed_data_path, raw_data_path
 from src.storage import load_document, mark_dataframe_deletes, save_document
-from src.training import TRAINING_COLUMNS, load_training_log, save_training_log
+from src.training import (
+    TRAINING_COLUMNS,
+    delete_raw_hevy_import,
+    load_raw_hevy_workouts,
+    load_training_log,
+    refresh_training_cache_metadata,
+    save_training_log,
+    upsert_raw_hevy_import,
+)
 from src.training_schedule import classify_hevy_workout
 
 
@@ -91,6 +99,15 @@ def is_hevy_api_configured(api_key: str | None = None) -> bool:
         _get_api_key(api_key)
         return True
     except HevyIntegrationError:
+        return False
+
+
+def has_local_hevy_cache() -> bool:
+    """Return whether any raw Hevy workout payload has already been imported."""
+    try:
+        return not load_raw_hevy_workouts().empty
+    except Exception as exc:
+        logger.warning("Could not inspect local Hevy cache: %s", exc)
         return False
 
 
@@ -513,6 +530,7 @@ def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import") -> di
         raise HevyIntegrationError("Cannot upsert Hevy workout without an ID.")
     rows = normalize_hevy_workout(workout)
     now = _now_iso()
+    raw_result = upsert_raw_hevy_import(workout, rows, imported_at=now)
     for row in rows:
         row["sync_source"] = sync_source
         row["last_hevy_sync_at"] = now
@@ -534,8 +552,21 @@ def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import") -> di
     training_df = pd.concat([kept_df, import_df], ignore_index=True).sort_values("date", kind="stable").reset_index(drop=True)
     training_df = mark_dataframe_deletes(training_df, "training_log", removed_records)
     save_training_log(training_df)
-    logger.info("Saved Hevy workout %s with %s rows via %s", workout_id, len(rows), sync_source)
-    return {"workout_id": workout_id, "saved_rows": len(rows), "replaced_rows": removed_rows, "training_log": training_df}
+    logger.info(
+        "Saved Hevy workout %s with %s normalized rows and %s raw set rows via %s",
+        workout_id,
+        len(rows),
+        raw_result.get("raw_sets_saved", 0),
+        sync_source,
+    )
+    return {
+        "workout_id": workout_id,
+        "saved_rows": len(rows),
+        "replaced_rows": removed_rows,
+        "action": "updated" if removed_rows > 0 else "created",
+        "training_log": training_df,
+        **raw_result,
+    }
 
 
 def delete_hevy_workout(workout_id: str, sync_source: str = "hevy_delete") -> dict:
@@ -551,7 +582,9 @@ def delete_hevy_workout(workout_id: str, sync_source: str = "hevy_delete") -> di
         kept_df = mark_dataframe_deletes(kept_df, "training_log", removed_records)
         save_training_log(kept_df)
         logger.info("Deleted %s rows for Hevy workout %s via %s", deleted_rows, workout_id, sync_source)
-    return {"workout_id": workout_id, "deleted_rows": deleted_rows, "training_log": kept_df}
+    raw_result = delete_raw_hevy_import(workout_id)
+    refresh_training_cache_metadata()
+    return {"workout_id": workout_id, "deleted_rows": deleted_rows, "training_log": kept_df, **raw_result}
 
 
 def _extract_note_value(note: str, key: str) -> str:
@@ -653,6 +686,8 @@ def import_hevy_workouts(api_key: str | None = None, page_size: int = 10, pages:
     workouts = fetch_recent_workouts(api_key=api_key, page_size=page_size, pages=pages)
     training_df = load_training_log()
     imported_workouts = 0
+    new_workouts = 0
+    updated_workouts = 0
     imported_rows = 0
     replaced_rows = 0
     skipped_workouts = []
@@ -667,6 +702,10 @@ def import_hevy_workouts(api_key: str | None = None, page_size: int = 10, pages:
         try:
             result = upsert_hevy_workout(workout, sync_source="manual_import")
             imported_workouts += 1
+            if result.get("action") == "updated":
+                updated_workouts += 1
+            else:
+                new_workouts += 1
             imported_rows += result["saved_rows"]
             replaced_rows += result["replaced_rows"]
             training_df = result["training_log"]
@@ -674,16 +713,35 @@ def import_hevy_workouts(api_key: str | None = None, page_size: int = 10, pages:
             logger.exception("Hevy workout import failed for %s", workout_id)
             failures.append(f"{workout_id}: {exc}")
 
-    save_hevy_sync_state({"last_sync_at": _now_iso(), "last_error": "", "last_result": {"source": "manual_import", "imported_workouts": imported_workouts}})
+    sync_at = _now_iso()
+    cache_metadata = refresh_training_cache_metadata(last_hevy_sync=sync_at)
+    save_hevy_sync_state(
+        {
+            "last_sync_at": sync_at,
+            "last_error": "",
+            "last_result": {
+                "source": "manual_import",
+                "imported_workouts": imported_workouts,
+                "new_workouts": new_workouts,
+                "updated_workouts": updated_workouts,
+                "cache": cache_metadata,
+            },
+        }
+    )
     return {
         "imported_workouts": imported_workouts,
+        "new_workouts": new_workouts,
+        "updated_workouts": updated_workouts,
         "imported_rows": imported_rows,
+        "raw_workouts": imported_workouts,
+        "raw_sets": imported_rows,
         "skipped_duplicates": replaced_rows,
         "skipped_workouts": skipped_workouts,
         "failures": failures,
         "debug_file": _display_path(HEVY_DEBUG_PATH),
         "training_log": training_df,
         "last_synced_at": load_hevy_sync_state().get("last_sync_at", ""),
+        "cache": cache_metadata,
     }
 
 
@@ -718,6 +776,8 @@ def sync_hevy_events(api_key: str | None = None) -> dict:
         payload = fetch_workout_events(api_key=api_key, since=since)
         events = payload.get("events") or payload.get("workout_events") or payload.get("workouts") or []
         saved = 0
+        new_workouts = 0
+        updated_workouts = 0
         deleted = 0
         failures = []
         training_df = load_training_log()
@@ -736,13 +796,29 @@ def sync_hevy_events(api_key: str | None = None) -> dict:
                 logger.info("Workout fetched from Hevy events: %s", workout_id)
                 result = upsert_hevy_workout(workout, sync_source="event_poll")
                 saved += 1
+                if result.get("action") == "updated":
+                    updated_workouts += 1
+                else:
+                    new_workouts += 1
                 training_df = result["training_log"]
             except HevyIntegrationError as exc:
                 logger.warning("Hevy event sync failure for %s: %s", workout_id, exc)
                 failures.append(f"{workout_id}: {exc}")
         now = _now_iso()
         next_cursor = str(payload.get("next_cursor") or payload.get("cursor") or now)
-        sync_result = {"status": "ok", "events": len(events), "saved_workouts": saved, "deleted_rows": deleted, "failures": failures}
+        cache_metadata = refresh_training_cache_metadata(last_hevy_sync=now)
+        sync_result = {
+            "status": "ok",
+            "source": "event_poll",
+            "checked_hevy": True,
+            "events": len(events),
+            "saved_workouts": saved,
+            "new_workouts": new_workouts,
+            "updated_workouts": updated_workouts,
+            "deleted_rows": deleted,
+            "failures": failures,
+            "cache": cache_metadata,
+        }
         save_hevy_sync_state({"last_sync_at": now, "last_event_cursor": next_cursor, "last_error": "", "last_result": sync_result})
         return {**sync_result, "last_synced_at": now, "training_log": training_df}
     except HevyIntegrationError as exc:
@@ -755,7 +831,9 @@ def sync_single_hevy_workout(workout_id: str, sync_source: str = "webhook") -> d
     workout = fetch_workout_details(workout_id)
     logger.info("Workout fetched from Hevy webhook/manual refresh: %s", workout_id)
     result = upsert_hevy_workout(workout, sync_source=sync_source)
-    save_hevy_sync_state({"last_sync_at": _now_iso(), "last_error": "", "last_result": {"source": sync_source, "workout_id": workout_id}})
+    sync_at = _now_iso()
+    cache_metadata = refresh_training_cache_metadata(last_hevy_sync=sync_at)
+    save_hevy_sync_state({"last_sync_at": sync_at, "last_error": "", "last_result": {"source": sync_source, "workout_id": workout_id, "cache": cache_metadata}})
     return result
 
 

@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "test:e2e": "npm --prefix frontend run build && playwright test",
+    "test:e2e:headed": "npm --prefix frontend run build && playwright test --headed"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "playwright": "^1.60.0"
+  }
+}

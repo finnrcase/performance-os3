@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from src.training_schedule import LOWER_BODY_TERMS, is_run_row, planned_training_for_date
+from src.training_schedule import LOWER_BODY_TERMS, is_run_row, load_training_schedule_profile, planned_training_for_date
 
 
 def _empty(reason: str) -> dict:
@@ -144,7 +144,8 @@ def _training_context(training_df: pd.DataFrame, strava_df: pd.DataFrame | None,
             strava["workout_type"] = "Run"
         training = pd.concat([training, strava], ignore_index=True)
 
-    planned = planned_training_for_date(today)
+    profile = load_training_schedule_profile()
+    planned = planned_training_for_date(today, profile=profile)
     planned_day = planned["display_label"]
     yesterday = today - pd.Timedelta(days=1)
     week_start = today - pd.Timedelta(days=today.weekday())
@@ -175,7 +176,7 @@ def _training_context(training_df: pd.DataFrame, strava_df: pd.DataFrame | None,
         + " "
         + training["notes"].fillna("").astype(str)
     ).str.lower()
-    cardio_mask = training.apply(is_run_row, axis=1)
+    cardio_mask = training.apply(lambda row: is_run_row(row, profile=profile), axis=1)
     leg_mask = text.str.contains("|".join(LOWER_BODY_TERMS), regex=True, na=False)
 
     today_rows = training[training["date"] == today]

@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training, withings
+from backend.observability import capture_exception, capture_message, init_sentry
 from backend.routes.utils import (
     ACCESS_COOKIE,
     SESSION_MAX_AGE_SECONDS,
@@ -50,7 +51,7 @@ from src.optimization.performance_engine import generate_performance_recommendat
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
 from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, calculate_training_volume, load_recent_training_log, load_training_log, recent_training_window, training_raw_window_days
-from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile, summarize_training_day
 from src.integrations.hevy_client import load_hevy_sync_state
 from src.storage import count_dataframe_rows, debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
 
@@ -58,6 +59,7 @@ from src.storage import count_dataframe_rows, debug_database_connection, ensure_
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 logger = logging.getLogger(__name__)
+init_sentry()
 
 app = FastAPI(
     title="Performance OS API",
@@ -123,6 +125,8 @@ LOGGED_REQUEST_PATHS = {
     "/api/dashboard/core",
     "/api/debug/dashboard-core",
     "/api/dashboard",
+    "/api/training/history",
+    "/api/training/strength-trends",
 }
 LIVE_TRAINING_DAYS = training_raw_window_days()
 LIVE_TRAINING_MAX_ROWS = 20000
@@ -169,10 +173,23 @@ async def log_core_request_lifecycle(request: Request, call_next):
                 status_code=503,
             )
         logger.exception("Unhandled request failure: %s %s in %.1f ms", request.method, path, duration_ms)
+        capture_exception(
+            exc,
+            tags={"endpoint": path, "method": request.method, "kind": "unhandled_request_failure"},
+            extra={"duration_ms": duration_ms},
+        )
         raise
     if should_log:
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         logger.info("Request completed: %s %s status=%s in %.1f ms", request.method, path, response.status_code, duration_ms)
+        slow_threshold_ms = float(os.getenv("SLOW_ENDPOINT_SENTRY_THRESHOLD_MS", "5000"))
+        if duration_ms >= slow_threshold_ms:
+            capture_message(
+                "Slow Performance OS endpoint",
+                level="warning",
+                tags={"endpoint": path, "method": request.method, "status_code": response.status_code},
+                extra={"duration_ms": duration_ms, "threshold_ms": slow_threshold_ms},
+            )
     return response
 
 
@@ -438,6 +455,11 @@ def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):
     except Exception as exc:
         duration_ms = round((time.perf_counter() - start) * 1000, 1)
         logger.exception("Dashboard block failed: %s", name)
+        capture_exception(
+            exc,
+            tags={"dashboard_block": name, "endpoint": "/api/dashboard", "kind": "dashboard_block_failure"},
+            extra={"duration_ms": duration_ms},
+        )
         dashboard_errors.append(
             {
                 "block": name,
@@ -512,6 +534,12 @@ def _safe_core_block(
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         future.cancel()
         logger.warning("Dashboard core block timed out: %s after %.1f ms", name, duration_ms)
+        capture_message(
+            "Dashboard core block timed out",
+            level="warning",
+            tags={"dashboard_block": name, "endpoint": "/api/dashboard/core"},
+            extra={"duration_ms": duration_ms, "timeout_ms": timeout_ms},
+        )
         dashboard_errors.append(
             {
                 "block": name,
@@ -529,6 +557,11 @@ def _safe_core_block(
     except Exception as exc:
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
         logger.exception("Dashboard core block failed: %s", name)
+        capture_exception(
+            exc,
+            tags={"dashboard_block": name, "endpoint": "/api/dashboard/core", "kind": "dashboard_core_block_failure"},
+            extra={"duration_ms": duration_ms, "timeout_ms": timeout_ms},
+        )
         dashboard_errors.append(
             {
                 "block": name,
@@ -2107,7 +2140,8 @@ def _daily_training_rows(training_df: pd.DataFrame) -> pd.DataFrame:
     df = df.dropna(subset=["date"])
     if df.empty:
         return pd.DataFrame()
-    df = df[df.apply(is_strength_row, axis=1)].copy()
+    profile = load_training_schedule_profile()
+    df = df[df.apply(lambda row: is_strength_row(row, profile=profile), axis=1)].copy()
     if df.empty:
         return pd.DataFrame()
     for column in ["sets", "reps", "weight", "duration_minutes"]:
@@ -2158,7 +2192,8 @@ def _today_run_summary(training_df: pd.DataFrame, today: str) -> dict | None:
     df["duration_minutes"] = pd.to_numeric(df["duration_minutes"], errors="coerce").fillna(0)
 
     today_rows = df[df["date"].dt.date.astype(str) == today].copy()
-    run_rows = today_rows[today_rows.apply(is_run_row, axis=1)].copy()
+    profile = load_training_schedule_profile()
+    run_rows = today_rows[today_rows.apply(lambda row: is_run_row(row, profile=profile), axis=1)].copy()
     if run_rows.empty:
         return None
 

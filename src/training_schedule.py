@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from functools import lru_cache
 from typing import Any
 
 import pandas as pd
@@ -128,8 +129,8 @@ METADATA_DURATION_TERMS = ("duration", "elapsed", "moving_time", "seconds", "tim
 TIMESTAMP_KEYS = {"start_time", "end_time", "created_at", "updated_at", "modified_at"}
 
 
-def load_training_schedule_profile() -> dict:
-    """Load the configurable recurring split profile, falling back to defaults."""
+@lru_cache(maxsize=1)
+def _load_training_schedule_profile_cached() -> dict:
     try:
         profile = load_document("training_schedule_profile", TRAINING_SCHEDULE_PROFILE_PATH, DEFAULT_RECURRING_SCHEDULE_PROFILE)
     except Exception:
@@ -148,10 +149,21 @@ def load_training_schedule_profile() -> dict:
     return profile
 
 
+def load_training_schedule_profile() -> dict:
+    """Load the configurable recurring split profile, falling back to defaults."""
+    return deepcopy(_load_training_schedule_profile_cached())
+
+
 def save_training_schedule_profile(profile: dict) -> dict:
     """Persist a training schedule profile for future dashboard/adaptive reads."""
     merged = {**deepcopy(DEFAULT_RECURRING_SCHEDULE_PROFILE), **(profile or {})}
-    return save_document("training_schedule_profile", TRAINING_SCHEDULE_PROFILE_PATH, merged)
+    saved = save_document("training_schedule_profile", TRAINING_SCHEDULE_PROFILE_PATH, merged)
+    _load_training_schedule_profile_cached.cache_clear()
+    return saved
+
+
+def _classification_plan(row: pd.Series | dict, profile: dict | None = None) -> dict:
+    return planned_training_for_date(row.get("date"), profile=profile)
 
 
 def _to_timestamp(value: Any) -> pd.Timestamp | None:
@@ -239,7 +251,7 @@ def row_training_text(row: pd.Series | dict) -> str:
     ).lower()
 
 
-def is_run_row(row: pd.Series | dict) -> bool:
+def is_run_row(row: pd.Series | dict, profile: dict | None = None) -> bool:
     source = str(row.get("source", "") or "").lower()
     workout_type = str(row.get("workout_type", "") or "").lower()
     notes = str(row.get("notes", "") or "").lower()
@@ -249,13 +261,13 @@ def is_run_row(row: pd.Series | dict) -> bool:
         return True
     if "classification=running_cardio" in notes:
         return True
-    if (source == "hevy" or "hevy_workout_id=" in notes) and planned_training_for_date(row.get("date")).get("is_run_day"):
+    if (source == "hevy" or "hevy_workout_id=" in notes) and _classification_plan(row, profile=profile).get("is_run_day"):
         return True
     return text_has_run_signal(row_training_text(row))
 
 
-def is_strength_row(row: pd.Series | dict) -> bool:
-    if is_run_row(row):
+def is_strength_row(row: pd.Series | dict, profile: dict | None = None) -> bool:
+    if is_run_row(row, profile=profile):
         return False
     source = str(row.get("source", "") or "").lower()
     workout_type = str(row.get("workout_type", "") or "").lower()
@@ -379,8 +391,8 @@ def summarize_training_day(training_df: pd.DataFrame | None, day: Any, profile: 
     for column in ["workout_id", "exercise", "muscle_group", "workout_type", "source", "notes", "sets", "reps", "weight"]:
         if column not in today_rows.columns:
             today_rows[column] = "" if column not in {"sets", "reps", "weight"} else 0
-    today_rows["is_run"] = today_rows.apply(is_run_row, axis=1)
-    today_rows["is_lift"] = today_rows.apply(is_strength_row, axis=1)
+    today_rows["is_run"] = today_rows.apply(lambda row: is_run_row(row, profile=profile), axis=1)
+    today_rows["is_lift"] = today_rows.apply(lambda row: is_strength_row(row, profile=profile), axis=1)
 
     completed: list[str] = []
     has_lift = bool(today_rows["is_lift"].any())

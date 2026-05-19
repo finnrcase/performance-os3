@@ -60,14 +60,23 @@ class HevySyncTest(unittest.TestCase):
     def test_upsert_hevy_workout_replaces_existing_rows(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir) / "training_log.csv"
-            with patch.dict(os.environ, {"DATABASE_URL": ""}), patch.object(training_module, "TRAINING_LOG_PATH", temp_path):
+            raw_workouts_path = Path(temp_dir) / "raw_hevy_workouts.csv"
+            raw_sets_path = Path(temp_dir) / "raw_hevy_sets.csv"
+            with patch.dict(os.environ, {"DATABASE_URL": ""}), patch.object(training_module, "TRAINING_LOG_PATH", temp_path), patch.object(training_module, "RAW_HEVY_WORKOUTS_PATH", raw_workouts_path), patch.object(training_module, "RAW_HEVY_SETS_PATH", raw_sets_path):
                 first = hevy_client.upsert_hevy_workout(SAMPLE_WORKOUT, sync_source="test")
                 second = hevy_client.upsert_hevy_workout(SAMPLE_WORKOUT, sync_source="test")
                 saved = training_module.load_training_log()
+                raw_workouts = training_module.load_raw_hevy_workouts()
+                raw_sets = training_module.load_raw_hevy_sets()
 
         self.assertEqual(first["saved_rows"], 2)
+        self.assertEqual(first["raw_workouts_saved"], 1)
+        self.assertEqual(first["raw_sets_saved"], 2)
         self.assertEqual(second["replaced_rows"], 2)
         self.assertEqual(len(saved), 2)
+        self.assertEqual(len(raw_workouts), 1)
+        self.assertEqual(len(raw_sets), 2)
+        self.assertEqual(raw_workouts["hevy_workout_id"].iloc[0], "hevy-workout-1")
         self.assertEqual(saved["hevy_workout_id"].iloc[0], "hevy-workout-1")
         self.assertEqual(saved["sync_source"].iloc[0], "test")
 
@@ -89,11 +98,16 @@ class HevySyncTest(unittest.TestCase):
             return_value={
                 "events": 1,
                 "saved_workouts": 1,
+                "new_workouts": 1,
+                "updated_workouts": 0,
                 "deleted_rows": 0,
                 "failures": [],
                 "training_log": training_log,
                 "last_synced_at": "2026-05-13T16:05:00+00:00",
             },
+        ), patch(
+            "backend.routes.training.has_local_hevy_cache",
+            return_value=True,
         ), patch(
             "backend.routes.training.import_hevy_workouts",
             return_value={
@@ -107,14 +121,48 @@ class HevySyncTest(unittest.TestCase):
         ), patch(
             "backend.routes.training.save_hevy_sync_state",
             return_value={"last_sync_at": "2026-05-13T16:05:00+00:00", "last_error": "", "last_result": {}},
+        ), patch(
+            "backend.routes.training.consolidate_old_training_history",
+            return_value={"status": "ok"},
+        ), patch(
+            "backend.routes.training.refresh_training_cache_metadata",
+            return_value={"cache_health": "ready"},
         ):
             response = self.client.post("/api/training/sync/hevy")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["checked_hevy"])
         self.assertEqual(data["saved_workouts"], 1)
+        self.assertEqual(data["new_workouts"], 1)
+        self.assertEqual(data["updated_workouts"], 0)
         self.assertEqual(data["last_synced_at"], "2026-05-13T16:05:00+00:00")
+
+    def test_sync_endpoint_skips_recent_import_when_event_sync_has_no_changes_and_cache_exists(self):
+        training_log = pd.DataFrame(columns=training_module.TRAINING_COLUMNS)
+        with patch("backend.routes.training.is_hevy_api_configured", return_value=True), patch(
+            "backend.routes.training.sync_hevy_events",
+            return_value={"events": 0, "saved_workouts": 0, "deleted_rows": 0, "failures": [], "training_log": training_log},
+        ), patch(
+            "backend.routes.training.has_local_hevy_cache",
+            return_value=True,
+        ), patch("backend.routes.training.import_hevy_workouts") as import_mock, patch(
+            "backend.routes.training.save_hevy_sync_state",
+            return_value={"last_sync_at": "2026-05-13T16:05:00+00:00", "last_error": "", "last_result": {}},
+        ), patch(
+            "backend.routes.training.refresh_training_cache_metadata",
+            return_value={"cache_health": "ready"},
+        ):
+            response = self.client.post("/api/training/sync/hevy")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["checked_hevy"])
+        self.assertFalse(data["fallback_recent_import"])
+        self.assertEqual(data["saved_workouts"], 0)
+        import_mock.assert_not_called()
 
     def test_sync_endpoint_imports_recent_workouts_when_events_are_empty(self):
         rows = pd.DataFrame(
@@ -138,6 +186,9 @@ class HevySyncTest(unittest.TestCase):
             "backend.routes.training.sync_hevy_events",
             return_value={"events": 0, "saved_workouts": 0, "deleted_rows": 0, "failures": [], "training_log": pd.DataFrame(columns=training_module.TRAINING_COLUMNS)},
         ), patch(
+            "backend.routes.training.has_local_hevy_cache",
+            return_value=False,
+        ), patch(
             "backend.routes.training.import_hevy_workouts",
             return_value={
                 "imported_workouts": 1,
@@ -150,13 +201,21 @@ class HevySyncTest(unittest.TestCase):
         ), patch(
             "backend.routes.training.save_hevy_sync_state",
             return_value={"last_sync_at": "2026-05-13T16:06:00+00:00", "last_error": "", "last_result": {}},
+        ), patch(
+            "backend.routes.training.consolidate_old_training_history",
+            return_value={"status": "ok"},
+        ), patch(
+            "backend.routes.training.refresh_training_cache_metadata",
+            return_value={"cache_health": "ready"},
         ):
             response = self.client.post("/api/training/sync/hevy")
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertEqual(data["status"], "ok")
+        self.assertTrue(data["fallback_recent_import"])
         self.assertEqual(data["saved_workouts"], 1)
+        self.assertEqual(data["new_workouts"], 0)
         self.assertEqual(data["imported_rows"], 1)
         self.assertEqual(data["hevy_rows"], 1)
         self.assertEqual(data["latest_workout_date"], "2026-05-13")
@@ -181,12 +240,18 @@ class HevySyncTest(unittest.TestCase):
             "backend.routes.training.sync_hevy_events",
             side_effect=RuntimeError("database connection reset"),
         ), patch(
+            "backend.routes.training.has_local_hevy_cache",
+            return_value=True,
+        ), patch(
             "backend.routes.training.import_hevy_workouts",
             side_effect=RuntimeError("recent import failed"),
         ), patch(
             "backend.routes.training.save_hevy_sync_state",
             return_value={"last_sync_at": "", "last_error": "database connection reset", "last_result": {"status": "error"}},
-        ), patch("backend.routes.training.load_live_training_log", return_value=pd.DataFrame(columns=training_module.TRAINING_COLUMNS)):
+        ), patch("backend.routes.training.load_live_training_log", return_value=pd.DataFrame(columns=training_module.TRAINING_COLUMNS)), patch(
+            "backend.routes.training.refresh_training_cache_metadata",
+            return_value={"cache_health": "ready"},
+        ):
             response = self.client.post("/api/training/sync/hevy")
 
         self.assertEqual(response.status_code, 200)
@@ -216,6 +281,56 @@ class HevySyncTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["saved_rows"], 2)
+
+    def test_webhook_updates_local_training_caches_after_upsert(self):
+        training_log = pd.DataFrame(
+            [
+                {
+                    **{column: "" for column in training_module.TRAINING_COLUMNS},
+                    "workout_id": "hevy-workout-1",
+                    "date": "2026-05-13",
+                    "workout_type": "Strength",
+                    "exercise": "Bench Press",
+                    "sets": 1,
+                    "reps": 5,
+                    "weight": 225,
+                    "source": "hevy",
+                    "hevy_workout_id": "hevy-workout-1",
+                }
+            ],
+            columns=training_module.TRAINING_COLUMNS,
+        )
+        with patch("backend.routes.training.verify_webhook_token", return_value=True), patch(
+            "backend.routes.training.handle_hevy_webhook",
+            return_value={
+                "status": "ok",
+                "action": "upserted",
+                "workout_id": "hevy-workout-1",
+                "saved_rows": 1,
+                "replaced_rows": 0,
+                "training_log": training_log,
+            },
+        ), patch("backend.routes.training.consolidate_old_training_history") as consolidate_mock, patch(
+            "backend.routes.training.refresh_training_cache_metadata",
+            return_value={"cache_health": "ready"},
+        ) as cache_mock, patch(
+            "backend.routes.training.update_personal_records_from_logs",
+            return_value={"records_updated": 1},
+        ) as prs_mock, patch("backend.routes.training.save_hevy_sync_state") as state_mock:
+            response = self.client.post(
+                "/api/hevy/webhook",
+                headers={"x-hevy-webhook-secret": "test-secret"},
+                json={"workout_id": "hevy-workout-1"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["cache"], {"cache_health": "ready"})
+        self.assertTrue(data["personal_records_updated"])
+        consolidate_mock.assert_called_once()
+        cache_mock.assert_called_once()
+        prs_mock.assert_called_once()
+        state_mock.assert_called_once()
 
 
 if __name__ == "__main__":

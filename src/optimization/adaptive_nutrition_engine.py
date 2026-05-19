@@ -18,7 +18,7 @@ from src.analytics.training_workload import analyze_hevy_performance_signal, ana
 from src.nutrition_targets import align_macro_calories, calculate_bodyweight_trend_signal, calculate_macro_targets
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
-from src.training_schedule import is_run_row, is_strength_row, planned_training_for_date
+from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile, planned_training_for_date
 
 
 NUTRITION_RECOMMENDATION_HISTORY_PATH = processed_data_path("nutrition_recommendation_history.json")
@@ -327,12 +327,12 @@ def _running_load_signal(workload: dict, performance_signal: dict | None = None)
     }
 
 
-def _is_hevy_row(row: pd.Series) -> bool:
-    return is_strength_row(row)
+def _is_hevy_row(row: pd.Series, profile: dict | None = None) -> bool:
+    return is_strength_row(row, profile=profile)
 
 
-def _is_run_row(row: pd.Series) -> bool:
-    return is_run_row(row)
+def _is_run_row(row: pd.Series, profile: dict | None = None) -> bool:
+    return is_run_row(row, profile=profile)
 
 
 def _is_lower_body_training(df: pd.DataFrame) -> bool:
@@ -357,11 +357,12 @@ def _is_lower_body_training(df: pd.DataFrame) -> bool:
 
 
 def _detect_day_type(training_df: pd.DataFrame | None, workload: dict, recovery_signal: dict, analysis_day: pd.Timestamp) -> dict:
-    planned = planned_training_for_date(analysis_day)
+    profile = load_training_schedule_profile()
+    planned = planned_training_for_date(analysis_day, profile=profile)
     df = _date_clean(training_df)
     today_rows = df[df["date"] == analysis_day].copy() if not df.empty else pd.DataFrame()
-    lift_rows = today_rows[today_rows.apply(_is_hevy_row, axis=1)] if not today_rows.empty else pd.DataFrame()
-    run_rows = today_rows[today_rows.apply(_is_run_row, axis=1)] if not today_rows.empty else pd.DataFrame()
+    lift_rows = today_rows[today_rows.apply(lambda row: _is_hevy_row(row, profile=profile), axis=1)] if not today_rows.empty else pd.DataFrame()
+    run_rows = today_rows[today_rows.apply(lambda row: _is_run_row(row, profile=profile), axis=1)] if not today_rows.empty else pd.DataFrame()
     for column in ["sets", "duration_minutes"]:
         if column not in lift_rows.columns:
             lift_rows[column] = 0
@@ -470,8 +471,9 @@ def _daily_training(training_df: pd.DataFrame | None) -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "weekday", "volume", "sets", "duration_minutes", "run_only", "has_lift", "has_run", "lower_body"])
     for column in ["sets", "reps", "weight", "duration_minutes"]:
         df[column] = pd.to_numeric(df.get(column, 0), errors="coerce").fillna(0)
-    df["is_lift"] = df.apply(_is_hevy_row, axis=1)
-    df["is_run"] = df.apply(_is_run_row, axis=1)
+    profile = load_training_schedule_profile()
+    df["is_lift"] = df.apply(lambda row: _is_hevy_row(row, profile=profile), axis=1)
+    df["is_run"] = df.apply(lambda row: _is_run_row(row, profile=profile), axis=1)
     df["volume"] = df["sets"].clip(lower=0) * df["reps"].clip(lower=0) * df["weight"].clip(lower=0)
     rows = []
     for date_value, day_df in df.groupby("date"):
@@ -618,13 +620,14 @@ def _data_quality_score(
         warnings.append("No food log yesterday.")
 
     recent_training = training[training["date"] >= analysis_day - pd.Timedelta(days=13)] if not training.empty else pd.DataFrame()
-    hevy_recent = recent_training[recent_training.apply(_is_hevy_row, axis=1)] if not recent_training.empty else pd.DataFrame()
+    profile = load_training_schedule_profile()
+    hevy_recent = recent_training[recent_training.apply(lambda row: _is_hevy_row(row, profile=profile), axis=1)] if not recent_training.empty else pd.DataFrame()
     hevy_days = int(hevy_recent["date"].nunique()) if not hevy_recent.empty and "date" in hevy_recent.columns else 0
     score += 15 if hevy_days >= 2 else 8 if hevy_days else 0
     if hevy_recent.empty and int(user_goals.get("training_frequency_per_week") or 0) > 0:
         warnings.append("No recent Hevy/lifting sync found.")
 
-    run_recent = recent_training[recent_training.apply(_is_run_row, axis=1)] if not recent_training.empty else pd.DataFrame()
+    run_recent = recent_training[recent_training.apply(lambda row: _is_run_row(row, profile=profile), axis=1)] if not recent_training.empty else pd.DataFrame()
     expected_cardio = int(user_goals.get("cardio_frequency_per_week") or 0)
     if expected_cardio <= 0:
         score += 8
