@@ -41,10 +41,10 @@ from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recomme
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
-from src.training import TRAINING_COLUMNS, calculate_training_volume, load_recent_training_log, load_training_log
+from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, calculate_training_volume, load_recent_training_log, load_training_log, recent_training_window
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import load_hevy_sync_state
-from src.storage import debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
+from src.storage import count_dataframe_rows, debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -117,6 +117,8 @@ LOGGED_REQUEST_PATHS = {
 }
 LIVE_TRAINING_DAYS = 365
 LIVE_TRAINING_MAX_ROWS = 20000
+CORE_TRAINING_DAYS = 90
+CORE_TRAINING_MAX_ROWS = 5000
 GOALS_TRAINING_DAYS = 90
 WORKLOAD_TRAINING_DAYS = 84
 
@@ -284,6 +286,70 @@ def log_shutdown() -> None:
 def debug_db() -> dict:
     """Return a fresh Postgres SELECT 1 diagnostic."""
     return debug_database_connection()
+
+
+@app.get("/api/debug/startup")
+def debug_startup() -> dict:
+    """Return lightweight startup diagnostics without running advanced analytics."""
+    started = time.perf_counter()
+    blocks: list[dict] = []
+
+    def measure(name: str, fn):
+        block_started = time.perf_counter()
+        try:
+            value = fn()
+            blocks.append({"name": name, "status": "ok", "duration_ms": round((time.perf_counter() - block_started) * 1000, 1)})
+            return value
+        except Exception as exc:
+            blocks.append(
+                {
+                    "name": name,
+                    "status": "error",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "duration_ms": round((time.perf_counter() - block_started) * 1000, 1),
+                }
+            )
+            return None
+
+    db = measure("db", debug_database_connection)
+    training_rows_total = measure("count_training_rows_total", lambda: count_dataframe_rows("training_log", TRAINING_LOG_PATH))
+    nutrition_df = measure("load_nutrition_log", load_nutrition_log)
+    body_df = measure("load_body_metrics", load_body_metrics)
+    recovery_df = measure("load_recovery_log", load_recovery_log)
+    training_df = measure("load_recent_training_log_90d", lambda: load_recent_training_log(days=90, max_rows=10000))
+    training_90d = measure("recent_training_window_90d", lambda: recent_training_window(training_df, days=90))
+    goals_payload = measure(
+        "build_automatic_goals",
+        lambda: build_automatic_goals(
+            load_user_goals(),
+            body_metrics_df=body_df if isinstance(body_df, pd.DataFrame) else pd.DataFrame(columns=BODY_METRICS_COLUMNS),
+            training_df=training_90d if isinstance(training_90d, pd.DataFrame) else pd.DataFrame(columns=TRAINING_COLUMNS),
+        ),
+    )
+    failed = [block for block in blocks if block.get("status") == "error"]
+    slow = sorted(blocks, key=lambda item: float(item.get("duration_ms") or 0), reverse=True)
+    return _json_safe(
+        {
+            "status": "ok" if not failed else "degraded",
+            "storage": "postgres" if use_database() else "local_files",
+            "db": db,
+            "counts": {
+                "training_rows_total": training_rows_total if isinstance(training_rows_total, int) else None,
+                "training_rows_90d": len(training_90d) if isinstance(training_90d, pd.DataFrame) else None,
+                "nutrition_rows": len(nutrition_df) if isinstance(nutrition_df, pd.DataFrame) else None,
+                "body_metric_rows": len(body_df) if isinstance(body_df, pd.DataFrame) else None,
+                "recovery_rows": len(recovery_df) if isinstance(recovery_df, pd.DataFrame) else None,
+            },
+            "goals_ok": isinstance(goals_payload, dict),
+            "checks": blocks,
+            "blocks": blocks,
+            "likely_bottleneck": slow[0].get("name") if slow else None,
+            "suggested_action": "Inspect the slowest check and keep startup on /api/dashboard/core plus /api/goals only.",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):
@@ -857,7 +923,7 @@ def _dashboard_context() -> dict:
     body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     recovery_df = _load_dashboard_frame("recovery_loaded", load_recovery_log, RECOVERY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     sleep_df = _load_dashboard_frame("sleep_loaded", load_sleep_entries, SLEEP_ENTRY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(LIVE_TRAINING_DAYS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(LIVE_TRAINING_DAYS, LIVE_TRAINING_MAX_ROWS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     return {
         "errors": dashboard_errors,
         "status": dashboard_status,
@@ -905,7 +971,7 @@ def _build_dashboard_core_payload() -> dict:
 
     nutrition_df = _load_dashboard_frame("nutrition_loaded", load_nutrition_log, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(LIVE_TRAINING_DAYS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(CORE_TRAINING_DAYS, CORE_TRAINING_MAX_ROWS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
 
     goals = _safe_dashboard_block(
         "goals_core",

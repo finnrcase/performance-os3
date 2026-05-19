@@ -150,6 +150,24 @@ def _normalize_training_log(training_df: pd.DataFrame) -> pd.DataFrame:
     return _hydrate_legacy_import_metadata(training_df)
 
 
+def recent_training_window(training_df: pd.DataFrame | None, days: int = 365) -> pd.DataFrame:
+    """Return a date-clean recent training window for live analytics."""
+    if training_df is None or training_df.empty or "date" not in training_df.columns:
+        return pd.DataFrame(columns=TRAINING_COLUMNS)
+    df = training_df.copy()
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    if df.empty:
+        return pd.DataFrame(columns=TRAINING_COLUMNS)
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=max(int(days), 0))
+    df = df[df["date"] >= cutoff].copy()
+    df["date"] = df["date"].dt.date.astype(str)
+    for column in TRAINING_COLUMNS:
+        if column not in df.columns:
+            df[column] = pd.NA
+    return df[TRAINING_COLUMNS]
+
+
 def load_training_log() -> pd.DataFrame:
     """Load training entries from local CSV/Postgres."""
     return _normalize_training_log(load_dataframe("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS))

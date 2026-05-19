@@ -6,6 +6,7 @@ import time
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+import pandas as pd
 
 from src.analytics.food_history import build_daily_nutrition_summary, save_daily_nutrition_summary
 from src.analytics.training_workload import analyze_training_workload
@@ -20,7 +21,7 @@ from src.optimization.adaptive_nutrition_engine import (
 )
 from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recommendation
 from src.recovery import load_recovery_log, load_sleep_entries
-from src.training import load_recent_training_log, load_training_log
+from src.training import TRAINING_COLUMNS, load_recent_training_log, recent_training_window
 
 
 router = APIRouter(tags=["goals"])
@@ -43,41 +44,107 @@ class GoalPayload(BaseModel):
     aggressiveness: str
 
 
-def _goal_response(goals: dict) -> dict:
+def _safe_goal_block(name: str, fallback, fn, debug: list[dict]):
     started = time.perf_counter()
-    logger.info("Goals response started.")
-    body_metrics = load_body_metrics()
-    nutrition_log = load_nutrition_log()
-    training_started = time.perf_counter()
-    training_log = load_recent_training_log(days=GOALS_TRAINING_DAYS)
-    logger.info("load_recent_training_log(%sd) rows=%s took %.1f ms", GOALS_TRAINING_DAYS, len(training_log), (time.perf_counter() - training_started) * 1000)
-    goals_started = time.perf_counter()
-    goals = build_automatic_goals(goals, body_metrics_df=body_metrics, training_df=training_log)
-    logger.info("build_automatic_goals rows=%s took %.1f ms", len(training_log), (time.perf_counter() - goals_started) * 1000)
-    active_targets = load_nutrition_targets()
-    workload_training = load_recent_training_log(days=WORKLOAD_TRAINING_DAYS)
-    workload_started = time.perf_counter()
-    workload = analyze_training_workload(workload_training, bodyweight=goals["current_bodyweight"])
-    logger.info("analyze_training_workload rows=%s took %.1f ms", len(workload_training), (time.perf_counter() - workload_started) * 1000)
-    macro_started = time.perf_counter()
-    base_targets = calculate_macro_targets(
+    try:
+        value = fn()
+        debug.append({"name": name, "status": "ok", "duration_ms": round((time.perf_counter() - started) * 1000, 1)})
+        return value
+    except Exception as exc:
+        logger.exception("[goals] %s failed", name)
+        debug.append(
+            {
+                "name": name,
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        )
+        return fallback() if callable(fallback) else fallback
+
+
+def _fallback_targets(goals: dict) -> dict:
+    calories = int(round(float(goals.get("target_calories") or goals.get("calories") or 2500)))
+    bodyweight = float(goals.get("current_bodyweight") or 180)
+    protein = int(round(max(150, bodyweight)))
+    fat = int(round(max(55, calories * 0.25 / 9)))
+    carbs = int(round(max(0, (calories - protein * 4 - fat * 9) / 4)))
+    return {
+        "target_calories": calories,
+        "protein_grams": protein,
+        "carb_grams": carbs,
+        "fat_grams": fat,
+        "macro_calories": int(protein * 4 + carbs * 4 + fat * 9),
+        "calorie_macro_delta": int(protein * 4 + carbs * 4 + fat * 9 - calories),
+        "strategy": "fallback",
+        "target_description": "Safe fallback targets loaded because goal analytics were unavailable.",
+    }
+
+
+def _goal_response(goals: dict, *, include_training: bool = False) -> dict:
+    started = time.perf_counter()
+    debug: list[dict] = []
+    warnings: list[str] = []
+    logger.info("[goals] response started include_training=%s", include_training)
+
+    body_metrics = _safe_goal_block("load_body_metrics", lambda: pd.DataFrame(), load_body_metrics, debug)
+    nutrition_log = _safe_goal_block("load_nutrition_log", lambda: pd.DataFrame(), load_nutrition_log, debug)
+    active_targets = _safe_goal_block("load_nutrition_targets", lambda: None, load_nutrition_targets, debug)
+
+    training_log = pd.DataFrame(columns=TRAINING_COLUMNS)
+    workload_training = pd.DataFrame(columns=TRAINING_COLUMNS)
+    if include_training:
+        training_log = _safe_goal_block(
+            f"load_recent_training_log_{GOALS_TRAINING_DAYS}d",
+            lambda: pd.DataFrame(columns=TRAINING_COLUMNS),
+            lambda: load_recent_training_log(days=GOALS_TRAINING_DAYS, max_rows=10000),
+            debug,
+        )
+        training_log = recent_training_window(training_log, GOALS_TRAINING_DAYS)
+        workload_training = recent_training_window(training_log, WORKLOAD_TRAINING_DAYS)
+    else:
+        warnings.append("Training-derived goal personalization skipped on startup for fast load.")
+        debug.append({"name": "load_training_log", "status": "skipped", "duration_ms": 0, "rows": 0})
+
+    goals = _safe_goal_block(
+        "build_automatic_goals",
         goals,
-        nutrition_df=nutrition_log,
-        training_df=training_log,
-        recovery_df=None,
-        body_metrics_df=body_metrics,
-        workload_data=workload,
+        lambda: build_automatic_goals(goals, body_metrics_df=body_metrics, training_df=training_log),
+        debug,
     )
-    logger.info("calculate_macro_targets rows=%s took %.1f ms", len(training_log), (time.perf_counter() - macro_started) * 1000)
+    workload = _safe_goal_block(
+        "analyze_training_workload",
+        lambda: {"current": {}},
+        lambda: analyze_training_workload(workload_training, bodyweight=goals.get("current_bodyweight", 180)),
+        debug,
+    )
+    if active_targets:
+        base_targets = active_targets
+        debug.append({"name": "calculate_macro_targets", "status": "skipped", "duration_ms": 0, "reason": "using saved active targets"})
+    else:
+        base_targets = _safe_goal_block(
+            "calculate_macro_targets",
+            lambda: _fallback_targets(goals),
+            lambda: calculate_macro_targets(
+                goals,
+                nutrition_df=nutrition_log,
+                training_df=training_log,
+                recovery_df=None,
+                body_metrics_df=body_metrics,
+                workload_data=workload,
+            ),
+            debug,
+        )
     targets = active_targets or base_targets
     if not active_targets:
-        save_nutrition_targets(targets)
+        _safe_goal_block("save_nutrition_targets", lambda: None, lambda: save_nutrition_targets(targets), debug)
     response = {
         "goals": goals,
         "targets": targets,
         "base_targets": base_targets,
         "training_workload": workload,
-        "weight_feedback": analyze_weight_trend(body_metrics, goals),
+        "weight_feedback": _safe_goal_block("analyze_weight_trend", lambda: {}, lambda: analyze_weight_trend(body_metrics, goals), debug),
         "adaptive_recommendation": {
             "confidence": "deferred",
             "reasoning": ["Advanced adaptive nutrition hydrates from the dashboard after startup."],
@@ -90,15 +157,26 @@ def _goal_response(goals: dict) -> dict:
             "message": "Lean-bulk decision analysis is deferred until after startup.",
             "recommended_target_calories": targets.get("target_calories"),
         },
+        "debug": {
+            "status": "degraded" if any(item.get("status") == "error" for item in debug) else "ok",
+            "warnings": warnings,
+            "checks": debug,
+            "counts": {
+                "nutrition_rows": len(nutrition_log) if isinstance(nutrition_log, pd.DataFrame) else 0,
+                "body_metric_rows": len(body_metrics) if isinstance(body_metrics, pd.DataFrame) else 0,
+                "training_rows": len(training_log) if isinstance(training_log, pd.DataFrame) else 0,
+            },
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        },
     }
-    logger.info("Goals response completed in %.1f ms", (time.perf_counter() - started) * 1000)
+    logger.info("[goals] response completed in %.1f ms checks=%s", (time.perf_counter() - started) * 1000, debug)
     return response
 
 
 def _calculate_suggested_targets(goals: dict):
     body_metrics = load_body_metrics()
     nutrition_log = load_nutrition_log()
-    training_log = load_training_log()
+    training_log = load_recent_training_log(days=180, max_rows=20000)
     recovery_log = load_recovery_log()
     sleep_log = load_sleep_entries()
     goals = build_automatic_goals(goals, body_metrics_df=body_metrics, training_df=training_log)
@@ -136,7 +214,7 @@ def get_goals() -> dict:
     if cached is not None and now < float(_GOALS_RESPONSE_CACHE.get("expires_at") or 0):
         logger.info("Goals response served from cache.")
         return copy.deepcopy(cached)
-    response = _goal_response(load_user_goals())
+    response = _goal_response(load_user_goals(), include_training=False)
     _GOALS_RESPONSE_CACHE["payload"] = copy.deepcopy(response)
     _GOALS_RESPONSE_CACHE["expires_at"] = now + GOALS_CACHE_TTL_SECONDS
     return response
@@ -148,7 +226,7 @@ def update_goals(payload: GoalPayload) -> dict:
     _GOALS_RESPONSE_CACHE["payload"] = None
     _GOALS_RESPONSE_CACHE["expires_at"] = 0.0
     goals = save_user_goals(payload.model_dump())
-    return _goal_response(goals)
+    return _goal_response(goals, include_training=False)
 
 
 @router.post("/api/goals/apply-suggested-macros")

@@ -1,4 +1,5 @@
 import logging
+import time
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ from src.nutrition import calculate_daily_totals, load_nutrition_log
 from src.nutrition_targets import calculate_macro_targets
 from src.goals import build_automatic_goals, load_user_goals
 from src.recovery import load_recovery_log
-from src.training import add_training_entry, load_recent_training_log, load_training_log, move_workout_date
+from src.training import add_training_entry, load_recent_training_log, load_training_log, move_workout_date, recent_training_window
 from src.training_schedule import load_training_schedule_profile, planned_training_for_date, save_training_schedule_profile
 
 
@@ -83,8 +84,8 @@ class TrainingScheduleProfilePayload(BaseModel):
     days: dict[str, dict]
 
 
-def _training_log_with_volume() -> pd.DataFrame:
-    training_df = load_training_log()
+def _training_log_with_volume(training_df: pd.DataFrame | None = None) -> pd.DataFrame:
+    training_df = load_training_log() if training_df is None else training_df
     if training_df.empty:
         return training_df
     df = training_df.copy()
@@ -99,7 +100,7 @@ def grouped_workout_history(training_df: pd.DataFrame) -> list[dict]:
     if training_df.empty:
         return []
 
-    df = _training_log_with_volume()
+    df = _training_log_with_volume(training_df)
     group_columns = ["date", "workout_id"]
     cards = []
     for (date, workout_id), group in df.groupby(group_columns, dropna=False, sort=False):
@@ -127,7 +128,7 @@ def grouped_workout_history(training_df: pd.DataFrame) -> list[dict]:
 def _recent_training_summary(training_df: pd.DataFrame) -> dict:
     if training_df.empty:
         return {"workout_count": 0, "recent_volume": 0, "top_exercises": []}
-    df = _training_log_with_volume()
+    df = _training_log_with_volume(training_df)
     df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
     cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=28)
     recent = df[df["date_dt"] >= cutoff].copy()
@@ -171,9 +172,23 @@ def get_training_logs() -> dict:
 
 
 @router.get("/api/training/history")
-def get_training_history() -> dict:
+def get_training_history(limit: int = 50, days: int = 180) -> dict:
     """Return expandable workouts grouped by date and workout_id."""
-    return {"items": grouped_workout_history(load_training_log())}
+    started = time.perf_counter()
+    bounded_limit = max(1, min(int(limit or 50), 200))
+    bounded_days = max(7, min(int(days or 180), 3650))
+    training_df = load_recent_training_log(days=bounded_days, max_rows=max(bounded_limit * 80, 2000))
+    grouped = grouped_workout_history(recent_training_window(training_df, days=bounded_days))
+    items = grouped[:bounded_limit]
+    logger.info(
+        "training/history rows=%s grouped=%s returned=%s days=%s took=%.1fms",
+        len(training_df),
+        len(grouped),
+        len(items),
+        bounded_days,
+        (time.perf_counter() - started) * 1000,
+    )
+    return {"items": items, "limit": bounded_limit, "days": bounded_days}
 
 
 @router.get("/api/training/schedule")
@@ -210,9 +225,15 @@ def get_training_exercises() -> dict:
 
 
 @router.get("/api/training/strength-trends")
-def get_strength_trends(exercise_name: str = "", date_range: str = "12w", muscle_group: str = "") -> dict:
+def get_strength_trends(exercise_name: str = "", date_range: str = "12w", muscle_group: str = "", days: int | None = None) -> dict:
     """Return exercise-level and muscle-group strength trend analytics."""
-    training_df = load_recent_training_log(days=84)
+    window_days = int(days) if days is not None else 84
+    if date_range.endswith("w") and date_range[:-1].isdigit():
+        window_days = int(date_range[:-1]) * 7
+    elif date_range.endswith("d") and date_range[:-1].isdigit():
+        window_days = int(date_range[:-1])
+    window_days = max(28, min(window_days, 365))
+    training_df = load_recent_training_log(days=window_days, max_rows=12000)
     if not exercise_name and not training_df.empty:
         exercise_counts = training_df["exercise"].fillna("").astype(str).str.strip()
         exercise_counts = exercise_counts[exercise_counts != ""]

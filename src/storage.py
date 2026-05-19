@@ -35,6 +35,14 @@ DATAFRAME_TABLES = {
     "usda_food_cache": "usda_food_cache",
     "verified_food_cache": "verified_food_cache",
 }
+DATAFRAME_DATE_TABLES = {
+    "nutrition_log",
+    "body_metrics",
+    "training_log",
+    "recovery_log",
+    "sleep_entries",
+    "daily_nutrition_summary",
+}
 
 DOCUMENT_TABLES = {
     "user_settings": "api_connections",
@@ -285,6 +293,9 @@ def ensure_database_schema(force: bool = False) -> None:
                     cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS row_key TEXT")
                     cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_row_order_idx ON {table} (row_order)")
                     cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_row_key_unique_idx ON {table} (row_key) WHERE row_key IS NOT NULL")
+                    dataset_name = next((name for name, table_name in DATAFRAME_TABLES.items() if table_name == table), "")
+                    if dataset_name in DATAFRAME_DATE_TABLES:
+                        cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_data_date_idx ON {table} ((data->>'date'))")
             conn.commit()
 
     _with_database_retry(apply_schema)
@@ -368,6 +379,27 @@ def load_dataframe_recent(dataset: str, path: Path, columns: list[str], *, date_
         if column not in df.columns:
             df[column] = pd.NA
     return df[columns]
+
+
+def count_dataframe_rows(dataset: str, path: Path) -> int:
+    """Return a cheap row count for diagnostics without hydrating every JSON row."""
+    if use_database():
+        def count_from_db() -> int:
+            ensure_database_schema()
+            table = _table_for_dataframe(dataset)
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")
+                    row = cur.fetchone()
+            return int(row[0] if row else 0)
+
+        return int(_with_database_retry(count_from_db))
+    if not path.exists():
+        return 0
+    try:
+        return max(0, int(sum(1 for _ in path.open("r", encoding="utf-8")) - 1))
+    except OSError:
+        return 0
 
 
 def save_dataframe(dataset: str, path: Path, df: pd.DataFrame, columns: list[str]) -> None:

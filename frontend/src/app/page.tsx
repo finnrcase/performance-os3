@@ -52,6 +52,7 @@ const navigation = [
   { id: "training", label: "Training", icon: Dumbbell },
   { id: "history", label: "Data & History", icon: BarChart3 },
   { id: "settings", label: "Integrations / Settings", icon: Settings },
+  { id: "debug", label: "Startup Debug", icon: AlertTriangle },
 ] as const;
 
 type PageId = (typeof navigation)[number]["id"];
@@ -846,6 +847,20 @@ type DashboardDebugBlock = {
   duration_ms?: number;
 };
 
+type StartupDebugEntry = {
+  key: string;
+  label: string;
+  path: string;
+  required: boolean;
+  status: "pending" | "ok" | "error" | "timeout" | "canceled";
+  httpStatus?: number | null;
+  durationMs?: number;
+  errorMessage?: string;
+  responseText?: string;
+  backendLabel?: string;
+  timestamp: string;
+};
+
 type SettingsData = {
   overall_status?: "ok" | "degraded" | "error" | string;
   environment?: string;
@@ -1321,9 +1336,102 @@ async function apiGet<T>(path: string, timeoutMs: number = DEFAULT_API_TIMEOUT_M
   }
 }
 
-async function apiErrorMessage(response: Response) {
-  const text = await response.text();
-  if (!text) return response.statusText || "Request failed.";
+type StartupDebugMeta = {
+  key: string;
+  label: string;
+  path: string;
+  required: boolean;
+};
+
+function classifyRequestDebugStatus(error: unknown): StartupDebugEntry["status"] {
+  if (error instanceof Error) {
+    const message = error.message.toLowerCase();
+    if (message.includes("timed out") || message.includes("timeout") || message.includes("abort")) return "timeout";
+    if (message.includes("cancel")) return "canceled";
+  }
+  return "error";
+}
+
+async function trackedApiGet<T>(
+  meta: StartupDebugMeta,
+  timeoutMs: number,
+  record: (entry: StartupDebugEntry) => void,
+): Promise<T> {
+  const timestamp = new Date().toISOString();
+  const started = performance.now();
+  record({
+    ...meta,
+    status: "pending",
+    httpStatus: null,
+    backendLabel: publicApiBaseLabel(),
+    timestamp,
+  });
+
+  try {
+    const url = apiUrl(meta.path);
+    const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" }, timeoutMs);
+    const responseText = await response.text();
+    const durationMs = Math.round(performance.now() - started);
+    if (!response.ok) {
+      const message = apiErrorMessageFromText(responseText, response.statusText);
+      record({
+        ...meta,
+        status: "error",
+        httpStatus: response.status,
+        durationMs,
+        errorMessage: message,
+        responseText: responseText.slice(0, 2000),
+        backendLabel: publicApiBaseLabel(),
+        timestamp: new Date().toISOString(),
+      });
+      throw new ApiRequestError(meta.path, response.status, message);
+    }
+    try {
+      const parsed = JSON.parse(responseText) as T;
+      record({
+        ...meta,
+        status: "ok",
+        httpStatus: response.status,
+        durationMs,
+        responseText: responseText.slice(0, 1000),
+        backendLabel: publicApiBaseLabel(),
+        timestamp: new Date().toISOString(),
+      });
+      return parsed;
+    } catch (error) {
+      const message = `${meta.path} returned invalid JSON (HTTP ${response.status})`;
+      record({
+        ...meta,
+        status: "error",
+        httpStatus: response.status,
+        durationMs,
+        errorMessage: message,
+        responseText: responseText.slice(0, 2000),
+        backendLabel: publicApiBaseLabel(),
+        timestamp: new Date().toISOString(),
+      });
+      throw error instanceof Error ? new Error(message) : new Error(message);
+    }
+  } catch (error) {
+    if (error instanceof ApiRequestError) throw error;
+    const durationMs = Math.round(performance.now() - started);
+    const status = classifyRequestDebugStatus(error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    record({
+      ...meta,
+      status,
+      httpStatus: null,
+      durationMs,
+      errorMessage,
+      backendLabel: publicApiBaseLabel(),
+      timestamp: new Date().toISOString(),
+    });
+    throw error;
+  }
+}
+
+function apiErrorMessageFromText(text: string, statusText: string) {
+  if (!text) return statusText || "Request failed.";
   try {
     const parsed = JSON.parse(text);
     const detail = parsed?.detail;
@@ -1334,6 +1442,11 @@ async function apiErrorMessage(response: Response) {
     return text;
   }
   return text;
+}
+
+async function apiErrorMessage(response: Response) {
+  const text = await response.text();
+  return apiErrorMessageFromText(text, response.statusText);
 }
 
 async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
@@ -2461,6 +2574,64 @@ function PresetFoodEditor({
         </button>
       </div>
     </div>
+  );
+}
+
+function SupplementsTile({
+  date,
+}: Readonly<{
+  date: string;
+}>) {
+  const storageKey = `performance-os-supplements-taken-${date}`;
+  const [taken, setTaken] = useState(false);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setTaken(window.localStorage.getItem(storageKey) === "true");
+  }, [storageKey]);
+
+  const toggleTaken = () => {
+    setTaken((current) => {
+      const next = !current;
+      if (typeof window !== "undefined") {
+        window.localStorage.setItem(storageKey, String(next));
+      }
+      return next;
+    });
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={toggleTaken}
+      aria-pressed={taken}
+      className={cx(
+        "group w-full rounded-xl border p-4 text-left transition duration-300",
+        taken
+          ? "border-cyan-300/30 bg-cyan-300/[0.08] shadow-[0_0_28px_rgba(34,211,238,0.10)]"
+          : "border-white/10 bg-white/[0.035] hover:border-white/15 hover:bg-white/[0.055]",
+      )}
+    >
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-white">Supplements</p>
+          <p className={cx("mt-1 text-sm transition", taken ? "text-cyan-100" : "text-zinc-400")}>
+            {taken ? "Taken today" : "Mark today’s supplements as taken"}
+          </p>
+        </div>
+        <span
+          className={cx(
+            "grid h-11 w-11 shrink-0 place-items-center rounded-full border transition duration-300",
+            taken
+              ? "border-cyan-200/50 bg-cyan-200/15 text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.18)]"
+              : "border-white/15 bg-black/20 text-zinc-500 group-hover:text-zinc-300",
+          )}
+        >
+          <Check className={cx("h-5 w-5 transition duration-300", taken ? "scale-100 opacity-100" : "scale-75 opacity-0")} />
+          {!taken ? <span className="absolute h-4 w-4 rounded-sm border border-current" /> : null}
+        </span>
+      </div>
+    </button>
   );
 }
 
@@ -3817,6 +3988,7 @@ function FoodPage({
             </div>
           ) : null}
         </Card>
+        <SupplementsTile date={forms.nutrition.date} />
         {showFoodHistory ? (
           <Card className="min-w-0">
             <SectionHeader eyebrow="Details" title="Food history and targets" />
@@ -7087,6 +7259,140 @@ function ApiConnectionTestPanel({
   );
 }
 
+function startupStatusClass(status: StartupDebugEntry["status"]) {
+  if (status === "ok") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "pending") return "border-zinc-300/20 bg-white/[0.04] text-zinc-200";
+  if (status === "timeout" || status === "canceled") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  return "border-red-300/25 bg-red-300/10 text-red-100";
+}
+
+function startupDebugSummary(entry: StartupDebugEntry) {
+  const duration = entry.durationMs != null ? ` in ${entry.durationMs.toLocaleString()}ms` : "";
+  if (entry.status === "ok") return `${entry.httpStatus ?? 200} OK${duration}`;
+  if (entry.status === "pending") return "Pending";
+  if (entry.status === "timeout") return `Timeout after ${entry.durationMs?.toLocaleString() ?? "unknown"}ms`;
+  if (entry.status === "canceled") return `Canceled${duration}`;
+  return `${entry.httpStatus ? `${entry.httpStatus} ` : ""}${entry.errorMessage ?? "Error"}${duration}`;
+}
+
+function StartupDebugPanel({
+  entries,
+  initiallyOpen = false,
+  open,
+  onOpenChange,
+}: Readonly<{
+  entries: StartupDebugEntry[];
+  initiallyOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+}>) {
+  const [localOpen, setLocalOpen] = useState(initiallyOpen);
+  const isOpen = open ?? localOpen;
+  const setPanelOpen = (nextOpen: boolean) => {
+    if (open === undefined) {
+      setLocalOpen(nextOpen);
+    } else {
+      onOpenChange?.(nextOpen);
+    }
+  };
+  useEffect(() => {
+    if (initiallyOpen && open === undefined) setLocalOpen(true);
+  }, [initiallyOpen, open]);
+  const sortedEntries = entries.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  const copyReport = async () => {
+    const report = JSON.stringify(sortedEntries, null, 2);
+    try {
+      await navigator.clipboard.writeText(report);
+    } catch {
+      window.prompt("Copy debug report", report);
+    }
+  };
+
+  return (
+    <div className="mt-4 rounded-lg border border-white/10 bg-black/20 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <button type="button" onClick={() => setPanelOpen(!isOpen)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold text-zinc-100">
+          <AlertTriangle className="h-4 w-4" />
+          {isOpen ? "Hide Debug" : "Show Debug"}
+        </button>
+        <button type="button" onClick={() => void copyReport()} disabled={!sortedEntries.length} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+          Copy debug report
+        </button>
+      </div>
+      {isOpen ? (
+        sortedEntries.length ? (
+          <div className="mt-3 space-y-2">
+            {sortedEntries.map((entry) => (
+              <div key={`${entry.key}-${entry.timestamp}`} className="rounded-lg border border-white/10 bg-zinc-950/70 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="font-semibold text-white">{entry.label}</p>
+                    <p className="mt-1 break-all text-xs text-zinc-500">{entry.path}</p>
+                  </div>
+                  <span className={cx("rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", startupStatusClass(entry.status))}>{entry.status}</span>
+                </div>
+                <div className="mt-3 grid gap-2 text-xs text-zinc-300 sm:grid-cols-2 lg:grid-cols-4">
+                  <p><span className="text-zinc-500">Required:</span> {entry.required ? "yes" : "no"}</p>
+                  <p><span className="text-zinc-500">HTTP:</span> {entry.httpStatus ?? "--"}</p>
+                  <p><span className="text-zinc-500">Duration:</span> {entry.durationMs != null ? `${entry.durationMs.toLocaleString()}ms` : "--"}</p>
+                  <p><span className="text-zinc-500">Backend:</span> {entry.backendLabel ?? "--"}</p>
+                </div>
+                <p className="mt-2 text-sm text-zinc-200">{startupDebugSummary(entry)}</p>
+                {entry.errorMessage ? <p className="mt-2 break-words text-xs leading-5 text-red-100/80">{entry.errorMessage}</p> : null}
+                {entry.responseText && entry.status !== "ok" ? <pre className="mt-2 max-h-36 overflow-auto rounded-md bg-black/30 p-2 text-xs text-zinc-300">{entry.responseText}</pre> : null}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-zinc-400">No startup requests have been recorded yet.</p>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+function StartupDebugPage({
+  entries,
+  onRetry,
+}: Readonly<{
+  entries: StartupDebugEntry[];
+  onRetry: () => void;
+}>) {
+  const latest = entries.slice(-6);
+  return (
+    <div className="space-y-4">
+      <Card>
+        <SectionHeader
+          eyebrow="Diagnostics"
+          title="Startup Debug"
+          action={
+            <button type="button" onClick={onRetry} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+              <RefreshCw className="h-4 w-4" />
+              Retry startup
+            </button>
+          }
+        />
+        {latest.length ? (
+          <div className="grid gap-3 md:grid-cols-3">
+            {latest.map((entry) => (
+              <div key={`${entry.key}-${entry.timestamp}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="truncate text-sm font-semibold text-white">{entry.label}</p>
+                  <span className={cx("rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", startupStatusClass(entry.status))}>{entry.status}</span>
+                </div>
+                <p className="mt-2 text-xs text-zinc-400">{startupDebugSummary(entry)}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="text-sm text-zinc-400">No startup requests have been recorded yet.</p>
+        )}
+        <StartupDebugPanel entries={entries} initiallyOpen />
+      </Card>
+    </div>
+  );
+}
+
 
 function AccentThemePicker({ value, onChange }: Readonly<{ value: AccentTheme; onChange: (theme: AccentTheme) => void }>) {
   return (
@@ -7349,6 +7655,8 @@ export default function Home() {
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
   const [rateLimited, setRateLimited] = useState(false);
+  const [startupDebug, setStartupDebug] = useState<StartupDebugEntry[]>([]);
+  const [showDebugPanel, setShowDebugPanel] = useState(false);
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
@@ -7376,6 +7684,13 @@ export default function Home() {
     if (nextSettings.appearance?.accent_color) {
       setAccentTheme(sanitizeAccentTheme(nextSettings.appearance.accent_color));
     }
+  }, []);
+
+  const recordStartupDebug = useCallback((entry: StartupDebugEntry) => {
+    setStartupDebug((current) => {
+      const filtered = current.filter((item) => item.key !== entry.key || item.status !== "pending");
+      return [...filtered, entry].slice(-80);
+    });
   }, []);
 
   const handleAccentThemeChange = useCallback(async (theme: AccentTheme) => {
@@ -7411,31 +7726,48 @@ export default function Home() {
     const deferredSteps: Array<{
       key: string;
       label: string;
+      path: string;
+      timeoutMs?: number;
       run: () => Promise<void>;
     }> = [
       {
         key: "dashboard_full",
         label: "Advanced dashboard",
-        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard", DEFAULT_API_TIMEOUT_MS)),
+        path: "/api/dashboard",
+        timeoutMs: DEFAULT_API_TIMEOUT_MS,
+        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_full", label: "Advanced dashboard", path: "/api/dashboard", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "integration_status",
         label: "Integration status",
-        run: async () => applySettingsData(await apiGet<SettingsData>("/api/integrations/status?external_checks=false", SETTINGS_API_TIMEOUT_MS)),
+        path: "/api/integrations/status?external_checks=false",
+        timeoutMs: SETTINGS_API_TIMEOUT_MS,
+        run: async () => applySettingsData(await trackedApiGet<SettingsData>({ key: "integration_status", label: "Integration status", path: "/api/integrations/status?external_checks=false", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
+        key: "backend_startup_debug",
+        label: "Backend startup debug",
+        path: "/api/debug/startup",
+        timeoutMs: SETTINGS_API_TIMEOUT_MS,
+        run: async () => {
+          await trackedApiGet<Record<string, unknown>>({ key: "backend_startup_debug", label: "Backend startup debug", path: "/api/debug/startup", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug);
+        },
       },
       {
         key: "nutrition_logs",
         label: "Nutrition logs",
+        path: "/api/nutrition/logs",
         run: async () => {
-          const data = await apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs");
+          const data = await trackedApiGet<{ items: NutritionEntry[] }>({ key: "nutrition_logs", label: "Nutrition logs", path: "/api/nutrition/logs", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setNutritionLogs(data.items);
         },
       },
       {
         key: "nutrition_history",
         label: "Nutrition history",
+        path: "/api/nutrition/history",
         run: async () => {
-          const data = await apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history");
+          const data = await trackedApiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>({ key: "nutrition_history", label: "Nutrition history", path: "/api/nutrition/history", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setNutritionHistory(data.items);
           setNutritionAdherence(data.adherence);
         },
@@ -7443,45 +7775,52 @@ export default function Home() {
       {
         key: "nutrition_shortcuts",
         label: "Nutrition shortcuts",
-        run: async () => setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts")),
+        path: "/api/nutrition/shortcuts",
+        run: async () => setShortcutData(await trackedApiGet<NutritionShortcutData>({ key: "nutrition_shortcuts", label: "Nutrition shortcuts", path: "/api/nutrition/shortcuts", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "body_metrics",
         label: "Body metrics",
+        path: "/api/body-metrics",
         run: async () => {
-          const data = await apiGet<{ items: BodyMetricEntry[] }>("/api/body-metrics");
+          const data = await trackedApiGet<{ items: BodyMetricEntry[] }>({ key: "body_metrics", label: "Body metrics", path: "/api/body-metrics", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setBodyMetrics(data.items);
         },
       },
       {
         key: "recovery_logs",
         label: "Recovery logs",
+        path: "/api/recovery/logs",
         run: async () => {
-          const data = await apiGet<{ items: RecoveryEntry[] }>("/api/recovery/logs");
+          const data = await trackedApiGet<{ items: RecoveryEntry[] }>({ key: "recovery_logs", label: "Recovery logs", path: "/api/recovery/logs", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setRecoveryLogs(data.items);
         },
       },
       {
         key: "sleep",
         label: "Sleep",
+        path: "/api/recovery/sleep",
         run: async () => {
-          const data = await apiGet<{ items: SleepEntry[] }>("/api/recovery/sleep");
+          const data = await trackedApiGet<{ items: SleepEntry[] }>({ key: "sleep", label: "Sleep", path: "/api/recovery/sleep", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setSleepEntries(data.items);
         },
       },
       {
         key: "training_history",
         label: "Training history",
+        path: "/api/training/history",
         run: async () => {
-          const data = await apiGet<{ items: WorkoutGroup[] }>("/api/training/history");
+          const data = await trackedApiGet<{ items: WorkoutGroup[] }>({ key: "training_history", label: "Training history", path: "/api/training/history", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setWorkoutHistory(data.items);
         },
       },
       {
         key: "strength_trends",
         label: "Strength trends",
+        path: strengthTrendPath(),
         run: async () => {
-          const data = await apiGet<StrengthTrendResponse>(strengthTrendPath());
+          const path = strengthTrendPath();
+          const data = await trackedApiGet<StrengthTrendResponse>({ key: "strength_trends", label: "Strength trends", path, required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setStrengthTrends(data);
           setSelectedExercise((current) => current || data.selected_exercise || data.exercise_options[0] || "");
         },
@@ -7489,7 +7828,8 @@ export default function Home() {
       {
         key: "hevy_sync_status",
         label: "Hevy sync status",
-        run: async () => setHevySync(await apiGet<HevySyncStatus>("/api/training/sync/hevy/status")),
+        path: "/api/training/sync/hevy/status",
+        run: async () => setHevySync(await trackedApiGet<HevySyncStatus>({ key: "hevy_sync_status", label: "Hevy sync status", path: "/api/training/sync/hevy/status", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
       },
     ];
 
@@ -7508,7 +7848,7 @@ export default function Home() {
     if (failures.length > 0) {
       setLoadFailures((current) => Array.from(new Set([...current, ...failures])));
     }
-  }, [applySettingsData, strengthTrendPath]);
+  }, [applySettingsData, recordStartupDebug, strengthTrendPath]);
 
   const refreshAll = useCallback(async (options?: { allowColdStartRetry?: boolean }) => {
     const maxAttempts = options?.allowColdStartRetry === false ? 1 : 2;
@@ -7526,29 +7866,37 @@ export default function Home() {
     const steps: Array<{
       key: string;
       label: string;
+      path: string;
+      timeoutMs: number;
       required: boolean;
       run: () => Promise<void>;
     }> = [
       {
         key: "dashboard_core",
         label: "Dashboard",
+        path: "/api/dashboard/core",
+        timeoutMs: STARTUP_API_TIMEOUT_MS,
         required: true,
-        run: async () => setDashboard(await apiGet<DashboardData>("/api/dashboard/core", STARTUP_API_TIMEOUT_MS)),
+        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "goals",
         label: "Goals & targets",
+        path: "/api/goals",
+        timeoutMs: STARTUP_API_TIMEOUT_MS,
         required: true,
         run: async () => {
-          const goalsData = await apiGet<GoalsResponse>("/api/goals", STARTUP_API_TIMEOUT_MS);
+          const goalsData = await trackedApiGet<GoalsResponse>({ key: "goals", label: "Goals & targets", path: "/api/goals", required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug);
           setForms((state) => ({ ...state, goals: goalsData.goals }));
         },
       },
       {
         key: "settings",
         label: "Settings",
+        path: "/api/settings",
+        timeoutMs: SETTINGS_API_TIMEOUT_MS,
         required: false,
-        run: async () => applySettingsData(await apiGet<SettingsData>("/api/settings", SETTINGS_API_TIMEOUT_MS)),
+        run: async () => applySettingsData(await trackedApiGet<SettingsData>({ key: "settings", label: "Settings", path: "/api/settings", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
       },
     ];
 
@@ -7611,7 +7959,7 @@ export default function Home() {
       return;
     }
     setLoading(false);
-  }, [applySettingsData, loadDeferredData]);
+  }, [applySettingsData, loadDeferredData, recordStartupDebug]);
 
   useEffect(() => {
     const id = window.setTimeout(() => {
@@ -8474,6 +8822,15 @@ export default function Home() {
         }
       />
     ),
+    debug: (
+      <StartupDebugPage
+        entries={startupDebug}
+        onRetry={() => {
+          setLoading(true);
+          void refreshAll();
+        }}
+      />
+    ),
   };
 
   return (
@@ -8562,6 +8919,7 @@ export default function Home() {
                     Retry
                   </button>
                 </div>
+                <StartupDebugPanel entries={startupDebug} open={showDebugPanel} onOpenChange={setShowDebugPanel} />
               </Card>
             ) : null}
             {!apiError && loadFailures.length > 0 ? (
