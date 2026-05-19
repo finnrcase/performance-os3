@@ -975,6 +975,8 @@ type FoodAnalyzeResponse = {
 type FoodShortcut = {
   shortcut_id: string;
   shortcut_name: string;
+  icon_type?: FoodPresetIconType | string | null;
+  iconType?: FoodPresetIconType | string | null;
   calories: number;
   protein: number;
   carbs: number;
@@ -992,6 +994,24 @@ type FoodShortcut = {
   created_at: string;
   source: string;
 };
+
+type FoodPresetIconType =
+  | "oats"
+  | "smoothie"
+  | "bagel"
+  | "chicken"
+  | "meal_bowl"
+  | "protein_bar"
+  | "protein_shake"
+  | "rice_crispy_treat"
+  | "eggs"
+  | "banana"
+  | "rice"
+  | "tuna"
+  | "yogurt"
+  | "avocado"
+  | "salmon"
+  | "peanut_butter";
 
 type MealTemplate = {
   template_name: string;
@@ -2044,25 +2064,52 @@ type DailyMacroTargets = { target_calories: number; protein_grams: number; carb_
 type CompactMacroRow = { label: string; unit: string; consumed: number; target: number; bar: string };
 type PresetFoodShortcut = FoodShortcut & { isDefaultPreset?: boolean };
 
+const FOOD_PRESET_ICON_OPTIONS: Array<{ type: FoodPresetIconType; label: string }> = [
+  { type: "oats", label: "Oats" },
+  { type: "smoothie", label: "Smoothie" },
+  { type: "bagel", label: "Bagel" },
+  { type: "chicken", label: "Chicken" },
+  { type: "meal_bowl", label: "Meal bowl" },
+  { type: "protein_bar", label: "Protein bar" },
+  { type: "protein_shake", label: "Protein shake" },
+  { type: "rice_crispy_treat", label: "Rice treat" },
+  { type: "eggs", label: "Eggs" },
+  { type: "banana", label: "Banana" },
+  { type: "rice", label: "Rice" },
+  { type: "tuna", label: "Tuna" },
+  { type: "yogurt", label: "Yogurt" },
+  { type: "avocado", label: "Avocado" },
+  { type: "salmon", label: "Salmon" },
+  { type: "peanut_butter", label: "Peanut butter" },
+];
+
+const FOOD_PRESET_ICON_TYPES = new Set<FoodPresetIconType>(FOOD_PRESET_ICON_OPTIONS.map((option) => option.type));
+
+function foodPresetIconType(shortcut: Pick<FoodShortcut, "icon_type" | "iconType" | "shortcut_name">): FoodPresetIconType {
+  const selected = String(shortcut.icon_type || shortcut.iconType || "").trim() as FoodPresetIconType;
+  if (FOOD_PRESET_ICON_TYPES.has(selected)) return selected;
+  return "meal_bowl";
+}
+
 const DEFAULT_PRESET_FOODS: PresetFoodShortcut[] = [
-  { shortcut_id: "default-preset-kirkland-bagel", shortcut_name: "Kirkland Bagel", calories: 260, protein: 11, carbs: 54, fat: 2, fiber: 2, sodium: 450, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-built-puff-bar", shortcut_name: "Built Puff Bar", calories: 140, protein: 17, carbs: 15, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-oats-overnight", shortcut_name: "Oats Overnight", calories: 280, protein: 20, carbs: 35, fat: 7, fiber: 6, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-bibigo-rice", shortcut_name: "Bibigo Rice", calories: 310, protein: 6, carbs: 68, fat: 1, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-tuna", shortcut_name: "Tuna", calories: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-kirkland-chicken", shortcut_name: "Kirkland Chicken", calories: 140, protein: 22, carbs: 2, fat: 5, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-eggs", shortcut_name: "Eggs", calories: 140, protein: 12, carbs: 1, fat: 10, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-banana", shortcut_name: "Banana", calories: 105, protein: 1, carbs: 27, fat: 0, fiber: 3, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-greek-yogurt", shortcut_name: "Greek Yogurt", calories: 100, protein: 17, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-chipotle-bowl", shortcut_name: "Chipotle Bowl", calories: 650, protein: 45, carbs: 70, fat: 20, fiber: 8, sodium: null, potassium: null, notes: "Seed preset. Edit to match your usual bowl.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-protein-shake", shortcut_name: "Protein Shake", calories: 160, protein: 30, carbs: 5, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-peanut-butter", shortcut_name: "Peanut Butter", calories: 190, protein: 7, carbs: 7, fat: 16, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-chicken-breast", shortcut_name: "Chicken Breast", calories: 165, protein: 31, carbs: 0, fat: 4, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-sweet-potato", shortcut_name: "Sweet Potato", calories: 115, protein: 2, carbs: 27, fat: 0, fiber: 4, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-salmon", shortcut_name: "Salmon", calories: 240, protein: 34, carbs: 0, fat: 12, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-avocado", shortcut_name: "Avocado", calories: 240, protein: 3, carbs: 12, fat: 22, fiber: 10, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-kirkland-bagel", shortcut_name: "Kirkland Bagel", icon_type: "bagel", calories: 260, protein: 11, carbs: 54, fat: 2, fiber: 2, sodium: 450, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-built-puff-bar", shortcut_name: "Built Puff Bar", icon_type: "protein_bar", calories: 140, protein: 17, carbs: 15, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", icon_type: "protein_shake", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-oats-overnight", shortcut_name: "Oats Overnight", icon_type: "oats", calories: 280, protein: 20, carbs: 35, fat: 7, fiber: 6, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-bibigo-rice", shortcut_name: "Bibigo Rice", icon_type: "rice", calories: 310, protein: 6, carbs: 68, fat: 1, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-tuna", shortcut_name: "Tuna", icon_type: "tuna", calories: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", icon_type: "protein_shake", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-kirkland-chicken", shortcut_name: "Kirkland Chicken", icon_type: "chicken", calories: 140, protein: 22, carbs: 2, fat: 5, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-eggs", shortcut_name: "Eggs", icon_type: "eggs", calories: 140, protein: 12, carbs: 1, fat: 10, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-banana", shortcut_name: "Banana", icon_type: "banana", calories: 105, protein: 1, carbs: 27, fat: 0, fiber: 3, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-greek-yogurt", shortcut_name: "Greek Yogurt", icon_type: "yogurt", calories: 100, protein: 17, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-chipotle-bowl", shortcut_name: "Chipotle Bowl", icon_type: "meal_bowl", calories: 650, protein: 45, carbs: 70, fat: 20, fiber: 8, sodium: null, potassium: null, notes: "Seed preset. Edit to match your usual bowl.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-protein-shake", shortcut_name: "Protein Shake", icon_type: "protein_shake", calories: 160, protein: 30, carbs: 5, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-peanut-butter", shortcut_name: "Peanut Butter", icon_type: "peanut_butter", calories: 190, protein: 7, carbs: 7, fat: 16, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-chicken-breast", shortcut_name: "Chicken Breast", icon_type: "chicken", calories: 165, protein: 31, carbs: 0, fat: 4, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-sweet-potato", shortcut_name: "Sweet Potato", icon_type: "meal_bowl", calories: 115, protein: 2, carbs: 27, fat: 0, fiber: 4, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-salmon", shortcut_name: "Salmon", icon_type: "salmon", calories: 240, protein: 34, carbs: 0, fat: 12, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-avocado", shortcut_name: "Avocado", icon_type: "avocado", calories: 240, protein: 3, carbs: 12, fat: 22, fiber: 10, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
 ];
 
 function isDefaultPresetShortcut(shortcut: Pick<PresetFoodShortcut, "shortcut_id" | "isDefaultPreset">) {
@@ -2087,6 +2134,7 @@ function shortcutMutationPayload(shortcut: FoodShortcut) {
     fat_per_serving: shortcut.fat_per_serving ?? null,
     notes: shortcut.notes ?? "",
     source: shortcut.source || "manual",
+    icon_type: foodPresetIconType(shortcut),
   };
 }
 
@@ -2203,6 +2251,179 @@ function MacroDonutCard({
   );
 }
 
+function FoodPresetIcon({ type, className = "h-7 w-7" }: Readonly<{ type: FoodPresetIconType | string | null | undefined; className?: string }>) {
+  const iconType = FOOD_PRESET_ICON_TYPES.has(type as FoodPresetIconType) ? type as FoodPresetIconType : "meal_bowl";
+  const common = {
+    fill: "none",
+    stroke: "currentColor",
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    strokeWidth: 1.8,
+  };
+  return (
+    <svg viewBox="0 0 32 32" aria-hidden="true" className={className}>
+      {iconType === "oats" ? (
+        <>
+          <path {...common} d="M7 16h18l-2 6.5a5 5 0 0 1-4.8 3.5h-4.4A5 5 0 0 1 9 22.5L7 16Z" />
+          <path {...common} d="M9 16c.5-2.8 3-5 7-5s6.5 2.2 7 5" />
+          <path {...common} d="M13 14l2-3M17 14l2-3M12.5 20h.1M16 21h.1M19.5 20h.1" />
+        </>
+      ) : iconType === "smoothie" ? (
+        <>
+          <path {...common} d="M11 10h12l-1.4 15H12.4L11 10Z" />
+          <path {...common} d="M10 10h14M18 10l4-5M14 15h6M14.5 20h5" />
+        </>
+      ) : iconType === "bagel" ? (
+        <>
+          <circle {...common} cx="16" cy="16" r="9" />
+          <circle {...common} cx="16" cy="16" r="3.4" />
+          <path {...common} d="M10.5 13.5c1.8-2 4.2-3 7.2-2.7M21.5 18.5c-1.8 2-4.2 3-7.2 2.7" />
+        </>
+      ) : iconType === "chicken" ? (
+        <>
+          <path {...common} d="M10 19c-2.2-3 .2-7 4.3-8.7 4.2-1.7 8.6-.5 9.8 2.8 1.2 3.2-1.2 7-5.4 8.7-3.5 1.4-7.1.8-8.7-2.8Z" />
+          <path {...common} d="M9.5 19.5 6 23M6 23l-1.8-1.8M6 23l1.8 1.8" />
+        </>
+      ) : iconType === "protein_bar" ? (
+        <>
+          <rect {...common} x="7" y="11" width="18" height="10" rx="3" />
+          <path {...common} d="M11 15h10M11 18h6" />
+        </>
+      ) : iconType === "protein_shake" ? (
+        <>
+          <path {...common} d="M11 9h10l-1.2 17h-7.6L11 9Z" />
+          <path {...common} d="M10 9h12M13 6h6l2 3M13 15h7M13.5 20h6" />
+        </>
+      ) : iconType === "rice_crispy_treat" ? (
+        <>
+          <rect {...common} x="8" y="9" width="16" height="14" rx="3" />
+          <path {...common} d="M12 13h.1M16 13h.1M20 13h.1M13.5 17h.1M18.5 17h.1M12 21h.1M20 21h.1" />
+        </>
+      ) : iconType === "eggs" ? (
+        <>
+          <ellipse {...common} cx="13" cy="17" rx="5" ry="7" />
+          <ellipse {...common} cx="20" cy="16" rx="4.5" ry="6.5" />
+        </>
+      ) : iconType === "banana" ? (
+        <>
+          <path {...common} d="M8 10c5 8 10 10 17 7-3.2 5-9.3 7.8-14.5 4.4C7.1 19.2 6.2 14.6 8 10Z" />
+          <path {...common} d="M8 10 6 8M25 17l1.8-1.2" />
+        </>
+      ) : iconType === "rice" ? (
+        <>
+          <path {...common} d="M8 15h16l-1.6 7.5a4 4 0 0 1-3.9 3.2h-5a4 4 0 0 1-3.9-3.2L8 15Z" />
+          <path {...common} d="M11 15c1-3 2.8-5 5-5s4 2 5 5M14 13l1.2-3M18 13l-1.2-3" />
+        </>
+      ) : iconType === "tuna" ? (
+        <>
+          <path {...common} d="M7 18c3.5-5 9.6-6.5 16-2-6.4 4.5-12.5 3-16 2Z" />
+          <path {...common} d="M23 16l3-3v6l-3-3ZM12 17h.1M16 14.5c1.2 1.1 1.2 2.1 0 3.2" />
+        </>
+      ) : iconType === "yogurt" ? (
+        <>
+          <path {...common} d="M10 11h12l-1.2 14h-9.6L10 11Z" />
+          <path {...common} d="M9 11h14M12 7h8l1 4M13.5 16h5" />
+        </>
+      ) : iconType === "avocado" ? (
+        <>
+          <path {...common} d="M16 6c5.5 4.3 8 9 6 14.2-1.5 3.7-5.7 5.7-9.4 4.1-3.6-1.5-5.2-5.8-3.4-9.4C10.7 12 13.2 9.4 16 6Z" />
+          <circle {...common} cx="16" cy="18" r="3.2" />
+        </>
+      ) : iconType === "salmon" ? (
+        <>
+          <path {...common} d="M8 18c3.7-4.4 9.2-6.2 16-2-2.5 4.9-9.1 6.5-16 2Z" />
+          <path {...common} d="M12 20c1.2-2.8 4.2-4.8 9-5M24 16l2.5-2.5M13 16h.1" />
+        </>
+      ) : iconType === "peanut_butter" ? (
+        <>
+          <path {...common} d="M11 10h10l-1 16h-8l-1-16Z" />
+          <path {...common} d="M12 6h8v4h-8zM13 16h6M13.5 20h5" />
+        </>
+      ) : (
+        <>
+          <path {...common} d="M7 15h18l-2 7a5 5 0 0 1-4.8 3.6h-4.4A5 5 0 0 1 9 22l-2-7Z" />
+          <path {...common} d="M10 15c.9-3.2 3-5 6-5s5.1 1.8 6 5M13 10l-2-3M17 10l2-3" />
+        </>
+      )}
+    </svg>
+  );
+}
+
+function FoodPresetIconPicker({
+  value,
+  onChange,
+}: Readonly<{
+  value: FoodPresetIconType;
+  onChange: (value: FoodPresetIconType) => void;
+}>) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-[0.16em] text-zinc-500">Icon</p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+        {FOOD_PRESET_ICON_OPTIONS.map((option) => {
+          const selected = value === option.type;
+          return (
+            <button
+              key={option.type}
+              type="button"
+              onClick={() => onChange(option.type)}
+              className={cx(
+                "group relative rounded-lg border p-2 text-left transition hover:bg-white/[0.05]",
+                selected ? "accent-outline bg-white/[0.05]" : "border-white/10 bg-white/[0.025]",
+              )}
+            >
+              <span className="flex items-center gap-2">
+                <span className={cx("grid h-8 w-8 place-items-center rounded-md border", selected ? "border-[var(--accent-border)] text-[var(--accent-primary)]" : "border-white/10 text-zinc-400")}>
+                  <FoodPresetIcon type={option.type} className="h-5 w-5" />
+                </span>
+                <span className="min-w-0 truncate text-xs font-semibold text-zinc-200">{option.label}</span>
+              </span>
+              {selected ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-[var(--accent-primary)]" /> : null}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function PresetFoodTile({
+  shortcut,
+  pending,
+  disabled,
+  editing,
+  editMode,
+  onClick,
+}: Readonly<{
+  shortcut: PresetFoodShortcut;
+  pending: boolean;
+  disabled?: boolean;
+  editing: boolean;
+  editMode: boolean;
+  onClick: () => void;
+}>) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={pending || disabled}
+      className={cx(
+        "group relative aspect-square min-w-0 rounded-lg border bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60",
+        editing ? "accent-outline" : "border-white/10",
+      )}
+      title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
+    >
+      {editMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
+      <span className="flex h-full flex-col items-center justify-center gap-2">
+        <span className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-black/20 text-zinc-300 transition group-hover:border-[var(--accent-border)] group-hover:text-[var(--accent-primary)]">
+          <FoodPresetIcon type={foodPresetIconType(shortcut)} className="h-6 w-6" />
+        </span>
+        <span className="line-clamp-2 break-words leading-4">{pending ? "Adding..." : shortcut.shortcut_name}</span>
+      </span>
+    </button>
+  );
+}
+
 function PresetFoodEditor({
   shortcut,
   saving,
@@ -2218,7 +2439,8 @@ function PresetFoodEditor({
 }>) {
   return (
     <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-4">
-      <div className="grid gap-3 sm:grid-cols-2">
+      <FoodPresetIconPicker value={foodPresetIconType(shortcut)} onChange={(icon_type) => onChange({ ...shortcut, icon_type })} />
+      <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <TextInput label="Name" value={shortcut.shortcut_name} onChange={(value) => onChange({ ...shortcut, shortcut_name: value })} />
         <TextInput label="Notes optional" value={shortcut.notes ?? ""} onChange={(value) => onChange({ ...shortcut, notes: value })} />
         <TextInput label="Calories" type="number" min={0} step="any" value={shortcut.calories} onChange={(value) => onChange({ ...shortcut, calories: Number(value) })} />
@@ -4093,22 +4315,15 @@ function FoodPage({
                     const pending = pendingPresetAction === `shortcut:${shortcut.shortcut_id}`;
                     const editing = presetEditMode && editingShortcut?.shortcut_id === shortcut.shortcut_id;
                     return (
-                      <button
+                      <PresetFoodTile
                         key={shortcut.shortcut_id}
-                        type="button"
+                        shortcut={shortcut}
+                        pending={pending}
+                        disabled={Boolean(pendingPresetAction?.startsWith("edit:"))}
+                        editing={editing}
+                        editMode={presetEditMode}
                         onClick={() => void handleShortcutTileClick(shortcut)}
-                        disabled={pending || Boolean(pendingPresetAction?.startsWith("edit:"))}
-                        className={cx(
-                          "group relative aspect-square min-w-0 rounded-lg border bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60",
-                          editing ? "accent-outline" : "border-white/10",
-                        )}
-                        title={presetEditMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
-                      >
-                        {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
-                        <span className="flex h-full items-center justify-center break-words leading-4">
-                          {pending ? "Adding..." : shortcut.shortcut_name}
-                        </span>
-                      </button>
+                      />
                     );
                   })}
                 </div>

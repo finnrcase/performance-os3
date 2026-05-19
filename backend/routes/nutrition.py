@@ -118,6 +118,7 @@ class FoodLogBulkRequest(BaseModel):
 
 class FoodShortcutPayload(BaseModel):
     shortcut_name: str = Field(min_length=1)
+    icon_type: str | None = None
     calories: float = Field(ge=0)
     protein: float = Field(ge=0)
     carbs: float = Field(ge=0)

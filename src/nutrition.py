@@ -78,6 +78,7 @@ MEAL_TEMPLATE_COLUMNS = [
 FOOD_SHORTCUT_COLUMNS = [
     "shortcut_id",
     "shortcut_name",
+    "icon_type",
     "calories",
     "protein",
     "carbs",
@@ -101,7 +102,24 @@ FREQUENT_FOODS_PATH = processed_data_path("frequent_foods.csv")
 MEAL_TEMPLATES_PATH = processed_data_path("meal_templates.csv")
 FOOD_SHORTCUTS_PATH = processed_data_path("food_shortcuts.csv")
 
-FOOD_ICON_TYPES = {"bagel", "protein_bar", "oats", "protein_shake", "chicken"}
+FOOD_ICON_TYPES = {
+    "oats",
+    "smoothie",
+    "bagel",
+    "chicken",
+    "meal_bowl",
+    "protein_bar",
+    "protein_shake",
+    "rice_crispy_treat",
+    "eggs",
+    "banana",
+    "rice",
+    "tuna",
+    "yogurt",
+    "avocado",
+    "salmon",
+    "peanut_butter",
+}
 
 
 def normalize_food_icon(icon_type) -> str:
@@ -113,17 +131,39 @@ def normalize_food_icon(icon_type) -> str:
 def suggest_food_icon(food_name) -> str:
     """Pick a lightweight default icon from the food name when possible."""
     normalized_name = str(food_name or "").lower()
-    if "bagel" in normalized_name:
-        return "bagel"
-    if "built bar" in normalized_name or "protein bar" in normalized_name or ("protein" in normalized_name and "bar" in normalized_name):
-        return "protein_bar"
     if "oat" in normalized_name or "oatmeal" in normalized_name:
         return "oats"
-    if "protein shake" in normalized_name or "shake" in normalized_name:
-        return "protein_shake"
+    if "smoothie" in normalized_name:
+        return "smoothie"
+    if "bagel" in normalized_name:
+        return "bagel"
     if "chicken" in normalized_name:
         return "chicken"
-    return ""
+    if "bowl" in normalized_name or "chipotle" in normalized_name or "burrito" in normalized_name:
+        return "meal_bowl"
+    if "built bar" in normalized_name or "protein bar" in normalized_name or ("protein" in normalized_name and "bar" in normalized_name):
+        return "protein_bar"
+    if "protein shake" in normalized_name or "shake" in normalized_name:
+        return "protein_shake"
+    if "rice crispy" in normalized_name or "rice krisp" in normalized_name or "crispy treat" in normalized_name:
+        return "rice_crispy_treat"
+    if "egg" in normalized_name:
+        return "eggs"
+    if "banana" in normalized_name:
+        return "banana"
+    if "rice" in normalized_name:
+        return "rice"
+    if "tuna" in normalized_name:
+        return "tuna"
+    if "yogurt" in normalized_name or "yoghurt" in normalized_name:
+        return "yogurt"
+    if "avocado" in normalized_name:
+        return "avocado"
+    if "salmon" in normalized_name:
+        return "salmon"
+    if "peanut butter" in normalized_name or "pb" in normalized_name:
+        return "peanut_butter"
+    return "meal_bowl"
 
 
 def create_food_entry(
@@ -490,8 +530,12 @@ def load_food_shortcuts() -> pd.DataFrame:
         "fat_per_serving",
     ]:
         shortcuts_df[column] = pd.to_numeric(shortcuts_df[column], errors="coerce")
-    for column in ["shortcut_id", "shortcut_name", "notes", "created_at", "source"]:
+    for column in ["shortcut_id", "shortcut_name", "icon_type", "notes", "created_at", "source"]:
         shortcuts_df[column] = shortcuts_df[column].fillna("").astype(str)
+    shortcuts_df["icon_type"] = shortcuts_df.apply(
+        lambda row: normalize_food_icon(row.get("icon_type")) or "meal_bowl",
+        axis=1,
+    )
 
     return shortcuts_df
 
@@ -507,6 +551,7 @@ def add_food_shortcut(
     protein,
     carbs,
     fat,
+    icon_type=None,
     fiber=None,
     sodium=None,
     potassium=None,
@@ -527,6 +572,7 @@ def add_food_shortcut(
     shortcut = {
         "shortcut_id": selected_id,
         "shortcut_name": normalized_name,
+        "icon_type": normalize_food_icon(icon_type) or suggest_food_icon(normalized_name),
         "calories": float(calories or 0),
         "protein": float(protein or 0),
         "carbs": float(carbs or 0),
@@ -590,6 +636,10 @@ def update_food_shortcut(shortcut_id, updates: dict) -> dict:
         "fat_per_serving",
     ]:
         shortcuts_df[column] = pd.to_numeric(shortcuts_df[column], errors="coerce")
+    shortcuts_df["icon_type"] = shortcuts_df.apply(
+        lambda row: normalize_food_icon(row.get("icon_type")) or "meal_bowl",
+        axis=1,
+    )
     save_food_shortcuts(shortcuts_df)
     return shortcuts_df.loc[row_index, FOOD_SHORTCUT_COLUMNS].to_dict()
 
@@ -639,6 +689,7 @@ def log_food_shortcut(shortcut_id, date, meal_type="Snack") -> dict:
         fiber=shortcut.get("fiber"),
         sodium=shortcut.get("sodium"),
         potassium=shortcut.get("potassium"),
+        iconType=shortcut.get("icon_type"),
         source="shortcut",
         source_id=selected_id,
         confidence="high",

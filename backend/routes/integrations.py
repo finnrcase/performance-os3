@@ -609,7 +609,7 @@ def _integration_health(settings: dict, statuses: dict[str, str]) -> list[dict]:
     return cards
 
 
-def _settings_response(settings: dict) -> dict:
+def _settings_response(settings: dict, *, include_live_status: bool = False) -> dict:
     """Return settings with secrets masked for frontend display."""
     integrations = settings.get("integrations", {})
     appearance = settings.get("metadata", {}).get("appearance", {})
@@ -621,7 +621,7 @@ def _settings_response(settings: dict) -> dict:
     hevy_configured = bool(integrations.get("hevy_api_key")) or _configured_from_env("HEVY_API_KEY")
     statuses = {
         "hevy_api_key": "Configured" if hevy_configured else integration_status("hevy_api_key", settings),
-        "strava": get_strava_connection_status(),
+        "strava": get_strava_connection_status() if include_live_status else "Check integrations",
         "strava_client_id": "Configured" if _configured_from_env("STRAVA_CLIENT_ID") else integration_status("strava_client_id", settings),
         "strava_client_secret": "Configured" if _configured_from_env("STRAVA_CLIENT_SECRET") else integration_status("strava_client_secret", settings),
         "strava_redirect_uri": "Configured" if _configured_from_env("STRAVA_REDIRECT_URI") else "Auto from app URL",
@@ -630,7 +630,7 @@ def _settings_response(settings: dict) -> dict:
         "fitbit_google_health": fitbit_google_health_status(settings),
         "withings_client_id": "Configured" if _configured_from_env("WITHINGS_CLIENT_ID") else integration_status("withings_client_id", settings),
         "withings_client_secret": "Configured" if _configured_from_env("WITHINGS_CLIENT_SECRET") else integration_status("withings_client_secret", settings),
-        "withings": get_withings_connection_status(),
+        "withings": get_withings_connection_status() if include_live_status else "Check integrations",
         "openai_api_key": "Configured" if openai_configured else "Not configured",
         "apple_health_export_file": integration_status("apple_health_export_file", settings),
     }
@@ -638,15 +638,19 @@ def _settings_response(settings: dict) -> dict:
         "integrations": masked,
         "appearance": {"accent_color": normalize_accent_color(appearance.get("accent_color"))},
         "statuses": statuses,
-        "health": _integration_health(settings, statuses),
-        "services": _integration_components(settings),
+        "health": _integration_health(settings, statuses) if include_live_status else [],
+        "services": _integration_components(settings) if include_live_status else {},
     }
 
 
 @router.get("/api/settings")
 def get_settings() -> dict:
-    """Return masked local settings."""
-    return _settings_response(load_settings())
+    """Return lightweight masked local settings without integration probes."""
+    started = time.perf_counter()
+    logger.info("Settings request started.")
+    response = _settings_response(load_settings(), include_live_status=False)
+    logger.info("Settings request completed in %.1f ms.", (time.perf_counter() - started) * 1000)
+    return response
 
 
 @router.put("/api/settings")
@@ -672,7 +676,7 @@ def update_settings(payload: SettingsPayload) -> dict:
 def get_integration_statuses(external_checks: bool = Query(default=True)) -> dict:
     """Return a secret-safe integration diagnostics report plus legacy settings data."""
     settings = load_settings()
-    response = _settings_response(settings)
+    response = _settings_response(settings, include_live_status=True)
     response.update(build_integration_status_report(settings=settings, run_external_checks=external_checks))
     return response
 

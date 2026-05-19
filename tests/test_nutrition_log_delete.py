@@ -75,6 +75,7 @@ class NutritionLogDeleteTest(unittest.TestCase):
                 {
                     "shortcut_id": "shortcut-oats",
                     "shortcut_name": "Oats Overnight",
+                    "icon_type": "oats",
                     "calories": 280,
                     "protein": 20,
                     "carbs": 35,
@@ -104,6 +105,7 @@ class NutritionLogDeleteTest(unittest.TestCase):
         self.assertEqual(entry["food_name"], "Oats Overnight")
         self.assertEqual(entry["source"], "shortcut")
         self.assertEqual(entry["source_id"], "shortcut-oats")
+        self.assertEqual(entry["iconType"], "oats")
         self.assertEqual(float(entry["fiber"]), 6.0)
         self.assertEqual(float(entry["sodium"]), 260.0)
         self.assertEqual(float(entry["potassium"]), 220.0)

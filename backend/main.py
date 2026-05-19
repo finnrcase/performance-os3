@@ -44,7 +44,7 @@ from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_lo
 from src.training import TRAINING_COLUMNS, calculate_training_volume, load_training_log
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import load_hevy_sync_state
-from src.storage import ensure_database_schema, production_storage_warnings, use_database
+from src.storage import debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -107,6 +107,45 @@ async def require_session_for_private_api(request: Request, call_next):
         except HTTPException as exc:
             return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
     return await call_next(request)
+
+
+LOGGED_REQUEST_PATHS = {
+    "/api/settings",
+    "/api/goals",
+    "/api/dashboard/core",
+    "/api/dashboard",
+}
+
+
+@app.middleware("http")
+async def log_core_request_lifecycle(request: Request, call_next):
+    """Log core startup route timing and surface transient DB failures as JSON."""
+    path = request.url.path.rstrip("/") or "/"
+    should_log = path in LOGGED_REQUEST_PATHS
+    started = time.perf_counter()
+    if should_log:
+        logger.info("Request started: %s %s", request.method, path)
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        if is_database_unavailable_error(exc):
+            logger.exception("Database unavailable during request: %s %s in %.1f ms", request.method, path, duration_ms)
+            return JSONResponse(
+                {
+                    "detail": "Database unavailable",
+                    "error_type": type(exc).__name__,
+                    "message": str(exc),
+                    "duration_ms": duration_ms,
+                },
+                status_code=503,
+            )
+        logger.exception("Unhandled request failure: %s %s in %.1f ms", request.method, path, duration_ms)
+        raise
+    if should_log:
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.info("Request completed: %s %s status=%s in %.1f ms", request.method, path, response.status_code, duration_ms)
+    return response
 
 
 # Registered LAST so CORSMiddleware is the OUTERMOST middleware. Starlette
@@ -219,10 +258,28 @@ def auth_logout(response: Response) -> dict:
 @app.on_event("startup")
 def initialize_storage() -> None:
     """Initialize durable Postgres storage when DATABASE_URL is configured."""
-    if use_database():
-        ensure_database_schema()
-    for warning in production_storage_warnings():
-        logger.error(warning)
+    started = time.perf_counter()
+    logger.info("Backend startup begin.")
+    try:
+        if use_database():
+            ensure_database_schema()
+        for warning in production_storage_warnings():
+            logger.error(warning)
+        logger.info("Backend startup complete in %.1f ms.", (time.perf_counter() - started) * 1000)
+    except Exception:
+        logger.exception("Backend startup storage initialization failed; API will stay up and report DB errors per request.")
+
+
+@app.on_event("shutdown")
+def log_shutdown() -> None:
+    """Log ASGI shutdown; the platform provides the external stop reason."""
+    logger.warning("Backend shutdown signal received; no API-managed background workers are running.")
+
+
+@app.get("/api/debug/db")
+def debug_db() -> dict:
+    """Return a fresh Postgres SELECT 1 diagnostic."""
+    return debug_database_connection()
 
 
 def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):

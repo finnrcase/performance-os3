@@ -46,6 +46,7 @@ DOCUMENT_TABLES = {
 }
 
 ALL_DATASET_TABLES = sorted({*DATAFRAME_TABLES.values(), *DOCUMENT_TABLES.values()})
+DB_CONNECT_TIMEOUT_SECONDS = 10
 
 LOWERCASE_KEY_FIELDS = {
     "food_name",
@@ -140,7 +141,7 @@ def _connect():
     except ImportError as exc:
         raise RuntimeError("DATABASE_URL is set but psycopg is not installed. Run pip install -r requirements.txt.") from exc
 
-    return psycopg.connect(database_url())
+    return psycopg.connect(database_url(), connect_timeout=DB_CONNECT_TIMEOUT_SECONDS)
 
 
 TRANSIENT_DB_ERROR_NAMES = {
@@ -172,6 +173,43 @@ def _is_transient_database_error(exc: Exception) -> bool:
         "timeout expired",
     ]
     return any(marker in message for marker in transient_markers)
+
+
+def is_database_unavailable_error(exc: Exception) -> bool:
+    """Return True for Postgres lifecycle/connectivity failures callers can surface safely."""
+    return _is_transient_database_error(exc)
+
+
+def debug_database_connection() -> dict[str, Any]:
+    """Open a fresh DB connection and run a tiny query for production diagnostics."""
+    started = time.perf_counter()
+    if not use_database():
+        return {
+            "status": "not_configured",
+            "storage": "local_files",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "message": "DATABASE_URL is not configured.",
+        }
+    try:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                value = cur.fetchone()[0]
+        return {
+            "status": "ok",
+            "storage": "postgres",
+            "result": int(value),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
+    except Exception as exc:
+        logger.exception("Database debug check failed.")
+        return {
+            "status": "error",
+            "storage": "postgres",
+            "error_type": type(exc).__name__,
+            "message": str(exc),
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        }
 
 
 def _with_database_retry(operation, *, attempts: int = 2):
