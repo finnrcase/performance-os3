@@ -1,9 +1,10 @@
 """FastAPI backend for the production Performance OS frontend."""
 
 from pathlib import Path
+from datetime import date, datetime, timezone
 import logging
+import math
 import os
-import threading
 import time
 
 import pandas as pd
@@ -42,14 +43,13 @@ from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
 from src.training import TRAINING_COLUMNS, calculate_training_volume, load_training_log
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
-from src.integrations.hevy_client import HevyIntegrationError, sync_hevy_events
+from src.integrations.hevy_client import load_hevy_sync_state
 from src.storage import ensure_database_schema, production_storage_warnings, use_database
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 load_dotenv(PROJECT_ROOT / ".env", override=False)
 logger = logging.getLogger(__name__)
-_hevy_poll_thread_started = False
 
 app = FastAPI(
     title="Performance OS API",
@@ -225,37 +225,50 @@ def initialize_storage() -> None:
         logger.error(warning)
 
 
-def _hevy_poll_loop() -> None:
-    interval_seconds = int(os.getenv("HEVY_POLL_INTERVAL_SECONDS", "300") or 300)
-    interval_seconds = max(300, min(interval_seconds, 600))
-    while True:
-        time.sleep(interval_seconds)
+def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):
+    start = time.perf_counter()
+    logger.info("Dashboard block started: %s", name)
+    try:
+        value = fn()
+        duration_ms = round((time.perf_counter() - start) * 1000, 1)
+        dashboard_errors.append(
+            {
+                "block": name,
+                "name": name,
+                "status": "ok",
+                "duration_ms": duration_ms,
+            }
+        )
+        logger.info("Dashboard block completed: %s in %.1f ms", name, duration_ms)
+        return value
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - start) * 1000, 1)
+        logger.exception("Dashboard block failed: %s", name)
+        dashboard_errors.append(
+            {
+                "block": name,
+                "name": name,
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "message": str(exc) or type(exc).__name__,
+                "duration_ms": duration_ms,
+            }
+        )
         try:
-            logger.info("Starting scheduled Hevy event poll.")
-            sync_hevy_events()
-        except HevyIntegrationError as exc:
-            logger.warning("Scheduled Hevy sync failed: %s", exc)
-        except Exception:
-            logger.exception("Unexpected scheduled Hevy sync failure.")
-
-
-@app.on_event("startup")
-def start_hevy_polling() -> None:
-    """Start a lightweight 5-10 minute Hevy event polling fallback."""
-    global _hevy_poll_thread_started
-    if _hevy_poll_thread_started:
-        return
-    _hevy_poll_thread_started = True
-    thread = threading.Thread(target=_hevy_poll_loop, name="hevy-event-poller", daemon=True)
-    thread.start()
-
-
-def _dashboard_error(block: str, exc: Exception) -> dict:
-    return {
-        "block": block,
-        "type": exc.__class__.__name__,
-        "message": str(exc) or exc.__class__.__name__,
-    }
+            return fallback() if callable(fallback) else fallback
+        except Exception as fallback_exc:
+            logger.exception("Dashboard fallback failed: %s", name)
+            dashboard_errors.append(
+                {
+                    "block": f"{name}_fallback",
+                    "name": f"{name}_fallback",
+                    "status": "error",
+                    "error_type": type(fallback_exc).__name__,
+                    "message": str(fallback_exc) or type(fallback_exc).__name__,
+                    "duration_ms": round((time.perf_counter() - start) * 1000, 1),
+                }
+            )
+            return None
 
 
 def _safe_dashboard_block(
@@ -266,25 +279,12 @@ def _safe_dashboard_block(
     fallback,
     func,
 ):
-    started = time.perf_counter()
-    try:
-        result = func()
-        dashboard_status[name] = True
-        return result
-    except Exception as exc:
-        logger.exception("dashboard.%s failed", name)
-        dashboard_errors.append(_dashboard_error(name, exc))
-        dashboard_status[name] = False
-        try:
-            return fallback() if callable(fallback) else fallback
-        except Exception as fallback_exc:
-            logger.exception("dashboard.%s fallback failed", name)
-            dashboard_errors.append(_dashboard_error(f"{name}_fallback", fallback_exc))
-            return None
-    finally:
-        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
-        dashboard_timings_ms[name] = elapsed_ms
-        logger.info("dashboard.%s completed in %.1f ms", name, elapsed_ms)
+    start_index = len(dashboard_errors)
+    result = safe_block(name, dashboard_errors, fallback, func)
+    block_record = next((entry for entry in dashboard_errors[start_index:] if entry.get("block") == name), None)
+    dashboard_status[name] = block_record is not None and block_record.get("status") == "ok"
+    dashboard_timings_ms[name] = float(block_record.get("duration_ms", 0.0)) if block_record else 0.0
+    return result
 
 
 def _load_dashboard_frame(
@@ -315,21 +315,32 @@ def _json_safe(value):
         return [_json_safe(item) for item in value.tolist()]
     if isinstance(value, pd.Timestamp):
         return value.isoformat()
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
     if value is pd.NaT:
         return None
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)):
+        try:
+            return _json_safe(value.tolist())
+        except (TypeError, ValueError, AttributeError):
+            pass
     try:
         if pd.isna(value):
             return None
     except (TypeError, ValueError):
         pass
     if isinstance(value, float):
-        return value if value == value and value not in {float("inf"), float("-inf")} else None
+        return value if math.isfinite(value) else None
     if hasattr(value, "item") and not isinstance(value, (str, bytes)):
         try:
             return _json_safe(value.item())
         except (TypeError, ValueError, AttributeError):
             pass
-    return value
+    if isinstance(value, (str, int, bool)) or value is None:
+        return value
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _target_number(targets: dict, key: str, default: float = 0.0) -> float:
@@ -611,6 +622,155 @@ def _fallback_extra_run_readiness() -> dict:
     }
 
 
+def _failed_dashboard_blocks(blocks: list[dict]) -> list[dict]:
+    return [block for block in blocks if block.get("status") == "error"]
+
+
+def _dashboard_status_label(blocks: list[dict]) -> str:
+    return "degraded" if _failed_dashboard_blocks(blocks) else "ok"
+
+
+def _dashboard_likely_failure(blocks: list[dict]) -> str | None:
+    failed = _failed_dashboard_blocks(blocks)
+    if not failed:
+        return None
+    first = failed[0]
+    message = first.get("message") or first.get("error_type") or "unknown error"
+    return f"{first.get('block', 'dashboard')}: {message}"
+
+
+def _dashboard_suggested_action(blocks: list[dict]) -> str:
+    failed = _failed_dashboard_blocks(blocks)
+    if not failed:
+        return "No dashboard subsystem failures detected."
+    failed_names = {str(block.get("block", "")) for block in failed}
+    if any(name.startswith("load_") or name.endswith("_loaded") for name in failed_names):
+        return "Check storage connectivity and schema first; a core data loader failed."
+    return f"Inspect backend logs for {failed[0].get('block', 'the failing dashboard block')} and keep the app in degraded mode meanwhile."
+
+
+def _safe_hevy_sync_debug() -> dict:
+    try:
+        state = load_hevy_sync_state()
+    except Exception as exc:
+        logger.warning("Hevy sync debug state unavailable: %s", exc)
+        return {
+            "status": "error",
+            "last_sync_at": "",
+            "last_event_cursor": "",
+            "last_error": str(exc),
+            "last_result": {},
+            "safe_mode": True,
+        }
+    last_error = str(state.get("last_error", "") or "")
+    last_sync_at = str(state.get("last_sync_at", "") or "")
+    return {
+        "status": "error" if last_error else "ok" if last_sync_at else "idle",
+        "last_sync_at": last_sync_at,
+        "last_event_cursor": str(state.get("last_event_cursor", "") or ""),
+        "last_error": last_error,
+        "last_result": state.get("last_result", {}) if isinstance(state.get("last_result", {}), dict) else {},
+        "safe_mode": bool(state.get("safe_mode") or last_error),
+    }
+
+
+def _dashboard_debug_payload(payload: dict) -> dict:
+    debug = payload.get("debug", {}) if isinstance(payload, dict) else {}
+    blocks = debug.get("blocks") or []
+    counts = payload.get("counts", {}) if isinstance(payload, dict) else {}
+    status = debug.get("status", {})
+    return {
+        "status": debug.get("dashboard_status") or _dashboard_status_label(blocks),
+        "storage": "postgres" if use_database() else "local_files",
+        "counts": {
+            "nutrition": counts.get("nutrition", 0),
+            "training": counts.get("training", 0),
+            "body_metrics": counts.get("body_metrics", 0),
+            "recovery": counts.get("recovery", 0),
+            "sleep": counts.get("sleep", 0),
+        },
+        "blocks": blocks,
+        "likely_failure": _dashboard_likely_failure(blocks),
+        "suggested_action": _dashboard_suggested_action(blocks),
+        "hevy_sync": debug.get("hevy_sync") or _safe_hevy_sync_debug(),
+        "generated_at": debug.get("generated_at"),
+        "nutrition_loaded": bool(status.get("nutrition_loaded")),
+        "training_loaded": bool(status.get("training_loaded")),
+        "body_metrics_loaded": bool(status.get("body_metrics_loaded")),
+        "recovery_loaded": bool(status.get("recovery_loaded")),
+        "sleep_loaded": bool(status.get("sleep_loaded")),
+        "adaptive_recommendation_ok": bool(status.get("adaptive_recommendation")),
+        "weekly_report_ok": bool(status.get("weekly_report")),
+        "optimization_features_ok": bool(status.get("optimization_features")),
+        "personal_learning_ok": bool(status.get("personal_learning")),
+        "workout_quality_ok": bool(status.get("workout_quality")),
+        "run_readiness_ok": bool(status.get("run_readiness")),
+        "muscle_balance_ok": bool(status.get("muscle_balance")),
+        "legacy_status": status,
+        "timings_ms": debug.get("timings_ms", {}),
+        "errors": debug.get("errors", []),
+    }
+
+
+def _core_dashboard_fallback(exc: Exception, duration_ms: float) -> dict:
+    today = pd.Timestamp.today().date().isoformat()
+    goals = _fallback_goals()
+    targets = _fallback_targets(goals)
+    blocks = [
+        {
+            "block": "dashboard",
+            "name": "dashboard",
+            "status": "error",
+            "error_type": type(exc).__name__,
+            "message": str(exc) or type(exc).__name__,
+            "duration_ms": round(duration_ms, 1),
+        }
+    ]
+    return {
+        "date": today,
+        "food": _food_dashboard_tile({"calories": 0, "protein": 0, "carbs": 0, "fat": 0}, targets),
+        "weight": _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today),
+        "lift_performance": _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today),
+        "workout_quality": _fallback_workout_quality(),
+        "todays_action": _fallback_todays_action(),
+        "weekly_report": _fallback_weekly_report(),
+        "recovery": {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        "prs": {"bench_press": None, "mile_time": None},
+        "goals": goals,
+        "targets": targets,
+        "base_targets": targets,
+        "training_workload": _fallback_training_workload(),
+        "nutrition_today": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0},
+        "latest_bodyweight": None,
+        "bodyweight_trend": [],
+        "weight_feedback": _fallback_weight_feedback(),
+        "latest_recovery": None,
+        "recovery_trend": [],
+        "latest_workout": None,
+        "strength_trend_summary": {"label": "insufficient data", "exercise": "", "summary": "Dashboard core fallback loaded."},
+        "muscle_balance_warning": None,
+        "ai_insight_preview": None,
+        "training_volume": [],
+        "personal_records": _fallback_personal_records(),
+        "lean_bulk_decision": _fallback_lean_bulk_decision(targets),
+        "adaptive_recommendation": _fallback_adaptive_recommendation(targets),
+        "personal_learning": _fallback_personal_learning(),
+        "optimization": _fallback_optimization_features(targets),
+        "recommendation": _fallback_performance_plan(),
+        "counts": {"nutrition": 0, "body_metrics": 0, "recovery": 0, "sleep": 0, "training": 0},
+        "errors": blocks,
+        "debug": {
+            "dashboard_status": "degraded",
+            "errors": blocks,
+            "blocks": blocks,
+            "hevy_sync": _safe_hevy_sync_debug(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+            "status": {"dashboard": False},
+            "timings_ms": {"dashboard": round(duration_ms, 1)},
+        },
+    }
+
+
 def _dashboard_context() -> dict:
     dashboard_errors: list[dict] = []
     dashboard_status: dict[str, bool] = {}
@@ -632,8 +792,7 @@ def _dashboard_context() -> dict:
     }
 
 
-@app.get("/api/dashboard")
-def dashboard() -> dict:
+def _build_dashboard_payload() -> dict:
     """Return local-first dashboard data for the Next.js frontend."""
     context = _dashboard_context()
     dashboard_errors = context["errors"]
@@ -1108,42 +1267,58 @@ def dashboard() -> dict:
             "nutrition": len(nutrition_df),
             "body_metrics": len(body_metrics_df),
             "recovery": len(recovery_df),
+            "sleep": len(sleep_df),
             "training": len(training_df),
         },
-        "errors": dashboard_errors,
+        "errors": _failed_dashboard_blocks(dashboard_errors),
         "debug": {
+            "dashboard_status": _dashboard_status_label(dashboard_errors),
+            "errors": _failed_dashboard_blocks(dashboard_errors),
+            "blocks": dashboard_errors,
+            "hevy_sync": _safe_hevy_sync_debug(),
+            "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": dashboard_status,
             "timings_ms": dashboard_timings_ms,
         },
     }
+    return payload
+
+
+@app.get("/api/dashboard")
+def dashboard() -> dict:
+    """Return dashboard data, degrading gracefully when advanced analytics fail."""
+    started = time.perf_counter()
+    logger.info("Dashboard request started.")
+    try:
+        payload = _build_dashboard_payload()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Dashboard request fell back to core payload.")
+        payload = _core_dashboard_fallback(exc, elapsed_ms)
+
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+    payload.setdefault("debug", {})
+    payload["debug"]["total_duration_ms"] = elapsed_ms
+    status_label = payload.get("debug", {}).get("dashboard_status", "ok")
+    failed_count = len(payload.get("debug", {}).get("errors", []))
+    logger.info("Dashboard request completed in %.1f ms with status=%s failed_blocks=%s", elapsed_ms, status_label, failed_count)
     return _json_safe(payload)
 
 
 @app.get("/api/dashboard/debug")
 def dashboard_debug() -> dict:
     """Return dashboard subsystem status without making the app fail hard."""
-    payload = dashboard()
-    debug = payload.get("debug", {})
-    return _json_safe(
-        {
-            "nutrition_loaded": bool(debug.get("status", {}).get("nutrition_loaded")),
-            "training_loaded": bool(debug.get("status", {}).get("training_loaded")),
-            "body_metrics_loaded": bool(debug.get("status", {}).get("body_metrics_loaded")),
-            "recovery_loaded": bool(debug.get("status", {}).get("recovery_loaded")),
-            "sleep_loaded": bool(debug.get("status", {}).get("sleep_loaded")),
-            "adaptive_recommendation_ok": bool(debug.get("status", {}).get("adaptive_recommendation")),
-            "weekly_report_ok": bool(debug.get("status", {}).get("weekly_report")),
-            "optimization_features_ok": bool(debug.get("status", {}).get("optimization_features")),
-            "personal_learning_ok": bool(debug.get("status", {}).get("personal_learning")),
-            "workout_quality_ok": bool(debug.get("status", {}).get("workout_quality")),
-            "run_readiness_ok": bool(debug.get("status", {}).get("run_readiness")),
-            "muscle_balance_ok": bool(debug.get("status", {}).get("muscle_balance")),
-            "status": debug.get("status", {}),
-            "timings_ms": debug.get("timings_ms", {}),
-            "errors": payload.get("errors", []),
-            "counts": payload.get("counts", {}),
-        }
-    )
+    started = time.perf_counter()
+    logger.info("Dashboard debug request started.")
+    try:
+        payload = _build_dashboard_payload()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Dashboard debug request fell back to core diagnostics.")
+        payload = _core_dashboard_fallback(exc, elapsed_ms)
+    debug_payload = _dashboard_debug_payload(payload)
+    debug_payload["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    return _json_safe(debug_payload)
 
 
 def _left(actual: float, target: float | None) -> dict:

@@ -613,6 +613,14 @@ def log_food_shortcut(shortcut_id, date, meal_type="Snack") -> dict:
         raise ValueError(f"Food shortcut not found: {shortcut_id}")
 
     shortcut = match.iloc[0]
+    serving_size_grams = shortcut.get("serving_size_grams")
+    default_grams_consumed = shortcut.get("default_grams_consumed")
+    serving_multiplier = None
+    try:
+        if pd.notna(serving_size_grams) and pd.notna(default_grams_consumed) and float(serving_size_grams) > 0:
+            serving_multiplier = float(default_grams_consumed) / float(serving_size_grams)
+    except (TypeError, ValueError):
+        serving_multiplier = None
     entry = create_food_entry(
         food_name=shortcut["shortcut_name"],
         calories=shortcut["calories"],
@@ -621,6 +629,20 @@ def log_food_shortcut(shortcut_id, date, meal_type="Snack") -> dict:
         fat=shortcut["fat"],
         meal_type=meal_type,
         date=date,
+        serving_size_grams=serving_size_grams,
+        grams_consumed=default_grams_consumed,
+        serving_multiplier=serving_multiplier,
+        calories_per_serving=shortcut.get("calories_per_serving"),
+        protein_per_serving=shortcut.get("protein_per_serving"),
+        carbs_per_serving=shortcut.get("carbs_per_serving"),
+        fat_per_serving=shortcut.get("fat_per_serving"),
+        fiber=shortcut.get("fiber"),
+        sodium=shortcut.get("sodium"),
+        potassium=shortcut.get("potassium"),
+        source="shortcut",
+        source_id=selected_id,
+        confidence="high",
+        created_via="shortcut",
     )
     entries_df = load_nutrition_log()
     entries_df = pd.concat([entries_df, pd.DataFrame([entry])], ignore_index=True)

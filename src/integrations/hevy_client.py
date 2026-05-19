@@ -32,6 +32,7 @@ KG_TO_LB = 2.2046226218
 HEVY_DEBUG_PATH = raw_data_path("hevy_debug_latest.json")
 HEVY_SYNC_STATE_PATH = processed_data_path("hevy_sync_state.json")
 logger = logging.getLogger(__name__)
+HEVY_SYNC_STATE_DEFAULT = {"last_sync_at": "", "last_event_cursor": "", "last_error": "", "last_result": {}}
 
 
 def _display_path(path: Path) -> str:
@@ -115,13 +116,26 @@ def verify_webhook_token(headers: dict) -> bool:
 
 
 def load_hevy_sync_state() -> dict:
-    return load_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, {"last_sync_at": "", "last_event_cursor": "", "last_error": "", "last_result": {}})
+    try:
+        state = load_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, HEVY_SYNC_STATE_DEFAULT)
+    except Exception as exc:
+        logger.warning("Hevy sync state unavailable; using safe fallback: %s", exc)
+        return {**HEVY_SYNC_STATE_DEFAULT, "last_error": str(exc), "safe_mode": True}
+    if not isinstance(state, dict):
+        return {**HEVY_SYNC_STATE_DEFAULT, "last_error": "Hevy sync state was malformed.", "safe_mode": True}
+    return {**HEVY_SYNC_STATE_DEFAULT, **state}
 
 
 def save_hevy_sync_state(updates: dict) -> dict:
     state = load_hevy_sync_state()
     state.update(updates)
-    return save_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, state)
+    try:
+        return save_document("hevy_sync_state", HEVY_SYNC_STATE_PATH, state)
+    except Exception as exc:
+        logger.warning("Hevy sync state could not be saved; continuing in safe mode: %s", exc)
+        state["last_error"] = str(exc)
+        state["safe_mode"] = True
+        return state
 
 
 def _parse_date(timestamp: str | None) -> str:

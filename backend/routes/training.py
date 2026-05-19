@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 import pandas as pd
@@ -15,6 +17,7 @@ from src.integrations.hevy_client import (
     import_hevy_workouts,
     load_hevy_sync_state,
     preview_hevy_import,
+    save_hevy_sync_state,
     sync_hevy_events,
     verify_webhook_token,
 )
@@ -28,6 +31,15 @@ from src.training_schedule import load_training_schedule_profile, planned_traini
 
 
 router = APIRouter(tags=["training"])
+logger = logging.getLogger(__name__)
+
+
+def _safe_training_items() -> list[dict]:
+    try:
+        return dataframe_records(load_training_log())
+    except Exception as exc:
+        logger.warning("Training log unavailable while reporting Hevy sync failure: %s", exc)
+        return []
 
 
 @router.get("/status")
@@ -307,6 +319,7 @@ def sync_hevy_now() -> dict:
     try:
         result = sync_hevy_events()
     except HevyIntegrationError as exc:
+        logger.warning("Manual Hevy sync failed: %s", exc)
         return {
             "status": "error",
             "message": str(exc),
@@ -314,8 +327,21 @@ def sync_hevy_now() -> dict:
             "saved_workouts": 0,
             "deleted_rows": 0,
             "failures": [str(exc)],
-            "items": dataframe_records(load_training_log()),
+            "items": _safe_training_items(),
             "last_synced_at": load_hevy_sync_state().get("last_sync_at", ""),
+        }
+    except Exception as exc:
+        logger.exception("Unexpected manual Hevy sync failure.")
+        state = save_hevy_sync_state({"last_error": str(exc), "last_result": {"status": "error", "source": "manual_sync"}})
+        return {
+            "status": "error",
+            "message": str(exc),
+            "events": 0,
+            "saved_workouts": 0,
+            "deleted_rows": 0,
+            "failures": [str(exc)],
+            "items": _safe_training_items(),
+            "last_synced_at": state.get("last_sync_at", ""),
         }
     return {
         "status": "ok",
@@ -336,6 +362,7 @@ def hevy_sync_status() -> dict:
         "last_synced_at": state.get("last_sync_at", ""),
         "last_error": state.get("last_error", ""),
         "last_result": state.get("last_result", {}),
+        "safe_mode": bool(state.get("safe_mode")),
     }
 
 
@@ -349,7 +376,11 @@ async def hevy_webhook(request: Request) -> dict:
     try:
         result = handle_hevy_webhook(payload)
     except HevyIntegrationError as exc:
+        logger.warning("Hevy webhook failed: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("Unexpected Hevy webhook failure.")
+        raise HTTPException(status_code=503, detail="Hevy webhook sync failed safely. Retry later.") from exc
     return {
         "status": result.get("status", "ok"),
         "action": result.get("action", "processed"),

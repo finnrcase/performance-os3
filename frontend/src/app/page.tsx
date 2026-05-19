@@ -826,7 +826,26 @@ type DashboardData = {
   weekly_report: WeeklyReport;
   optimization: OptimizationData;
   recommendation: { recommendation_summary: string; reasoning_explanation: string };
-  counts: { nutrition: number; body_metrics: number; recovery: number; training: number };
+  counts: { nutrition: number; body_metrics: number; recovery: number; sleep?: number; training: number };
+  errors?: DashboardDebugBlock[];
+  debug?: {
+    dashboard_status?: "ok" | "degraded" | "error" | string;
+    errors?: DashboardDebugBlock[];
+    blocks?: DashboardDebugBlock[];
+    generated_at?: string;
+    total_duration_ms?: number;
+    status?: Record<string, boolean>;
+    timings_ms?: Record<string, number>;
+  };
+};
+
+type DashboardDebugBlock = {
+  block?: string;
+  name?: string;
+  status?: "ok" | "error" | string;
+  error_type?: string;
+  message?: string;
+  duration_ms?: number;
 };
 
 type SettingsData = {
@@ -1028,10 +1047,12 @@ const initialForms: FormState = {
     date: todayString(),
     meal_type: DEFAULT_MEAL_TYPE,
     food_name: "",
+    serving_description: "",
     calories: 0,
     protein: 0,
     carbs: 0,
     fat: 0,
+    fiber: null,
   },
   body: {
     date: todayString(),
@@ -1633,6 +1654,15 @@ function foodMacroSummary(entry: Pick<NutritionEntry, "calories" | "protein" | "
   return `${formatFoodAmount(entry.calories)} kcal · P ${formatFoodAmount(entry.protein)}g · C ${formatFoodAmount(entry.carbs)}g · F ${formatFoodAmount(entry.fat)}g`;
 }
 
+function foodAmountLabel(entry: NutritionEntry) {
+  const details = [
+    entry.serving_description,
+    hasFoodDetail(entry.quantity) ? `${formatFoodAmount(entry.quantity, 1)} ${entry.unit ?? ""}`.trim() : "",
+    hasFoodDetail(entry.grams_consumed) ? `${formatFoodAmount(entry.grams_consumed, 1)}g` : "",
+  ].filter((value) => hasFoodDetail(value));
+  return details[0] ? String(details[0]) : "";
+}
+
 type FoodIconProps = { className?: string };
 
 const FOOD_ICON_TYPES: FoodIconType[] = ["bagel", "protein_bar", "oats", "protein_shake", "chicken"];
@@ -1821,6 +1851,7 @@ function FoodLogList({
         const selectedIcon = normalizeFoodIconType(entry.iconType);
         const isEditing = Boolean(entry.food_log_id && editingId === entry.food_log_id);
         const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
+        const amountLabel = foodAmountLabel(entry);
         return (
           <div key={entryId} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
             <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
@@ -1835,6 +1866,7 @@ function FoodLogList({
                     <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
                     {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
                   </div>
+                  {amountLabel ? <p className="mt-1 text-xs text-zinc-500">{amountLabel}</p> : null}
                 </div>
               </div>
               <div className="grid gap-2 sm:justify-items-end">
@@ -2005,6 +2037,209 @@ function FoodHistoryList({ logs, nutritionHistory }: Readonly<{ logs: NutritionE
           </div>
         );
       })}
+    </div>
+  );
+}
+
+type DailyMacroTotals = { calories: number; protein: number; carbs: number; fat: number; fiber: number };
+type DailyMacroTargets = { target_calories: number; protein_grams: number; carb_grams: number; fat_grams: number };
+type CompactMacroRow = { label: string; unit: string; consumed: number; target: number; bar: string };
+type PresetFoodShortcut = FoodShortcut & { isDefaultPreset?: boolean };
+
+const DEFAULT_PRESET_FOODS: PresetFoodShortcut[] = [
+  { shortcut_id: "default-preset-kirkland-bagel", shortcut_name: "Kirkland Bagel", calories: 260, protein: 11, carbs: 54, fat: 2, fiber: 2, sodium: 450, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-built-puff-bar", shortcut_name: "Built Puff Bar", calories: 140, protein: 17, carbs: 15, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-oats-overnight", shortcut_name: "Oats Overnight", calories: 280, protein: 20, carbs: 35, fat: 7, fiber: 6, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-bibigo-rice", shortcut_name: "Bibigo Rice", calories: 310, protein: 6, carbs: 68, fat: 1, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-tuna", shortcut_name: "Tuna", calories: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-kirkland-chicken", shortcut_name: "Kirkland Chicken", calories: 140, protein: 22, carbs: 2, fat: 5, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-eggs", shortcut_name: "Eggs", calories: 140, protein: 12, carbs: 1, fat: 10, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-banana", shortcut_name: "Banana", calories: 105, protein: 1, carbs: 27, fat: 0, fiber: 3, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-greek-yogurt", shortcut_name: "Greek Yogurt", calories: 100, protein: 17, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-chipotle-bowl", shortcut_name: "Chipotle Bowl", calories: 650, protein: 45, carbs: 70, fat: 20, fiber: 8, sodium: null, potassium: null, notes: "Seed preset. Edit to match your usual bowl.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-protein-shake", shortcut_name: "Protein Shake", calories: 160, protein: 30, carbs: 5, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-peanut-butter", shortcut_name: "Peanut Butter", calories: 190, protein: 7, carbs: 7, fat: 16, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-chicken-breast", shortcut_name: "Chicken Breast", calories: 165, protein: 31, carbs: 0, fat: 4, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-sweet-potato", shortcut_name: "Sweet Potato", calories: 115, protein: 2, carbs: 27, fat: 0, fiber: 4, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-salmon", shortcut_name: "Salmon", calories: 240, protein: 34, carbs: 0, fat: 12, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-avocado", shortcut_name: "Avocado", calories: 240, protein: 3, carbs: 12, fat: 22, fiber: 10, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+];
+
+function isDefaultPresetShortcut(shortcut: Pick<PresetFoodShortcut, "shortcut_id" | "isDefaultPreset">) {
+  return Boolean(shortcut.isDefaultPreset || shortcut.shortcut_id.startsWith("default-preset-"));
+}
+
+function shortcutMutationPayload(shortcut: FoodShortcut) {
+  return {
+    shortcut_name: shortcut.shortcut_name,
+    calories: Number(shortcut.calories) || 0,
+    protein: Number(shortcut.protein) || 0,
+    carbs: Number(shortcut.carbs) || 0,
+    fat: Number(shortcut.fat) || 0,
+    fiber: shortcut.fiber ?? null,
+    sodium: shortcut.sodium ?? null,
+    potassium: shortcut.potassium ?? null,
+    serving_size_grams: shortcut.serving_size_grams ?? null,
+    default_grams_consumed: shortcut.default_grams_consumed ?? null,
+    calories_per_serving: shortcut.calories_per_serving ?? null,
+    protein_per_serving: shortcut.protein_per_serving ?? null,
+    carbs_per_serving: shortcut.carbs_per_serving ?? null,
+    fat_per_serving: shortcut.fat_per_serving ?? null,
+    notes: shortcut.notes ?? "",
+    source: shortcut.source || "manual",
+  };
+}
+
+function MacroDonutCard({
+  totals,
+  targets,
+  rows,
+  dateLabel,
+  dayTypeMacros,
+}: Readonly<{
+  totals: DailyMacroTotals;
+  targets: DailyMacroTargets | null;
+  rows: CompactMacroRow[];
+  dateLabel: string;
+  dayTypeMacros?: OptimizationData["day_type_macros"] | null;
+}>) {
+  if (!targets) {
+    return (
+      <Card className="min-w-0">
+        <SectionHeader eyebrow="Today" title={`Daily summary · ${dateLabel}`} />
+        <p className="text-sm text-zinc-400">Set macro targets in Goals to see today&apos;s progress here.</p>
+      </Card>
+    );
+  }
+
+  const macroRings = rows.filter((row) => row.label !== "Calories").slice(0, 4);
+  const circumference = 2 * Math.PI * 44;
+  const strokeColors: Record<string, string> = {
+    Protein: "#2dd4bf",
+    Carbs: "#60a5fa",
+    Fat: "#f59e0b",
+    Fiber: "#86efac",
+  };
+  const caloriesLeft = Math.max(0, Math.round(targets.target_calories - totals.calories));
+  const caloriesOver = Math.max(0, Math.round(totals.calories - targets.target_calories));
+
+  return (
+    <Card className="min-w-0 overflow-hidden">
+      <SectionHeader eyebrow="Today" title={`Daily summary · ${dateLabel}`} />
+      <div className="grid gap-5 lg:grid-cols-[180px_minmax(0,1fr)] lg:items-center">
+        <div className="flex items-center gap-5 lg:block">
+          <div className="relative h-36 w-36 shrink-0 lg:mx-auto">
+            <svg className="-rotate-90" viewBox="0 0 112 112" aria-label="Daily macro completion">
+              {macroRings.map((row, index) => {
+                const radius = 44 - index * 7;
+                const ringCircumference = 2 * Math.PI * radius;
+                const percent = row.target > 0 ? Math.min(100, (row.consumed / row.target) * 100) : 0;
+                return (
+                  <g key={row.label}>
+                    <circle cx="56" cy="56" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="5" />
+                    <circle
+                      cx="56"
+                      cy="56"
+                      r={radius}
+                      fill="none"
+                      stroke={strokeColors[row.label] ?? "var(--accent-primary)"}
+                      strokeLinecap="round"
+                      strokeWidth="5"
+                      strokeDasharray={ringCircumference}
+                      strokeDashoffset={ringCircumference - (ringCircumference * percent) / 100}
+                      className="transition-[stroke-dashoffset] duration-700 ease-out"
+                    />
+                  </g>
+                );
+              })}
+              {!macroRings.length ? <circle cx="56" cy="56" r="44" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="5" strokeDasharray={circumference} /> : null}
+            </svg>
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <p className="text-2xl font-semibold text-white">{Math.round(targets.target_calories > 0 ? Math.min((totals.calories / targets.target_calories) * 100, 999) : 0)}%</p>
+              <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Macros</p>
+            </div>
+          </div>
+          <div className="min-w-0 lg:mt-4 lg:text-center">
+            <p className="text-3xl font-semibold tracking-tight text-white sm:text-4xl">
+              {Math.round(totals.calories).toLocaleString()} <span className="text-zinc-500">/</span> {Math.round(targets.target_calories).toLocaleString()}
+            </p>
+            <p className="mt-1 text-sm font-medium uppercase tracking-[0.18em] text-zinc-500">Calories</p>
+            <p className={cx("mt-2 text-xs", caloriesOver > 0 ? "text-amber-300" : "text-zinc-400")}>
+              {caloriesOver > 0 ? `${caloriesOver.toLocaleString()} over` : `${caloriesLeft.toLocaleString()} remaining`}
+            </p>
+          </div>
+        </div>
+        <div className="min-w-0 space-y-3">
+          {rows.map((row) => {
+            const consumed = Math.round(row.consumed);
+            const target = Math.round(row.target);
+            const remaining = Math.max(0, target - consumed);
+            const over = Math.max(0, consumed - target);
+            const percent = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
+            return (
+              <div key={row.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <div className="flex min-w-0 items-baseline justify-between gap-3 text-sm">
+                  <span className="font-medium text-zinc-200">{row.label}</span>
+                  <span className="shrink-0 text-zinc-400">{consumed}{row.unit} / {target}{row.unit}</span>
+                </div>
+                <div className="mt-2 h-1.5 rounded-full bg-white/10">
+                  <div className={cx("h-1.5 rounded-full transition-all duration-700 ease-out", row.bar)} style={{ width: `${percent}%` }} />
+                </div>
+                <div className="mt-1 flex items-center justify-between gap-3 text-xs text-zinc-500">
+                  <span>{over > 0 ? `${over}${row.unit} over` : `${remaining}${row.unit} remaining`}</span>
+                  <span>{Math.round(percent)}%</span>
+                </div>
+              </div>
+            );
+          })}
+          {dayTypeMacros ? (
+            <p className="accent-outline rounded-lg border px-3 py-2 text-xs leading-5">
+              {dayTypeMacros.day_type}: {dayTypeMacros.reason}
+            </p>
+          ) : null}
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function PresetFoodEditor({
+  shortcut,
+  saving,
+  onChange,
+  onSave,
+  onCancel,
+}: Readonly<{
+  shortcut: PresetFoodShortcut;
+  saving: boolean;
+  onChange: (shortcut: PresetFoodShortcut) => void;
+  onSave: () => void;
+  onCancel: () => void;
+}>) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-4">
+      <div className="grid gap-3 sm:grid-cols-2">
+        <TextInput label="Name" value={shortcut.shortcut_name} onChange={(value) => onChange({ ...shortcut, shortcut_name: value })} />
+        <TextInput label="Notes optional" value={shortcut.notes ?? ""} onChange={(value) => onChange({ ...shortcut, notes: value })} />
+        <TextInput label="Calories" type="number" min={0} step="any" value={shortcut.calories} onChange={(value) => onChange({ ...shortcut, calories: Number(value) })} />
+        <TextInput label="Protein" type="number" min={0} step="any" value={shortcut.protein} onChange={(value) => onChange({ ...shortcut, protein: Number(value) })} />
+        <TextInput label="Carbs" type="number" min={0} step="any" value={shortcut.carbs} onChange={(value) => onChange({ ...shortcut, carbs: Number(value) })} />
+        <TextInput label="Fat" type="number" min={0} step="any" value={shortcut.fat} onChange={(value) => onChange({ ...shortcut, fat: Number(value) })} />
+        <TextInput label="Serving grams optional" type="number" min={0} step="any" value={shortcut.serving_size_grams ?? ""} onChange={(value) => onChange({ ...shortcut, serving_size_grams: value === "" ? null : Number(value) })} />
+        <TextInput label="Amount grams optional" type="number" min={0} step="any" value={shortcut.default_grams_consumed ?? ""} onChange={(value) => onChange({ ...shortcut, default_grams_consumed: value === "" ? null : Number(value) })} />
+        <TextInput label="Fiber optional" type="number" min={0} step="any" value={shortcut.fiber ?? ""} onChange={(value) => onChange({ ...shortcut, fiber: value === "" ? null : Number(value) })} />
+        <TextInput label="Sodium optional mg" type="number" min={0} step="any" value={shortcut.sodium ?? ""} onChange={(value) => onChange({ ...shortcut, sodium: value === "" ? null : Number(value) })} />
+      </div>
+      <div className="mt-4 flex flex-wrap gap-2">
+        <button type="button" onClick={onSave} disabled={saving || !shortcut.shortcut_name.trim()} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60">
+          {saving ? "Saving..." : isDefaultPresetShortcut(shortcut) ? "Save preset" : "Save edits"}
+        </button>
+        <button type="button" onClick={onCancel} disabled={saving} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+          Cancel
+        </button>
+      </div>
     </div>
   );
 }
@@ -2416,9 +2651,32 @@ function Dashboard({
   const plannedWorkout = lift?.planned_workout ?? "Training";
   const completedTraining = lift?.completed_summary || "";
   const trainingSources = lift?.sources ?? [];
+  const failedDashboardBlocks = (data?.debug?.errors ?? data?.errors ?? []).filter((block) => block.status === "error" || block.error_type);
+  const dashboardDegraded = data?.debug?.dashboard_status === "degraded" && failedDashboardBlocks.length > 0;
 
   return (
     <div className="grid gap-4 xl:grid-cols-5">
+      {dashboardDegraded ? (
+        <Card className="border-amber-400/30 bg-amber-400/10 xl:col-span-5">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4 text-amber-200" />
+                <p className="font-medium text-amber-100">Dashboard loaded in degraded mode</p>
+              </div>
+              <p className="mt-2 text-sm text-amber-100/75">Core tiles are available. Advanced backend blocks failed and are using fallback data.</p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {failedDashboardBlocks.slice(0, 5).map((block) => (
+                  <span key={`${block.block ?? block.name}-${block.error_type ?? block.message}`} className="rounded-full border border-amber-300/25 bg-amber-300/10 px-2.5 py-1 text-xs text-amber-50">
+                    {block.block ?? block.name}: {block.error_type ?? "error"}
+                  </span>
+                ))}
+              </div>
+            </div>
+            {data?.debug?.generated_at ? <p className="text-xs text-amber-100/60">Generated {data.debug.generated_at}</p> : null}
+          </div>
+        </Card>
+      ) : null}
       <Card className="xl:col-span-2">
         <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
         {food?.has_targets ? (
@@ -3044,6 +3302,8 @@ function FoodPage({
   onSaveMealTemplate,
   onSaveAndLogToday,
   onLogShortcut,
+  onCreateShortcut,
+  onCreateAndLogPreset,
   onLogFrequentFood,
   onDeleteFoodLog,
   onUpdateFoodLog,
@@ -3089,12 +3349,14 @@ function FoodPage({
   onSaveShortcut: (event: FormEvent) => void;
   onSaveMealTemplate: (event: FormEvent) => void;
   onSaveAndLogToday: (event: FormEvent) => void;
-  onLogShortcut: (shortcutId: string) => void;
-  onLogFrequentFood: (foodName: string) => void;
+  onLogShortcut: (shortcutId: string) => Promise<void> | void;
+  onCreateShortcut: (shortcut: FoodShortcut) => Promise<void> | void;
+  onCreateAndLogPreset: (shortcut: FoodShortcut) => Promise<void> | void;
+  onLogFrequentFood: (foodName: string) => Promise<void> | void;
   onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
   onUpdateFoodLog: (entry: NutritionEntry, updates: { iconType: FoodIconType | null }) => Promise<void>;
-  onUpdateShortcut: (shortcut: FoodShortcut) => void;
-  onDeleteShortcut: (shortcutId: string) => void;
+  onUpdateShortcut: (shortcut: FoodShortcut) => Promise<void> | void;
+  onDeleteShortcut: (shortcutId: string) => Promise<void> | void;
   onLogMealTemplate: (templateName: string) => Promise<void>;
   onRenameMealTemplate: (templateName: string, nextName: string) => Promise<void>;
   shortcutSuggestion: { type: "shortcut" | "template" | "frequent"; label: string; id: string } | null;
@@ -3108,7 +3370,9 @@ function FoodPage({
   const [showFoodHistory, setShowFoodHistory] = useState(false);
   const [shortcutQuery, setShortcutQuery] = useState("");
   const [shortcutTab, setShortcutTab] = useState<"saved" | "meals" | "frequent">("saved");
-  const [editingShortcut, setEditingShortcut] = useState<FoodShortcut | null>(null);
+  const [presetEditMode, setPresetEditMode] = useState(false);
+  const [editingShortcut, setEditingShortcut] = useState<PresetFoodShortcut | null>(null);
+  const [pendingPresetAction, setPendingPresetAction] = useState<string | null>(null);
   const [editingTemplateName, setEditingTemplateName] = useState<string | null>(null);
   const [templateRenameValue, setTemplateRenameValue] = useState("");
   const [pendingTemplateAction, setPendingTemplateAction] = useState<string | null>(null);
@@ -3124,8 +3388,9 @@ function FoodPage({
       protein: totals.protein + (Number(entry.protein) || 0),
       carbs: totals.carbs + (Number(entry.carbs) || 0),
       fat: totals.fat + (Number(entry.fat) || 0),
+      fiber: totals.fiber + (Number(entry.fiber) || 0),
     }),
-    { calories: 0, protein: 0, carbs: 0, fat: 0 },
+    { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 },
   );
   const displayTargets = targets ? {
     target_calories: dayTypeMacros?.adjusted_targets?.calories ?? targets.target_calories,
@@ -3142,7 +3407,10 @@ function FoodPage({
   ];
   const recentHistory = nutritionHistory.slice(-30);
   const normalizedShortcutQuery = normalizeSearchText(shortcutQuery);
-  const filteredShortcuts = shortcuts.filter((shortcut) => normalizeSearchText(shortcut.shortcut_name).includes(normalizedShortcutQuery));
+  const savedShortcutNames = new Set(shortcuts.map((shortcut) => normalizeSearchText(shortcut.shortcut_name)));
+  const defaultPresetFill = DEFAULT_PRESET_FOODS.filter((preset) => !savedShortcutNames.has(normalizeSearchText(preset.shortcut_name))).slice(0, Math.max(0, 18 - shortcuts.length));
+  const presetShortcuts: PresetFoodShortcut[] = [...shortcuts, ...defaultPresetFill];
+  const filteredShortcuts = presetShortcuts.filter((shortcut) => normalizeSearchText(shortcut.shortcut_name).includes(normalizedShortcutQuery));
   const templateSummaries = Array.from(
     mealTemplates.reduce((templates, item) => {
       const name = item.template_name;
@@ -3218,57 +3486,81 @@ function FoodPage({
     }
   };
 
-  const compactMacroRows = [
+  const compactMacroRows: CompactMacroRow[] = [
     { label: "Calories", unit: "", consumed: selectedDateTotals.calories, target: displayTargets?.target_calories ?? 0, bar: "accent-progress" },
     { label: "Protein", unit: "g", consumed: selectedDateTotals.protein, target: displayTargets?.protein_grams ?? 0, bar: "bg-teal-300" },
     { label: "Carbs", unit: "g", consumed: selectedDateTotals.carbs, target: displayTargets?.carb_grams ?? 0, bar: "bg-blue-300" },
     { label: "Fat", unit: "g", consumed: selectedDateTotals.fat, target: displayTargets?.fat_grams ?? 0, bar: "bg-amber-300" },
+    ...(selectedDateTotals.fiber > 0 ? [{ label: "Fiber", unit: "g", consumed: selectedDateTotals.fiber, target: 30, bar: "bg-emerald-300" }] : []),
   ];
   const shortcutTabs: Array<{ id: "saved" | "meals" | "frequent"; label: string; count: number }> = [
-    { id: "saved", label: "Saved foods", count: shortcuts.length },
+    { id: "saved", label: "Saved foods", count: presetShortcuts.length },
     { id: "meals", label: "Meals", count: templateSummaries.length },
     { id: "frequent", label: "Frequent", count: frequentFoods.length },
   ];
+  const handleShortcutTileClick = async (shortcut: PresetFoodShortcut) => {
+    if (presetEditMode) {
+      setEditingShortcut({ ...shortcut });
+      return;
+    }
+    setPendingPresetAction(`shortcut:${shortcut.shortcut_id}`);
+    try {
+      if (isDefaultPresetShortcut(shortcut)) {
+        await onCreateAndLogPreset(shortcut);
+      } else {
+        await onLogShortcut(shortcut.shortcut_id);
+      }
+    } finally {
+      setPendingPresetAction(null);
+    }
+  };
+  const handleFrequentTileClick = async (food: NutritionShortcutData["frequent_foods"][number]) => {
+    if (presetEditMode) return;
+    setPendingPresetAction(`frequent:${food.food_name}`);
+    try {
+      await onLogFrequentFood(food.food_name);
+    } finally {
+      setPendingPresetAction(null);
+    }
+  };
+  const handleSaveShortcutEdit = async () => {
+    if (!editingShortcut) return;
+    const shortcut = { ...editingShortcut, shortcut_name: editingShortcut.shortcut_name.trim() };
+    if (!shortcut.shortcut_name) return;
+    setPendingPresetAction(`edit:${editingShortcut.shortcut_id}`);
+    try {
+      if (isDefaultPresetShortcut(shortcut)) {
+        await onCreateShortcut(shortcut);
+      } else {
+        await onUpdateShortcut(shortcut);
+      }
+      setEditingShortcut(null);
+    } finally {
+      setPendingPresetAction(null);
+    }
+  };
+  const handleDeleteShortcut = async (shortcut: FoodShortcut) => {
+    const confirmed = window.confirm(`Delete ${shortcut.shortcut_name || "this preset"}?`);
+    if (!confirmed) return;
+    setPendingPresetAction(`delete:${shortcut.shortcut_id}`);
+    try {
+      await onDeleteShortcut(shortcut.shortcut_id);
+      if (editingShortcut?.shortcut_id === shortcut.shortcut_id) setEditingShortcut(null);
+    } finally {
+      setPendingPresetAction(null);
+    }
+  };
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start">
       <div className="min-w-0 space-y-4 xl:self-start">
-        <Card className="min-w-0">
-          <SectionHeader eyebrow="Today" title={`Daily summary · ${selectedDateLabel}`} />
-          {hasMacroTargets ? (
-            <div className="space-y-3">
-              {compactMacroRows.map((row) => {
-                const consumed = Math.round(row.consumed);
-                const target = Math.round(row.target);
-                const remaining = Math.max(0, target - consumed);
-                const over = Math.max(0, consumed - target);
-                const percent = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
-                return (
-                  <div key={row.label}>
-                    <div className="flex items-baseline justify-between text-sm">
-                      <span className="font-medium text-zinc-200">{row.label}</span>
-                      <span className="text-zinc-400">{consumed}{row.unit} / {target}{row.unit}</span>
-                    </div>
-                    <div className="mt-1 h-1.5 rounded-full bg-white/10">
-                      <div className={cx("h-1.5 rounded-full", row.bar)} style={{ width: `${percent}%` }} />
-                    </div>
-                    <div className="mt-1 flex items-center justify-between text-xs text-zinc-500">
-                      <span>{over > 0 ? `${over}${row.unit} over` : `${remaining}${row.unit} remaining`}</span>
-                      <span>{Math.round(percent)}%</span>
-                    </div>
-                  </div>
-                );
-              })}
-              {dayTypeMacros ? (
-                <p className="accent-outline rounded-lg border px-3 py-2 text-xs leading-5">
-                  {dayTypeMacros.day_type}: {dayTypeMacros.reason}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-            <p className="text-sm text-zinc-400">Set macro targets in Goals to see today&apos;s progress here.</p>
-          )}
-        </Card>
+        <MacroDonutCard
+          totals={selectedDateTotals}
+          targets={hasMacroTargets ? displayTargets : null}
+          rows={compactMacroRows}
+          dateLabel={selectedDateLabel}
+          dayTypeMacros={dayTypeMacros}
+        />
         <Card className="min-w-0">
           <SectionHeader
             eyebrow="Logged foods"
@@ -3293,6 +3585,17 @@ function FoodPage({
             onSaveIcon={(entry) => void saveFoodLogIcon(entry)}
             savingId={savingFoodLogId}
           />
+          {selectedDateEntries.length ? (
+            <div className="mt-3 grid gap-3 rounded-lg border border-white/10 bg-zinc-950/50 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+              <p className="font-semibold text-white">Daily total</p>
+              <div className="flex flex-wrap gap-1.5 text-xs text-zinc-300 sm:justify-end">
+                <span className="accent-outline rounded-full border px-2 py-1">{formatFoodAmount(selectedDateTotals.calories)} kcal</span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">P {formatFoodAmount(selectedDateTotals.protein)}g</span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">C {formatFoodAmount(selectedDateTotals.carbs)}g</span>
+                <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">F {formatFoodAmount(selectedDateTotals.fat)}g</span>
+              </div>
+            </div>
+          ) : null}
         </Card>
         {showFoodHistory ? (
           <Card className="min-w-0">
@@ -3393,10 +3696,12 @@ function FoodPage({
           {manualFoodMode === "direct" ? (
             <>
               <TextInput label="Food name" required value={forms.nutrition.food_name} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, food_name: value } }))} />
+              <TextInput label="Amount / serving optional" value={forms.nutrition.serving_description ?? ""} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, serving_description: value } }))} />
               <TextInput label="Calories" type="number" min={0} step="any" value={forms.nutrition.calories} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, calories: Number(value) } }))} />
               <TextInput label="Protein" type="number" min={0} step="any" value={forms.nutrition.protein} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, protein: Number(value) } }))} />
               <TextInput label="Carbs" type="number" min={0} step="any" value={forms.nutrition.carbs} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, carbs: Number(value) } }))} />
               <TextInput label="Fat" type="number" min={0} step="any" value={forms.nutrition.fat} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, fat: Number(value) } }))} />
+              <TextInput label="Fiber optional" type="number" min={0} step="any" value={forms.nutrition.fiber ?? ""} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, fiber: value === "" ? null : Number(value) } }))} />
             </>
           ) : (
             <>
@@ -3450,7 +3755,7 @@ function FoodPage({
           )}
           {manualError ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{manualError}</p> : null}
           <button disabled={manualSaving} className="accent-bg h-11 rounded-lg text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
-            {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Save food entry"}
+            {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Add Food"}
           </button>
           {manualFoodMode === "serving" ? (
             <button type="button" onClick={onSaveServingShortcut} className="h-11 rounded-lg border border-emerald-300/30 bg-emerald-300/10 text-sm font-semibold text-emerald-100">
@@ -3623,7 +3928,7 @@ function FoodPage({
                 className="accent-focus min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
                 value={aiText}
                 maxLength={4000}
-                placeholder={"4oz nonfat milk with 4g protein\nbuilt puff bar\n2 kirkland bagels\nchicken burrito bowl"}
+                placeholder="Example: 2 Kirkland bagels, Built Puff Bar, Fairlife milk"
                 onChange={(event) => setAiText(event.target.value)}
               />
               <span className="block text-xs text-zinc-600">{aiText.length}/4000</span>
@@ -3749,7 +4054,24 @@ function FoodPage({
           <FoodLogList entries={logs.slice(-5).reverse()} emptyDescription="Manual food entries will appear here after saving." />
         </Card>
         <Card className="order-1 min-w-0">
-          <SectionHeader eyebrow="Fast log" title="Saved foods & meals" />
+          <SectionHeader
+            eyebrow="Fast log"
+            title="Preset foods & meals"
+            action={
+              <button
+                type="button"
+                onClick={() => {
+                  setPresetEditMode((value) => !value);
+                  setEditingShortcut(null);
+                  cancelTemplateRename();
+                }}
+                className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition", presetEditMode ? "accent-outline" : "border-white/10 text-zinc-200 hover:bg-white/[0.04]")}
+              >
+                <Pencil className="h-4 w-4" />
+                {presetEditMode ? "Done editing" : "Edit Presets"}
+              </button>
+            }
+          />
           <div className="space-y-4">
             <div className="grid grid-cols-3 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
               {shortcutTabs.map((tab) => (
@@ -3767,143 +4089,108 @@ function FoodPage({
             <TextInput label="Search saved items" value={shortcutQuery} placeholder="Bagel, shake, burrito" onChange={setShortcutQuery} />
             {shortcutTab === "saved" ? (
               filteredShortcuts.length ? (
-              <div className="space-y-3">
-                {filteredShortcuts.map((shortcut) => (
-                  <div key={shortcut.shortcut_id} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-                    {editingShortcut?.shortcut_id === shortcut.shortcut_id ? (
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        <TextInput label="Shortcut name" value={editingShortcut.shortcut_name} onChange={(value) => setEditingShortcut((item) => item ? { ...item, shortcut_name: value } : item)} />
-                        <TextInput label="Calories" type="number" min={0} step="any" value={editingShortcut.calories} onChange={(value) => setEditingShortcut((item) => item ? { ...item, calories: Number(value) } : item)} />
-                        <TextInput label="Protein" type="number" min={0} step="any" value={editingShortcut.protein} onChange={(value) => setEditingShortcut((item) => item ? { ...item, protein: Number(value) } : item)} />
-                        <TextInput label="Carbs" type="number" min={0} step="any" value={editingShortcut.carbs} onChange={(value) => setEditingShortcut((item) => item ? { ...item, carbs: Number(value) } : item)} />
-                        <TextInput label="Fat" type="number" min={0} step="any" value={editingShortcut.fat} onChange={(value) => setEditingShortcut((item) => item ? { ...item, fat: Number(value) } : item)} />
-                        <TextInput label="Notes" value={editingShortcut.notes ?? ""} onChange={(value) => setEditingShortcut((item) => item ? { ...item, notes: value } : item)} />
-                        <div className="flex gap-2 sm:col-span-2">
-                          <button type="button" onClick={() => { if (editingShortcut) onUpdateShortcut(editingShortcut); setEditingShortcut(null); }} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Save edits</button>
-                          <button type="button" onClick={() => setEditingShortcut(null)} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Cancel</button>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                        <div className="min-w-0">
-                          <p className="font-semibold text-white">{shortcut.shortcut_name}</p>
-                          <p className="mt-2 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">Source: {shortcut.source || "manual"}</p>
-                        </div>
-                        <div className="grid gap-2 sm:w-64">
-                          <div className="grid grid-cols-4 gap-2 text-right">
-                            <div>
-                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Calories</p>
-                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.calories)} kcal</p>
-                            </div>
-                            <div>
-                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">P</p>
-                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.protein)}g</p>
-                            </div>
-                            <div>
-                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">C</p>
-                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.carbs)}g</p>
-                            </div>
-                            <div>
-                              <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">F</p>
-                              <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(shortcut.fat)}g</p>
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap justify-end gap-2">
-                            <button type="button" onClick={() => onLogShortcut(shortcut.shortcut_id)} className="accent-bg rounded-lg px-3 py-2 text-xs font-semibold">Add to today</button>
-                            <button type="button" onClick={() => setEditingShortcut(shortcut)} className="rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-200">Edit</button>
-                            <button type="button" onClick={() => onDeleteShortcut(shortcut.shortcut_id)} className="rounded-lg border border-red-300/30 px-3 py-2 text-xs font-semibold text-red-100">Delete</button>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+                  {filteredShortcuts.map((shortcut) => {
+                    const pending = pendingPresetAction === `shortcut:${shortcut.shortcut_id}`;
+                    const editing = presetEditMode && editingShortcut?.shortcut_id === shortcut.shortcut_id;
+                    return (
+                      <button
+                        key={shortcut.shortcut_id}
+                        type="button"
+                        onClick={() => void handleShortcutTileClick(shortcut)}
+                        disabled={pending || Boolean(pendingPresetAction?.startsWith("edit:"))}
+                        className={cx(
+                          "group relative aspect-square min-w-0 rounded-lg border bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60",
+                          editing ? "accent-outline" : "border-white/10",
+                        )}
+                        title={presetEditMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
+                      >
+                        {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
+                        <span className="flex h-full items-center justify-center break-words leading-4">
+                          {pending ? "Adding..." : shortcut.shortcut_name}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {editingShortcut ? (
+                  <div className="space-y-3">
+                    <PresetFoodEditor
+                      shortcut={editingShortcut}
+                      saving={pendingPresetAction === `edit:${editingShortcut.shortcut_id}`}
+                      onChange={setEditingShortcut}
+                      onSave={() => void handleSaveShortcutEdit()}
+                      onCancel={() => setEditingShortcut(null)}
+                    />
+                    {!isDefaultPresetShortcut(editingShortcut) ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteShortcut(editingShortcut)}
+                        disabled={pendingPresetAction === `delete:${editingShortcut.shortcut_id}`}
+                        className="inline-flex items-center gap-2 rounded-lg border border-red-300/25 bg-red-300/10 px-3 py-2 text-sm font-semibold text-red-100 transition hover:bg-red-300/15 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        {pendingPresetAction === `delete:${editingShortcut.shortcut_id}` ? "Deleting..." : "Delete preset"}
+                      </button>
+                    ) : null}
                   </div>
-                ))}
+                ) : null}
               </div>
             ) : (
-              <EmptyState title="No food shortcuts yet" description="Parse food with AI, then save it as a reusable shortcut for one-click logging." action="Use AI parser" onAction={() => undefined} />
+              <EmptyState title="No matching presets" description="Clear the search or save a new shortcut from the AI review flow." action="Use AI parser" onAction={() => undefined} />
             )
             ) : null}
             {shortcutTab === "meals" ? (
               filteredTemplateSummaries.length ? (
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-                <p className="text-sm font-semibold text-white">Meal templates</p>
-                <div className="mt-3 grid gap-3">
+              <div className="space-y-4">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
                   {filteredTemplateSummaries.map((template) => (
-                    <div key={template.template_name} className="grid gap-3 rounded-lg border border-violet-300/15 bg-violet-300/[0.045] p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <div className="min-w-0">
-                        {editingTemplateName === template.template_name ? (
-                          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-center">
-                            <div className="min-w-0 flex-1">
-                              <TextInput label="Template name" value={templateRenameValue} onChange={setTemplateRenameValue} />
-                            </div>
-                            <div className="flex gap-2 sm:pt-6">
-                              <button
-                                type="button"
-                                onClick={() => void saveTemplateRename(template.template_name)}
-                                disabled={!templateRenameValue.trim() || pendingTemplateAction === `rename:${template.template_name}`}
-                                className="accent-bg inline-flex h-9 w-9 items-center justify-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-50"
-                                aria-label="Save template name"
-                              >
-                                <Check className="h-4 w-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={cancelTemplateRename}
-                                disabled={pendingTemplateAction === `rename:${template.template_name}`}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/10 text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
-                                aria-label="Cancel template rename"
-                              >
-                                <X className="h-4 w-4" />
-                              </button>
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="flex min-w-0 items-start gap-2">
-                            <p className="line-clamp-2 min-w-0 text-sm font-semibold leading-5 text-white">{template.template_name}</p>
-                            <button
-                              type="button"
-                              onClick={() => beginTemplateRename(template.template_name)}
-                              className="accent-hover mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border border-white/10 text-zinc-400 transition"
-                              aria-label={`Rename ${template.template_name}`}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        )}
-                        <p className="mt-1 text-xs text-zinc-500">{template.foods} item{template.foods === 1 ? "" : "s"} saved</p>
-                      </div>
-                      <div className="grid gap-3 sm:w-64">
-                        <div className="grid grid-cols-4 gap-2 text-right">
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Calories</p>
-                            <p className="mt-1 text-xs font-semibold text-violet-100">{Math.round(template.calories)} kcal</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">P</p>
-                            <p className="mt-1 text-xs font-semibold text-violet-100">{Math.round(template.protein)}g</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">C</p>
-                            <p className="mt-1 text-xs font-semibold text-violet-100">{Math.round(template.carbs)}g</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">F</p>
-                            <p className="mt-1 text-xs font-semibold text-violet-100">{Math.round(template.fat)}g</p>
-                          </div>
-                        </div>
+                    <button
+                      key={template.template_name}
+                      type="button"
+                      onClick={() => presetEditMode ? beginTemplateRename(template.template_name) : void logTemplate(template.template_name)}
+                      disabled={pendingTemplateAction === `log:${template.template_name}` || pendingTemplateAction === `rename:${template.template_name}`}
+                      className={cx(
+                        "group relative aspect-square min-w-0 rounded-lg border bg-violet-300/[0.045] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-violet-300/[0.075] disabled:cursor-not-allowed disabled:opacity-60",
+                        editingTemplateName === template.template_name ? "border-violet-200/60 shadow-[0_0_22px_rgba(196,181,253,0.12)]" : "border-violet-300/15",
+                      )}
+                      title={presetEditMode ? `Rename ${template.template_name}` : `Add ${template.template_name} to today`}
+                    >
+                      {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-violet-200/70" /> : null}
+                      <span className="flex h-full items-center justify-center break-words leading-4">
+                        {pendingTemplateAction === `log:${template.template_name}` ? "Adding..." : template.template_name}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {editingTemplateName ? (
+                  <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-4">
+                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+                      <TextInput label="Template name" value={templateRenameValue} onChange={setTemplateRenameValue} />
+                      <div className="flex gap-2">
                         <button
                           type="button"
-                          onClick={() => void logTemplate(template.template_name)}
-                          disabled={pendingTemplateAction === `log:${template.template_name}`}
-                          className="accent-bg inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() => void saveTemplateRename(editingTemplateName)}
+                          disabled={!templateRenameValue.trim() || pendingTemplateAction === `rename:${editingTemplateName}`}
+                          className="accent-bg inline-flex h-11 w-11 items-center justify-center rounded-lg transition disabled:cursor-not-allowed disabled:opacity-50"
+                          aria-label="Save template name"
                         >
-                          <Plus className="h-3.5 w-3.5" />
-                          {pendingTemplateAction === `log:${template.template_name}` ? "Adding..." : "Add to today"}
+                          <Check className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelTemplateRename}
+                          disabled={pendingTemplateAction === `rename:${editingTemplateName}`}
+                          className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-white/10 text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                          aria-label="Cancel template rename"
+                        >
+                          <X className="h-4 w-4" />
                         </button>
                       </div>
                     </div>
-                  ))}
-                </div>
+                  </div>
+                ) : null}
               </div>
             ) : (
               <EmptyState title="No meal templates yet" description="Save an AI parse as a meal template to reuse it here." action="Use AI parser" onAction={() => undefined} />
@@ -3911,41 +4198,21 @@ function FoodPage({
             ) : null}
             {shortcutTab === "frequent" ? (
               filteredFrequentFoods.length ? (
-                <div className="space-y-3">
+                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
                   {filteredFrequentFoods.map((food) => (
-                    <div key={food.food_name} className="grid gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <p className="line-clamp-2 min-w-0 font-semibold text-white">{food.food_name}</p>
-                          {food.is_favorite ? <span className="rounded-full border border-amber-300/20 bg-amber-300/10 px-2 py-1 text-xs font-semibold text-amber-100">Favorite</span> : null}
-                        </div>
-                        <p className="mt-1 text-xs text-zinc-500">{food.default_meal_type || DEFAULT_MEAL_TYPE}</p>
-                      </div>
-                      <div className="grid gap-2 sm:w-64">
-                        <div className="grid grid-cols-4 gap-2 text-right">
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">Calories</p>
-                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.calories)} kcal</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">P</p>
-                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.protein)}g</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">C</p>
-                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.carbs)}g</p>
-                          </div>
-                          <div>
-                            <p className="text-[10px] uppercase tracking-[0.12em] text-zinc-500">F</p>
-                            <p className="accent-text-strong mt-1 text-xs font-semibold">{Math.round(food.fat)}g</p>
-                          </div>
-                        </div>
-                        <button type="button" onClick={() => onLogFrequentFood(food.food_name)} className="accent-bg inline-flex w-full items-center justify-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition">
-                          <Plus className="h-3.5 w-3.5" />
-                          Add to today
-                        </button>
-                      </div>
-                    </div>
+                    <button
+                      key={food.food_name}
+                      type="button"
+                      onClick={() => void handleFrequentTileClick(food)}
+                      disabled={presetEditMode || pendingPresetAction === `frequent:${food.food_name}`}
+                      className="relative aspect-square min-w-0 rounded-lg border border-white/10 bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60"
+                      title={`Add ${food.food_name} to today`}
+                    >
+                      {food.is_favorite ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-300" /> : null}
+                      <span className="flex h-full items-center justify-center break-words leading-4">
+                        {pendingPresetAction === `frequent:${food.food_name}` ? "Adding..." : food.food_name}
+                      </span>
+                    </button>
                   ))}
                 </div>
               ) : (
@@ -7200,6 +7467,12 @@ export default function Home() {
         return `${key.replace("_", " ")} must be a number greater than or equal to 0.`;
       }
     }
+    if (entry.fiber !== null && entry.fiber !== undefined) {
+      const fiber = Number(entry.fiber);
+      if (!Number.isFinite(fiber) || fiber < 0) {
+        return "fiber must be a number greater than or equal to 0.";
+      }
+    }
     return null;
   };
 
@@ -7553,15 +7826,29 @@ export default function Home() {
           }, "Saved shortcut/template and logged food today.")
         }
         onLogShortcut={(shortcutId) =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcutId}/log`, "POST", {
               date: forms.nutrition.date,
               meal_type: DEFAULT_MEAL_TYPE,
             });
           }, "Shortcut logged.")
         }
+        onCreateShortcut={(shortcut) =>
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            await apiSend("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
+          }, "Preset saved.")
+        }
+        onCreateAndLogPreset={(shortcut) =>
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            const created = await apiSend<{ item: FoodShortcut }>("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
+            await apiSend(`/api/nutrition/shortcuts/${created.item.shortcut_id}/log`, "POST", {
+              date: forms.nutrition.date,
+              meal_type: DEFAULT_MEAL_TYPE,
+            });
+          }, "Preset saved and logged.")
+        }
         onLogFrequentFood={(foodName) =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/frequent-foods/${encodeURIComponent(foodName)}/log`, "POST", {
               date: forms.nutrition.date,
               meal_type: DEFAULT_MEAL_TYPE,
@@ -7581,23 +7868,12 @@ export default function Home() {
           }, "Food icon updated.")
         }
         onUpdateShortcut={(shortcut) =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", {
-              shortcut_name: shortcut.shortcut_name,
-              calories: Number(shortcut.calories) || 0,
-              protein: Number(shortcut.protein) || 0,
-              carbs: Number(shortcut.carbs) || 0,
-              fat: Number(shortcut.fat) || 0,
-              fiber: shortcut.fiber,
-              sodium: shortcut.sodium,
-              potassium: shortcut.potassium,
-              notes: shortcut.notes,
-              source: shortcut.source || "manual",
-            });
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", shortcutMutationPayload(shortcut));
           }, "Shortcut updated.")
         }
         onDeleteShortcut={(shortcutId) =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiDelete(`/api/nutrition/shortcuts/${shortcutId}`);
           }, "Shortcut deleted.")
         }
@@ -7687,10 +7963,12 @@ export default function Home() {
                 nutrition: {
                   ...state.nutrition,
                   food_name: "",
+                  serving_description: "",
                   calories: 0,
                   protein: 0,
                   carbs: 0,
                   fat: 0,
+                  fiber: null,
                 },
               }));
             } finally {

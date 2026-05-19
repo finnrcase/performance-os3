@@ -8,11 +8,16 @@ devices share the same history.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+import time
 from typing import Any
 
 import pandas as pd
+
+
+logger = logging.getLogger(__name__)
 
 
 DATAFRAME_TABLES = {
@@ -138,6 +143,60 @@ def _connect():
     return psycopg.connect(database_url())
 
 
+TRANSIENT_DB_ERROR_NAMES = {
+    "AdminShutdown",
+    "ConnectionException",
+    "OperationalError",
+    "InterfaceError",
+    "ConnectionTimeout",
+    "ConnectionFailure",
+    "CannotConnectNow",
+    "TooManyConnections",
+}
+
+
+def _is_transient_database_error(exc: Exception) -> bool:
+    class_names = {cls.__name__ for cls in type(exc).mro()}
+    if class_names & TRANSIENT_DB_ERROR_NAMES:
+        return True
+    message = str(exc).lower()
+    transient_markers = [
+        "terminating connection",
+        "administrator command",
+        "connection reset",
+        "connection refused",
+        "connection timeout",
+        "connection already closed",
+        "server closed the connection",
+        "could not connect",
+        "timeout expired",
+    ]
+    return any(marker in message for marker in transient_markers)
+
+
+def _with_database_retry(operation, *, attempts: int = 2):
+    global _schema_ready
+    last_exc: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return operation()
+        except Exception as exc:
+            last_exc = exc
+            if not _is_transient_database_error(exc) or attempt >= attempts - 1:
+                raise
+            _schema_ready = False
+            delay_seconds = 0.2 * (attempt + 1)
+            logger.warning(
+                "Transient Postgres error; retrying storage operation in %.1fs: %s",
+                delay_seconds,
+                exc,
+            )
+            time.sleep(delay_seconds)
+    if last_exc:
+        raise last_exc
+    return None
+
+
 def _json_default(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: _json_default(item) for key, item in value.items()}
@@ -168,25 +227,28 @@ def ensure_database_schema(force: bool = False) -> None:
     if _schema_ready and not force:
         return
 
-    with _connect() as conn:
-        with conn.cursor() as cur:
-            for table in ALL_DATASET_TABLES:
-                cur.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS {table} (
-                        id BIGSERIAL PRIMARY KEY,
-                        row_key TEXT,
-                        row_order INTEGER NOT NULL DEFAULT 0,
-                        data JSONB NOT NULL,
-                        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-                        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    def apply_schema() -> None:
+        with _connect() as conn:
+            with conn.cursor() as cur:
+                for table in ALL_DATASET_TABLES:
+                    cur.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS {table} (
+                            id BIGSERIAL PRIMARY KEY,
+                            row_key TEXT,
+                            row_order INTEGER NOT NULL DEFAULT 0,
+                            data JSONB NOT NULL,
+                            created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                            updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                        )
+                        """
                     )
-                    """
-                )
-                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS row_key TEXT")
-                cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_row_order_idx ON {table} (row_order)")
-                cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_row_key_unique_idx ON {table} (row_key) WHERE row_key IS NOT NULL")
-        conn.commit()
+                    cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS row_key TEXT")
+                    cur.execute(f"CREATE INDEX IF NOT EXISTS {table}_row_order_idx ON {table} (row_order)")
+                    cur.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS {table}_row_key_unique_idx ON {table} (row_key) WHERE row_key IS NOT NULL")
+            conn.commit()
+
+    _with_database_retry(apply_schema)
     _schema_ready = True
 
 
@@ -207,15 +269,18 @@ def _table_for_document(key: str) -> str:
 def load_dataframe(dataset: str, path: Path, columns: list[str]) -> pd.DataFrame:
     """Load a tabular dataset from Postgres or local CSV."""
     if use_database():
-        ensure_database_schema()
-        table = _table_for_dataframe(dataset)
-        with _connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT data FROM {table} ORDER BY row_order, id")
-                rows = [row[0] for row in cur.fetchall()]
-        if not rows:
-            return pd.DataFrame(columns=columns)
-        df = pd.DataFrame(rows)
+        def load_from_db() -> pd.DataFrame:
+            ensure_database_schema()
+            table = _table_for_dataframe(dataset)
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT data FROM {table} ORDER BY row_order, id")
+                    rows = [row[0] for row in cur.fetchall()]
+            if not rows:
+                return pd.DataFrame(columns=columns)
+            return pd.DataFrame(rows)
+
+        df = _with_database_retry(load_from_db)
     else:
         if not path.exists():
             return pd.DataFrame(columns=columns)
@@ -232,49 +297,52 @@ def save_dataframe(dataset: str, path: Path, df: pd.DataFrame, columns: list[str
     data = (df.copy() if df is not None else pd.DataFrame(columns=columns)).reindex(columns=columns)
 
     if use_database():
-        ensure_database_schema()
-        table = _table_for_dataframe(dataset)
-        records = [_clean_record(record) for record in data.to_dict(orient="records")]
-        row_keys = dataframe_row_keys(dataset, records)
-        delete_row_keys = sorted(set(str(key) for key in data.attrs.get("delete_row_keys", []) if str(key).strip()))
-        replace_all = bool(data.attrs.get("replace_all", False))
-        with _connect() as conn:
-            with conn.cursor() as cur:
-                if replace_all or (records and len(row_keys) != len(records)):
-                    cur.execute(f"DELETE FROM {table}")
-                    if records:
-                        cur.executemany(
-                            f"INSERT INTO {table} (row_key, row_order, data) VALUES (%s, %s, %s::jsonb)",
-                            [
-                                (dataframe_row_key(dataset, record, index), index, json.dumps(record))
-                                for index, record in enumerate(records)
-                            ],
-                        )
-                else:
-                    if delete_row_keys:
-                        cur.execute(f"DELETE FROM {table} WHERE row_key = ANY(%s)", (delete_row_keys,))
-                    if records:
-                        cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
-                        cur.executemany(
-                            f"""
-                            INSERT INTO {table} (row_key, row_order, data)
-                            VALUES (%s, %s, %s::jsonb)
-                            ON CONFLICT (row_key) WHERE row_key IS NOT NULL
-                            DO UPDATE SET
-                                row_order = EXCLUDED.row_order,
-                                data = EXCLUDED.data,
-                                updated_at = now()
-                            """,
-                            [
-                                (row_keys[index], index, json.dumps(record))
-                                for index, record in enumerate(records)
-                            ],
-                        )
-                    elif delete_row_keys:
-                        pass
-                    else:
+        def save_to_db() -> None:
+            ensure_database_schema()
+            table = _table_for_dataframe(dataset)
+            records = [_clean_record(record) for record in data.to_dict(orient="records")]
+            row_keys = dataframe_row_keys(dataset, records)
+            delete_row_keys = sorted(set(str(key) for key in data.attrs.get("delete_row_keys", []) if str(key).strip()))
+            replace_all = bool(data.attrs.get("replace_all", False))
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    if replace_all or (records and len(row_keys) != len(records)):
                         cur.execute(f"DELETE FROM {table}")
-            conn.commit()
+                        if records:
+                            cur.executemany(
+                                f"INSERT INTO {table} (row_key, row_order, data) VALUES (%s, %s, %s::jsonb)",
+                                [
+                                    (dataframe_row_key(dataset, record, index), index, json.dumps(record))
+                                    for index, record in enumerate(records)
+                                ],
+                            )
+                    else:
+                        if delete_row_keys:
+                            cur.execute(f"DELETE FROM {table} WHERE row_key = ANY(%s)", (delete_row_keys,))
+                        if records:
+                            cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
+                            cur.executemany(
+                                f"""
+                                INSERT INTO {table} (row_key, row_order, data)
+                                VALUES (%s, %s, %s::jsonb)
+                                ON CONFLICT (row_key) WHERE row_key IS NOT NULL
+                                DO UPDATE SET
+                                    row_order = EXCLUDED.row_order,
+                                    data = EXCLUDED.data,
+                                    updated_at = now()
+                                """,
+                                [
+                                    (row_keys[index], index, json.dumps(record))
+                                    for index, record in enumerate(records)
+                                ],
+                            )
+                        elif delete_row_keys:
+                            pass
+                        else:
+                            cur.execute(f"DELETE FROM {table}")
+                conn.commit()
+
+        _with_database_retry(save_to_db)
         return
 
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -284,13 +352,16 @@ def save_dataframe(dataset: str, path: Path, df: pd.DataFrame, columns: list[str
 def load_document(key: str, path: Path, default: dict[str, Any]) -> dict[str, Any]:
     """Load a JSON document from Postgres or local JSON."""
     if use_database():
-        ensure_database_schema()
-        table = _table_for_document(key)
-        with _connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT data FROM {table} ORDER BY updated_at DESC, id DESC LIMIT 1")
-                row = cur.fetchone()
-        return dict(row[0]) if row else default.copy()
+        def load_from_db() -> dict[str, Any]:
+            ensure_database_schema()
+            table = _table_for_document(key)
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT data FROM {table} ORDER BY updated_at DESC, id DESC LIMIT 1")
+                    row = cur.fetchone()
+            return dict(row[0]) if row else default.copy()
+
+        return _with_database_retry(load_from_db)
 
     if not path.exists():
         return default.copy()
@@ -305,25 +376,28 @@ def save_document(key: str, path: Path, document: dict[str, Any]) -> dict[str, A
     data = json.loads(json.dumps(document, default=_json_default))
 
     if use_database():
-        ensure_database_schema()
-        table = _table_for_document(key)
-        with _connect() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    f"""
-                    INSERT INTO {table} (row_key, row_order, data)
-                    VALUES ('document', 0, %s::jsonb)
-                    ON CONFLICT (row_key) WHERE row_key IS NOT NULL
-                    DO UPDATE SET
-                        row_order = EXCLUDED.row_order,
-                        data = EXCLUDED.data,
-                        updated_at = now()
-                    """,
-                    (json.dumps(data),),
-                )
-                cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
-            conn.commit()
-        return data
+        def save_to_db() -> dict[str, Any]:
+            ensure_database_schema()
+            table = _table_for_document(key)
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        INSERT INTO {table} (row_key, row_order, data)
+                        VALUES ('document', 0, %s::jsonb)
+                        ON CONFLICT (row_key) WHERE row_key IS NOT NULL
+                        DO UPDATE SET
+                            row_order = EXCLUDED.row_order,
+                            data = EXCLUDED.data,
+                            updated_at = now()
+                        """,
+                        (json.dumps(data),),
+                    )
+                    cur.execute(f"DELETE FROM {table} WHERE row_key IS NULL")
+                conn.commit()
+            return data
+
+        return _with_database_retry(save_to_db)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
