@@ -189,6 +189,8 @@ type DailyNutritionSummary = {
   fat_delta: number | null;
   adherence_score: number | null;
   nutrition_logged?: boolean;
+  logged_day?: boolean;
+  finalized?: boolean;
   notes: string;
 };
 
@@ -206,6 +208,23 @@ type NutritionAdherence = {
   missing_days?: number;
   confidence?: "high" | "medium" | "low" | string;
   data_quality_note?: string;
+};
+
+type NutritionTodayResponse = {
+  date: string;
+  items: NutritionEntry[];
+  totals: { calories: number; protein: number; carbs: number; fat: number; fiber?: number };
+  targets?: { calories?: number | null; protein?: number | null; carbs?: number | null; fat?: number | null };
+  finalized?: boolean;
+  status?: string;
+};
+
+type RecommendationRunResponse = {
+  status: string;
+  message?: string;
+  finalized_summary?: { summary?: DailyNutritionSummary | null } | null;
+  dashboard?: DashboardData;
+  duration_ms?: number;
 };
 
 type ParsedFood = {
@@ -708,9 +727,16 @@ type HevyPreview = {
 };
 
 type HevySyncStatus = {
+  status?: string;
+  configured?: boolean;
   last_synced_at: string;
   last_error: string;
   last_result: Record<string, unknown>;
+  safe_mode?: boolean;
+  hevy_rows?: number;
+  hevy_workouts?: number;
+  latest_workout_date?: string;
+  latest_workout_title?: string;
 };
 
 type HevySyncResult = {
@@ -718,10 +744,87 @@ type HevySyncResult = {
   message?: string;
   events: number;
   saved_workouts: number;
+  event_saved_workouts?: number;
+  imported_workouts?: number;
+  imported_rows?: number;
+  replaced_rows?: number;
   deleted_rows: number;
   failures?: string[];
   items: TrainingEntry[];
   last_synced_at: string;
+  hevy_rows?: number;
+  hevy_workouts?: number;
+  latest_workout_date?: string;
+  latest_workout_title?: string;
+};
+
+type TrainingHistoryResponse = {
+  items: WorkoutGroup[];
+  limit?: number;
+  days?: number;
+  raw_window_days?: number;
+  has_more_recent?: boolean;
+  message?: string;
+  debug?: {
+    hevy_rows?: number;
+    hevy_workouts?: number;
+    latest_workout_date?: string;
+    latest_workout_title?: string;
+    message?: string;
+  };
+};
+
+type TrainingSummaryItem = {
+  period_start: string;
+  period_end?: string;
+  period_label?: string;
+  workout_count: number;
+  total_sets: number;
+  total_reps: number;
+  total_volume: number;
+  duration_minutes: number;
+  latest_workout_date?: string;
+};
+
+type MuscleGroupVolumeSummary = {
+  period_type: string;
+  period_start: string;
+  period_label?: string;
+  muscle_group: string;
+  workout_count: number;
+  total_sets: number;
+  hard_sets: number;
+  total_reps: number;
+  total_volume: number;
+};
+
+type TrainingSummaryResponse = {
+  window: "weekly" | "monthly" | string;
+  period: string;
+  items: TrainingSummaryItem[];
+  muscle_groups: MuscleGroupVolumeSummary[];
+  raw_window_days?: number;
+  message?: string;
+};
+
+type TrainingSummaryStatusResponse = {
+  raw_window_days: number;
+  total_raw_rows: number;
+  recent_raw_rows: number;
+  older_raw_rows: number;
+  weekly_summaries: number;
+  monthly_summaries: number;
+  exercise_prs: number;
+  muscle_group_periods: number;
+  last_summary_rebuild_date?: string;
+  latest_weekly_period?: string;
+  latest_monthly_period?: string;
+  coaching_contract?: {
+    plateau_detection?: string;
+    calorie_changes?: string;
+    long_term_context?: string;
+    raw_features_preserved?: string[];
+  };
 };
 
 type WithingsSyncResult = {
@@ -1146,6 +1249,7 @@ function cx(...classes: Array<string | false | null | undefined>) {
 }
 
 const ACCENT_THEME_STORAGE_KEY = "performance-os-accent-theme";
+const DAILY_NUTRITION_HISTORY_EXPANDED_KEY = "performance-os-daily-nutrition-history-expanded";
 
 const accentThemeOptions: Array<{ id: AccentTheme; label: string; swatch: string }> = [
   { id: "lime", label: "Lime", swatch: "bg-lime-300" },
@@ -3677,6 +3781,7 @@ function FoodPage({
   dayTypeMacros,
   adaptiveRecommendation,
   onApplySuggestedMacros,
+  onRunNutritionEngine,
   nutritionHistory,
   nutritionAdherence,
   shortcuts,
@@ -3725,6 +3830,7 @@ function FoodPage({
   dayTypeMacros?: OptimizationData["day_type_macros"] | null;
   adaptiveRecommendation?: AdaptiveNutritionRecommendation | null;
   onApplySuggestedMacros: () => void;
+  onRunNutritionEngine: () => void;
   nutritionHistory: DailyNutritionSummary[];
   nutritionAdherence: NutritionAdherence | null;
   shortcuts: FoodShortcut[];
@@ -4001,8 +4107,24 @@ function FoodPage({
         <SupplementsTile date={forms.nutrition.date} />
         {showFoodHistory ? (
           <Card className="min-w-0">
-            <SectionHeader eyebrow="Details" title="Food history and targets" />
+            <SectionHeader
+              eyebrow="Details"
+              title="Food history and targets"
+              action={
+                <button
+                  type="button"
+                  onClick={onRunNutritionEngine}
+                  className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]"
+                >
+                  <RefreshCw className="h-4 w-4" />
+                  Run nutrition engine
+                </button>
+              }
+            />
             <div className="space-y-4">
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-xs leading-5 text-zinc-400">
+                Today is live and updates instantly from food rows. Long-term recommendations use finalized daily summaries unless you run the engine manually.
+              </div>
               {hasMacroTargets ? (
                 <div className="space-y-3">
                   {adaptiveRecommendation ? (
@@ -4622,6 +4744,98 @@ function FoodPage({
   );
 }
 
+type WeightChartPoint = {
+  date: string;
+  timestamp: number;
+  bodyweight: number;
+  movingAverage7: number | null;
+  bodyFat: number | null;
+  leanMass: number | null;
+  muscleMass: number | null;
+};
+
+function formatWeight(value?: number | null, digits = 1) {
+  return Number.isFinite(Number(value)) ? `${Number(value).toFixed(digits)} lb` : "--";
+}
+
+function formatWeightDelta(value?: number | null) {
+  if (!Number.isFinite(Number(value))) return "--";
+  const amount = Number(value);
+  return `${amount >= 0 ? "+" : ""}${amount.toFixed(1)} lb`;
+}
+
+function formatPercentDelta(value?: number | null) {
+  if (!Number.isFinite(Number(value))) return "--";
+  const amount = Number(value);
+  return `${amount >= 0 ? "+" : ""}${amount.toFixed(2)}%`;
+}
+
+function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
+  const grouped = new Map<string, WeightChartPoint[]>();
+  entries.forEach((entry) => {
+    const parsedDate = new Date(entry.date);
+    const bodyweight = Number(entry.bodyweight);
+    if (!entry.date || !Number.isFinite(parsedDate.getTime()) || !Number.isFinite(bodyweight) || bodyweight <= 0) {
+      return;
+    }
+    const date = parsedDate.toISOString().slice(0, 10);
+    const item: WeightChartPoint = {
+      date,
+      timestamp: parsedDate.getTime(),
+      bodyweight,
+      movingAverage7: null,
+      bodyFat: Number.isFinite(Number(entry.estimated_body_fat)) ? Number(entry.estimated_body_fat) : null,
+      leanMass: Number.isFinite(Number(entry.lean_mass)) ? Number(entry.lean_mass) : null,
+      muscleMass: Number.isFinite(Number(entry.muscle_mass)) ? Number(entry.muscle_mass) : null,
+    };
+    grouped.set(date, [...(grouped.get(date) ?? []), item]);
+  });
+
+  const daily = Array.from(grouped.entries()).map(([date, values]) => {
+    const average = values.reduce((sum, item) => sum + item.bodyweight, 0) / values.length;
+    const latest = values.sort((a, b) => a.timestamp - b.timestamp).at(-1)!;
+    return { ...latest, date, bodyweight: Number(average.toFixed(2)) };
+  });
+
+  return daily
+    .sort((a, b) => a.timestamp - b.timestamp)
+    .map((entry, index, all) => {
+      const window = all.slice(Math.max(0, index - 6), index + 1);
+      const movingAverage7 = window.reduce((sum, item) => sum + item.bodyweight, 0) / window.length;
+      return { ...entry, movingAverage7: Number(movingAverage7.toFixed(2)) };
+    });
+}
+
+function buildWeightTrend(history: WeightChartPoint[]) {
+  const latest = history.at(-1) ?? null;
+  const cutoff = new Date();
+  cutoff.setHours(0, 0, 0, 0);
+  cutoff.setDate(cutoff.getDate() - 6);
+  const recent = history.filter((entry) => entry.timestamp >= cutoff.getTime());
+  const sevenDayAverage = recent.length ? recent.reduce((sum, entry) => sum + entry.bodyweight, 0) / recent.length : null;
+  const firstRecent = recent[0] ?? null;
+  const latestRecent = recent.at(-1) ?? null;
+  const change = firstRecent && latestRecent && recent.length >= 2 ? latestRecent.bodyweight - firstRecent.bodyweight : null;
+  const percentChange = change !== null && firstRecent && firstRecent.bodyweight > 0 ? (change / firstRecent.bodyweight) * 100 : null;
+  const trendLabel = change === null ? "Need more weigh-ins" : Math.abs(change) < 0.3 ? "stable" : change > 0 ? "gaining" : "losing";
+  return { latest, recent, sevenDayAverage, change, percentChange, trendLabel };
+}
+
+function WeightTooltip({ active, payload, label }: Readonly<{ active?: boolean; payload?: Array<{ payload?: WeightChartPoint }>; label?: string }>) {
+  if (!active || !payload?.length) return null;
+  const point = payload[0]?.payload;
+  return (
+    <div className="rounded-lg border border-white/10 bg-zinc-950/95 p-3 text-sm shadow-xl">
+      <p className="font-semibold text-white">{label}</p>
+      <p className="mt-2 text-zinc-200">Weight: {formatWeight(point?.bodyweight)}</p>
+      {point?.movingAverage7 ? <p className="text-zinc-400">7-day avg: {formatWeight(point.movingAverage7)}</p> : null}
+      {point?.bodyFat !== null && point?.bodyFat !== undefined ? <p className="text-zinc-400">Body fat: {point.bodyFat.toFixed(1)}%</p> : null}
+      {point?.leanMass !== null && point?.leanMass !== undefined ? <p className="text-zinc-400">Lean mass: {formatWeight(point.leanMass)}</p> : null}
+      {point?.muscleMass !== null && point?.muscleMass !== undefined ? <p className="text-zinc-400">Muscle mass: {formatWeight(point.muscleMass)}</p> : null}
+    </div>
+  );
+}
+
 function RecoveryPage({
   bodyMetrics,
   recoveryLogs,
@@ -4641,6 +4855,20 @@ function RecoveryPage({
   onBodySubmit: (event: FormEvent) => void;
   onRecoverySubmit: (event: FormEvent) => void;
 }>) {
+  const weightHistory = useMemo(() => cleanWeightHistory(bodyMetrics), [bodyMetrics]);
+  const weightTrend = useMemo(() => buildWeightTrend(weightHistory), [weightHistory]);
+  const highestWeight = weightHistory.length ? Math.max(...weightHistory.map((entry) => entry.bodyweight)) : null;
+  const lowestWeight = weightHistory.length ? Math.min(...weightHistory.map((entry) => entry.bodyweight)) : null;
+  const firstWeight = weightHistory[0] ?? null;
+  const totalWeightChange = firstWeight && weightTrend.latest ? weightTrend.latest.bodyweight - firstWeight.bodyweight : null;
+  const latestBodyFat = [...weightHistory].reverse().find((entry) => entry.bodyFat !== null)?.bodyFat ?? null;
+  const trendColor = weightTrend.trendLabel === "gaining"
+    ? "text-emerald-200"
+    : weightTrend.trendLabel === "losing"
+      ? "text-sky-200"
+      : weightTrend.trendLabel === "stable"
+        ? "text-zinc-100"
+        : "text-amber-200";
   const sleepChartData = useMemo(() => {
     return sleepEntries
       .slice(-30)
@@ -4677,7 +4905,109 @@ function RecoveryPage({
         ? "Neutral - sleep is adequate but still worth watching."
         : "Negative - sleep may be limiting readiness.";
   return (
-    <div className="grid gap-4 xl:grid-cols-2">
+    <div className="space-y-4">
+      <Card>
+        <SectionHeader eyebrow="Bodyweight" title="Weight Overview" />
+        {weightHistory.length ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Latest</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(weightTrend.latest?.bodyweight)}</p>
+              <p className="mt-1 text-xs text-zinc-500">{weightTrend.latest?.date}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Highest</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(highestWeight)}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Lowest</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(lowestWeight)}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Total change</p>
+              <p className={cx("mt-2 text-2xl font-semibold", Number(totalWeightChange) > 0 ? "text-emerald-200" : Number(totalWeightChange) < 0 ? "text-sky-200" : "text-white")}>{formatWeightDelta(totalWeightChange)}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Body fat</p>
+              <p className="mt-2 text-2xl font-semibold text-white">{latestBodyFat !== null ? `${latestBodyFat.toFixed(1)}%` : "--"}</p>
+            </div>
+          </div>
+        ) : (
+          <EmptyState title="No bodyweight data yet" description="Log bodyweight manually or import Withings measurements to start the trend." action="Use form below" onAction={() => undefined} />
+        )}
+      </Card>
+
+      <Card>
+        <SectionHeader eyebrow="Past 7 Days" title="Weight Trend" />
+        {weightHistory.length ? (
+          <div className="grid gap-4 lg:grid-cols-[1fr_1.4fr]">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Trend</p>
+              <p className={cx("mt-3 text-3xl font-semibold capitalize", trendColor)}>{weightTrend.trendLabel}</p>
+              <div className="mt-5 grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs text-zinc-500">7-day average</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.sevenDayAverage)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Weigh-ins</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{weightTrend.recent.length} / 7</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Change</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.change)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Percent</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatPercentDelta(weightTrend.percentChange)}</p>
+                </div>
+              </div>
+              {weightTrend.recent.length < 2 ? <p className="mt-4 text-sm text-amber-200">Need more weigh-ins</p> : null}
+            </div>
+            <ChartFrame className="h-64">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={weightHistory.slice(-14)}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} tickFormatter={compactDate} />
+                  <YAxis domain={["dataMin - 2", "dataMax + 2"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={42} />
+                  <Tooltip content={<WeightTooltip />} />
+                  <Line type="monotone" dataKey="bodyweight" name="Weight" stroke="#a3e635" strokeWidth={3} dot={{ r: 3, fill: "#a3e635" }} activeDot={{ r: 5 }} />
+                  <Line type="monotone" dataKey="movingAverage7" name="7-day average" stroke="#60a5fa" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </div>
+        ) : (
+          <EmptyState title="No bodyweight data yet" description="Past-week trend appears after bodyweight entries are logged." action="Use form below" onAction={() => undefined} />
+        )}
+      </Card>
+
+      <Card>
+        <SectionHeader eyebrow="History" title="All Bodyweight Data" />
+        {weightHistory.length ? (
+          <ChartFrame className="h-96">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={weightHistory}>
+                <defs>
+                  <linearGradient id="weightHistoryFill" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0%" stopColor="#a3e635" stopOpacity={0.28} />
+                    <stop offset="100%" stopColor="#a3e635" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={28} tickFormatter={compactDate} />
+                <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={46} />
+                <Tooltip content={<WeightTooltip />} />
+                <Area type="monotone" dataKey="bodyweight" name="Weight" stroke="#a3e635" strokeWidth={3} fill="url(#weightHistoryFill)" dot={false} activeDot={{ r: 5 }} />
+                <Line type="monotone" dataKey="movingAverage7" name="7-day average" stroke="#60a5fa" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartFrame>
+        ) : (
+          <EmptyState title="No bodyweight data yet" description="The full historical graph updates automatically after manual logs or Withings imports." action="Use form below" onAction={() => undefined} />
+        )}
+      </Card>
+
       <Card className="xl:col-span-2">
         <SectionHeader eyebrow="Recovery" title="Sleep" />
         {sleepChartData.length ? (
@@ -5291,6 +5621,7 @@ function AITrainingInsightsSection({
 
 function TrainingPage({
   workoutHistory,
+  trainingHistoryMeta,
   strength,
   selectedExercise,
   setSelectedExercise,
@@ -5302,6 +5633,7 @@ function TrainingPage({
   onSyncHevy,
   onMoveWorkout,
   onAnalyzeTraining,
+  onLoadMoreTraining,
   hevyPreview,
   hevySync,
   hevySyncing,
@@ -5315,6 +5647,7 @@ function TrainingPage({
   setMuscleTrendMetric,
 }: Readonly<{
   workoutHistory: WorkoutGroup[];
+  trainingHistoryMeta: { rawWindowDays: number; hasMoreRecent: boolean; limit: number; message?: string };
   strength: StrengthTrendResponse | null;
   selectedExercise: string;
   setSelectedExercise: (value: string) => void;
@@ -5326,6 +5659,7 @@ function TrainingPage({
   onSyncHevy: () => void;
   onMoveWorkout: (workoutId: string, newDate: string) => void | Promise<void>;
   onAnalyzeTraining: () => void;
+  onLoadMoreTraining: () => void;
   hevyPreview: HevyPreview | null;
   hevySync: HevySyncStatus | null;
   hevySyncing: boolean;
@@ -5338,6 +5672,28 @@ function TrainingPage({
   muscleTrendMetric: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">;
   setMuscleTrendMetric: (value: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">) => void;
 }>) {
+  const hevyLastResult = hevySync?.last_result ?? {};
+  const hevyRows = Number(hevySync?.hevy_rows ?? hevyLastResult.hevy_rows ?? 0) || 0;
+  const hevyWorkouts = Number(hevySync?.hevy_workouts ?? hevyLastResult.hevy_workouts ?? 0) || 0;
+  const hevyImportedRows = Number(hevyLastResult.imported_rows ?? 0) || 0;
+  const hevyLatestDate = String(hevySync?.latest_workout_date ?? hevyLastResult.latest_workout_date ?? "");
+  const hevyStatusLabel = hevySync?.last_error
+    ? "Sync error"
+    : hevySync?.configured === false || hevySync?.status === "not_configured"
+      ? "Not connected"
+      : hevySync?.status === "connected" || hevySync?.last_synced_at
+        ? "Connected"
+        : "Not synced";
+  const hevyDebugMessage = hevySync?.last_error
+    ? `Sync failed: ${hevySync.last_error}`
+    : hevySync?.configured === false || hevySync?.status === "not_configured"
+      ? "Hevy API key missing"
+      : hevyRows === 0
+        ? "No Hevy rows found"
+        : "";
+  const emptyWorkoutDebugMessage = !workoutHistory.length
+    ? hevyDebugMessage || (hevyRows > 0 ? "Hevy rows exist, but /api/training/history returned no grouped workouts." : "No Hevy rows found")
+    : "";
   return (
     <div className="space-y-4">
       <div className="grid gap-4">
@@ -5346,11 +5702,34 @@ function TrainingPage({
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
               <p className="font-medium text-white">Import Hevy workouts</p>
-              <p className="mt-2 text-sm text-zinc-400">Uses webhooks plus a polling fallback. Manual refresh polls Hevy events immediately and upserts changed workouts.</p>
+              <p className="mt-2 text-sm text-zinc-400">No background sync runs on startup. Manual refresh polls Hevy events, imports recent workouts, and upserts changed workouts.</p>
               <p className={cx("mt-3 text-xs", hevySync?.last_error ? "text-amber-200" : "text-zinc-500")}>
                 {relativeSyncTime(hevySync?.last_synced_at ?? "")}
                 {hevySync?.last_error ? ` - ${hevySync.last_error}` : ""}
               </p>
+              <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Status</p>
+                  <p className={cx("mt-1 text-sm font-semibold", hevySync?.last_error ? "text-amber-200" : hevyStatusLabel === "Connected" ? "text-emerald-200" : "text-zinc-200")}>{hevyStatusLabel}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Rows</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{hevyRows} rows · {hevyWorkouts} workouts</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Latest</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{hevyLatestDate || "No workout yet"}</p>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Last import</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{hevyImportedRows} rows imported</p>
+                </div>
+              </div>
+              {hevyDebugMessage ? (
+                <div className={cx("mt-3 rounded-lg border p-3 text-sm", hevySync?.last_error || hevySync?.configured === false ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.035] text-zinc-300")}>
+                  {hevyDebugMessage}
+                </div>
+              ) : null}
               <div className="mt-4 flex flex-wrap gap-2">
                 <button onClick={onSyncHevy} disabled={hevySyncing} className="inline-flex items-center gap-2 rounded-lg bg-emerald-300 px-3 py-2 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
                   <RefreshCw className={cx("h-4 w-4", hevySyncing && "animate-spin")} />
@@ -5413,6 +5792,27 @@ function TrainingPage({
             </div>
           ) : null}
         </Card>
+      </div>
+      {emptyWorkoutDebugMessage ? (
+        <div className="rounded-lg border border-amber-300/25 bg-amber-300/10 p-4 text-sm text-amber-100">
+          {emptyWorkoutDebugMessage}
+        </div>
+      ) : null}
+      <div className="flex flex-col gap-3 rounded-lg border border-white/10 bg-white/[0.035] p-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm font-semibold text-white">Showing recent raw workouts from last {trainingHistoryMeta.rawWindowDays} days</p>
+          <p className="mt-1 text-xs text-zinc-500">
+            {trainingHistoryMeta.message || "Older Hevy history is served from consolidated summaries instead of raw set rows."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={onLoadMoreTraining}
+          disabled={!trainingHistoryMeta.hasMoreRecent}
+          className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Load more
+        </button>
       </div>
       <WorkoutHistory workouts={workoutHistory} onImportHevy={onPreviewHevy} onMoveWorkout={onMoveWorkout} metadata={relativeSyncTime(hevySync?.last_synced_at ?? "")} />
       <StrengthTrendsSection
@@ -5565,6 +5965,11 @@ function HistoryPage({
   bodyMetrics,
   recoveryTrend,
   trainingVolume,
+  trainingSummary,
+  trainingSummaryStatus,
+  onExportRawHevy,
+  onRebuildTrainingSummaries,
+  trainingDataAction,
   workoutHistory,
   onMoveWorkout,
   strength,
@@ -5588,6 +5993,11 @@ function HistoryPage({
   bodyMetrics: BodyMetricEntry[];
   recoveryTrend: DashboardData["recovery_trend"];
   trainingVolume: DashboardData["training_volume"];
+  trainingSummary: TrainingSummaryResponse | null;
+  trainingSummaryStatus: TrainingSummaryStatusResponse | null;
+  onExportRawHevy: () => void;
+  onRebuildTrainingSummaries: () => void;
+  trainingDataAction: "idle" | "exporting" | "rebuilding";
   workoutHistory: WorkoutGroup[];
   onMoveWorkout: (workoutId: string, newDate: string) => void | Promise<void>;
   strength: StrengthTrendResponse | null;
@@ -5619,6 +6029,10 @@ function HistoryPage({
   const [backupSummary, setBackupSummary] = useState<BackupSummary | null>(null);
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const [dailyNutritionHistoryExpanded, setDailyNutritionHistoryExpanded] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(DAILY_NUTRITION_HISTORY_EXPANDED_KEY) === "true";
+  });
   const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
   const dailyNutritionTrend = nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
     date: entry.date,
@@ -5646,6 +6060,36 @@ function HistoryPage({
     adherence_score: null,
     notes: "",
   }));
+  const dailyNutritionHistorySummary = useMemo(() => {
+    const calorieValues = nutritionHistory
+      .map((entry) => Number(entry.total_calories))
+      .filter((value) => Number.isFinite(value));
+    const averageCalories = calorieValues.length
+      ? Math.round(calorieValues.reduce((total, value) => total + value, 0) / calorieValues.length)
+      : null;
+    const latestDate = nutritionHistory.reduce((latest, entry) => {
+      const date = typeof entry.date === "string" ? entry.date : "";
+      return date && (!latest || date > latest) ? date : latest;
+    }, "");
+
+    const summaryText = [
+      `${nutritionHistory.length.toLocaleString()} logged ${nutritionHistory.length === 1 ? "day" : "days"}`,
+      averageCalories !== null ? `${averageCalories.toLocaleString()} avg kcal` : "average calories unavailable",
+      latestDate ? `latest ${latestDate}` : "no latest date",
+    ].join(" · ");
+
+    return {
+      averageCalories,
+      latestDate,
+      loggedDays: nutritionHistory.length,
+      summaryText,
+    };
+  }, [nutritionHistory]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(DAILY_NUTRITION_HISTORY_EXPANDED_KEY, dailyNutritionHistoryExpanded ? "true" : "false");
+  }, [dailyNutritionHistoryExpanded]);
 
   const handleCsvExport = useCallback(async () => {
     setExportLoading(true);
@@ -6102,6 +6546,62 @@ function HistoryPage({
           {backupError ? <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-200">{backupError}</p> : null}
         </div>
       </Card>
+      <Card>
+        <SectionHeader
+          eyebrow="Training Data"
+          title="Training Data Management"
+          action={
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onExportRawHevy}
+                disabled={trainingDataAction !== "idle"}
+                className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Download className="h-4 w-4" />
+                {trainingDataAction === "exporting" ? "Exporting..." : "Export Raw Hevy Data"}
+              </button>
+              <button
+                type="button"
+                onClick={onRebuildTrainingSummaries}
+                disabled={trainingDataAction !== "idle"}
+                className="accent-outline inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <RefreshCw className={cx("h-4 w-4", trainingDataAction === "rebuilding" && "animate-spin")} />
+                {trainingDataAction === "rebuilding" ? "Rebuilding..." : "Rebuild Training Summaries"}
+              </button>
+            </div>
+          }
+        />
+        <div className="grid gap-3 md:grid-cols-4">
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Total raw rows</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{(trainingSummaryStatus?.total_raw_rows ?? 0).toLocaleString()}</p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Recent window</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{(trainingSummaryStatus?.recent_raw_rows ?? 0).toLocaleString()}</p>
+            <p className="mt-1 text-xs text-zinc-500">{trainingSummaryStatus?.raw_window_days ?? 180} days</p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Older raw rows</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{(trainingSummaryStatus?.older_raw_rows ?? 0).toLocaleString()}</p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Last rebuild</p>
+            <p className="mt-2 text-sm font-semibold text-white">{trainingSummaryStatus?.last_summary_rebuild_date ? compactDate(trainingSummaryStatus.last_summary_rebuild_date.slice(0, 10)) : "Not yet"}</p>
+            <p className="mt-1 text-xs text-zinc-500">{trainingSummaryStatus?.weekly_summaries ?? 0} weekly · {trainingSummaryStatus?.exercise_prs ?? 0} PR rows</p>
+          </div>
+        </div>
+        <div className="mt-4 rounded-lg border border-white/10 bg-zinc-950/50 p-4">
+          <p className="text-sm font-semibold text-white">Coaching data contract</p>
+          <div className="mt-3 grid gap-2 text-sm text-zinc-400 lg:grid-cols-3">
+            <p>{trainingSummaryStatus?.coaching_contract?.plateau_detection ?? "Plateau detection uses recent raw set-level rows."}</p>
+            <p>{trainingSummaryStatus?.coaching_contract?.calorie_changes ?? "Calorie changes use recent weight, nutrition, training, recovery, sleep, and cardio load."}</p>
+            <p>{trainingSummaryStatus?.coaching_contract?.long_term_context ?? "Long-term context uses weekly/monthly summaries and PR history."}</p>
+          </div>
+        </div>
+      </Card>
       {adaptiveRecommendation ? (
         <Card>
           <SectionHeader eyebrow="Adaptive Nutrition" title="Closed-loop analysis" />
@@ -6221,38 +6721,68 @@ function HistoryPage({
       ) : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <SectionHeader eyebrow="Nutrition" title="Daily nutrition history" />
-          {dailyNutritionTrend.length ? (
-            <div className="space-y-4">
+          <SectionHeader eyebrow="Nutrition" title="Nutrition trends" />
+          <div className="space-y-4">
+            {dailyNutritionTrend.length ? (
+              <>
               <div className="grid gap-3 md:grid-cols-4">
                 <MetricCard title="7-day Calories" value={nutritionAdherence?.average_calories ? `${Math.round(nutritionAdherence.average_calories)}` : "No data"} detail={nutritionAdherence?.average_calories_delta !== null && nutritionAdherence?.average_calories_delta !== undefined ? `${deltaText(nutritionAdherence.average_calories_delta, " kcal")} avg` : "Totals only"} icon={Apple} accent="accent-outline" />
                 <MetricCard title="7-day Protein" value={nutritionAdherence?.average_protein ? `${Math.round(nutritionAdherence.average_protein)}g` : "No data"} detail={nutritionAdherence?.average_protein_delta !== null && nutritionAdherence?.average_protein_delta !== undefined ? `${deltaText(nutritionAdherence.average_protein_delta, "g")} avg` : "Totals only"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
                 <MetricCard title="Over Target" value={`${nutritionAdherence?.days_over_target ?? 0}`} detail="Recent logged days" icon={Gauge} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
                 <MetricCard title="Adherence" value={nutritionAdherence?.consistency_score ? `${Math.round(nutritionAdherence.consistency_score)}%` : "No target"} detail="Calories/macros vs targets" icon={Sparkles} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
               </div>
-            {nutritionAdherence?.data_quality_note ? (
-              <p className={cx("text-xs", (nutritionAdherence.missing_days ?? 0) > 0 ? "text-amber-300/90" : "text-zinc-500")}>
-                Nutrition confidence: {(nutritionAdherence.confidence ?? "low").replace(/^./, (c) => c.toUpperCase())} — {nutritionAdherence.data_quality_note}
+              {nutritionAdherence?.data_quality_note ? (
+                <p className={cx("text-xs", (nutritionAdherence.missing_days ?? 0) > 0 ? "text-amber-300/90" : "text-zinc-500")}>
+                  Nutrition confidence: {(nutritionAdherence.confidence ?? "low").replace(/^./, (c) => c.toUpperCase())} — {nutritionAdherence.data_quality_note}
+                </p>
+              ) : null}
+              <ChartFrame className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RechartsLineChart data={dailyNutritionTrend}>
+                    <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                    <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                    <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                    <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
+                    <Line dataKey="target_calories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
+                    <Line dataKey="total_protein" name="Protein" stroke="#2dd4bf" strokeWidth={3} dot={false} />
+                  </RechartsLineChart>
+                </ResponsiveContainer>
+              </ChartFrame>
+              </>
+            ) : (
+              <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] px-4 py-3 text-sm text-zinc-400">
+                Nutrition charts will appear once food entries are saved.
               </p>
-            ) : null}
-            <ChartFrame className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <RechartsLineChart data={dailyNutritionTrend}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
-                  <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                  <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
-                  <Line dataKey="target_calories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
-                  <Line dataKey="total_protein" name="Protein" stroke="#2dd4bf" strokeWidth={3} dot={false} />
-                </RechartsLineChart>
-              </ResponsiveContainer>
-            </ChartFrame>
-              <DataTable rows={nutritionHistory.slice().reverse()} />
+            )}
+            <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.035]">
+              <button
+                type="button"
+                aria-expanded={dailyNutritionHistoryExpanded}
+                aria-controls="daily-nutrition-history-panel"
+                onClick={() => setDailyNutritionHistoryExpanded((expanded) => !expanded)}
+                className="flex w-full items-center justify-between gap-4 px-4 py-3 text-left transition hover:bg-white/[0.04]"
+              >
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-white">Daily Nutrition History</span>
+                  <span className="mt-1 block truncate text-xs text-zinc-500">{dailyNutritionHistorySummary.summaryText}</span>
+                </span>
+                <ChevronDown className={cx("h-4 w-4 shrink-0 text-zinc-400 transition-transform duration-200", dailyNutritionHistoryExpanded && "rotate-180")} />
+              </button>
+              {dailyNutritionHistoryExpanded ? (
+                <div id="daily-nutrition-history-panel" className="border-t border-white/10 p-3">
+                  {nutritionHistory.length ? (
+                    <DataTable rows={nutritionHistory.slice().reverse()} />
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-white/15 bg-black/10 p-4">
+                      <p className="font-medium text-white">No nutrition history yet</p>
+                      <p className="mt-2 text-sm text-zinc-400">Daily summaries will appear here once food logs are saved and summarized.</p>
+                    </div>
+                  )}
+                </div>
+              ) : null}
             </div>
-          ) : (
-            <EmptyState title="No food logged yet" description="Nutrition charts will appear once you save food entries." action="Open Food" onAction={() => undefined} />
-          )}
+          </div>
         </Card>
         <Card>
           <SectionHeader eyebrow="Body" title="Bodyweight history" />
@@ -6306,6 +6836,47 @@ function HistoryPage({
             </ChartFrame>
           ) : (
             <EmptyState title="No strength volume yet" description="Strength entries with sets, reps, and weight will populate this chart." action="Open Training" onAction={() => undefined} />
+          )}
+        </Card>
+        <Card>
+          <SectionHeader eyebrow="Training" title="Historical performance summaries" />
+          {trainingSummary?.items?.length ? (
+            <div className="space-y-4">
+              <p className="text-sm text-zinc-400">
+                Long-term charts use consolidated {trainingSummary.window} summaries, so old Hevy set rows stay out of startup analytics.
+              </p>
+              <ChartFrame className="h-72">
+                <ResponsiveContainer width="100%" height="100%">
+                  <RechartsLineChart data={trainingSummary.items}>
+                    <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                    <XAxis dataKey="period_start" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="volume" stroke="#71717a" tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="workouts" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} />
+                    <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                    <Line yAxisId="volume" dataKey="total_volume" name="Volume" stroke="var(--accent-primary)" strokeWidth={3} dot={false} />
+                    <Line yAxisId="workouts" dataKey="workout_count" name="Workouts" stroke="#60a5fa" strokeWidth={2} dot={false} />
+                  </RechartsLineChart>
+                </ResponsiveContainer>
+              </ChartFrame>
+              {trainingSummary.muscle_groups?.length ? (
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {trainingSummary.muscle_groups.slice(-24).slice(0, 8).map((item) => (
+                    <div key={`${item.period_start}-${item.muscle_group}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <p className="text-sm font-semibold text-white">{item.muscle_group}</p>
+                        <p className="text-xs text-zinc-500">{item.period_label || item.period_start}</p>
+                      </div>
+                      <p className="mt-2 text-xs text-zinc-400">{Math.round(Number(item.total_volume) || 0).toLocaleString()} volume · {item.hard_sets || item.total_sets || 0} hard sets</p>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
+              <p className="font-medium text-white">No historical summaries yet</p>
+              <p className="mt-2 text-sm text-zinc-400">{trainingSummary?.message || "Run training history consolidation after import to populate long-term graphs without loading old raw sets."}</p>
+            </div>
           )}
         </Card>
       </div>
@@ -7633,6 +8204,10 @@ export default function Home() {
   const [recoveryLogs, setRecoveryLogs] = useState<RecoveryEntry[]>([]);
   const [sleepEntries, setSleepEntries] = useState<SleepEntry[]>([]);
   const [workoutHistory, setWorkoutHistory] = useState<WorkoutGroup[]>([]);
+  const [trainingHistoryMeta, setTrainingHistoryMeta] = useState({ rawWindowDays: 180, hasMoreRecent: false, limit: 50, message: "" });
+  const [trainingSummary, setTrainingSummary] = useState<TrainingSummaryResponse | null>(null);
+  const [trainingSummaryStatus, setTrainingSummaryStatus] = useState<TrainingSummaryStatusResponse | null>(null);
+  const [trainingDataAction, setTrainingDataAction] = useState<"idle" | "exporting" | "rebuilding">("idle");
   const [strengthTrends, setStrengthTrends] = useState<StrengthTrendResponse | null>(null);
   const [selectedExercise, setSelectedExercise] = useState("");
   const [trendView, setTrendView] = useState<"exercise" | "muscle_group">("muscle_group");
@@ -7751,13 +8326,6 @@ export default function Home() {
       run: () => Promise<void>;
     }> = [
       {
-        key: "dashboard_full",
-        label: "Advanced dashboard",
-        path: "/api/dashboard",
-        timeoutMs: DEFAULT_API_TIMEOUT_MS,
-        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_full", label: "Advanced dashboard", path: "/api/dashboard", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
-      },
-      {
         key: "integration_status",
         label: "Integration status",
         path: "/api/integrations/status?external_checks=false",
@@ -7828,11 +8396,29 @@ export default function Home() {
       {
         key: "training_history",
         label: "Training history",
-        path: "/api/training/history",
+        path: "/api/training/history?limit=50&days=180",
         run: async () => {
-          const data = await trackedApiGet<{ items: WorkoutGroup[] }>({ key: "training_history", label: "Training history", path: "/api/training/history", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
+          const data = await trackedApiGet<TrainingHistoryResponse>({ key: "training_history", label: "Training history", path: "/api/training/history?limit=50&days=180", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setWorkoutHistory(data.items);
+          setTrainingHistoryMeta({
+            rawWindowDays: Number(data.raw_window_days || data.days || 180),
+            hasMoreRecent: Boolean(data.has_more_recent),
+            limit: Number(data.limit || 50),
+            message: data.message || "",
+          });
         },
+      },
+      {
+        key: "training_summary",
+        label: "Training summary",
+        path: "/api/training/summary?window=weekly&period=all",
+        run: async () => setTrainingSummary(await trackedApiGet<TrainingSummaryResponse>({ key: "training_summary", label: "Training summary", path: "/api/training/summary?window=weekly&period=all", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
+        key: "training_summary_status",
+        label: "Training summary status",
+        path: "/api/training/summary/status",
+        run: async () => setTrainingSummaryStatus(await trackedApiGet<TrainingSummaryStatusResponse>({ key: "training_summary_status", label: "Training summary status", path: "/api/training/summary/status", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "strength_trends",
@@ -8003,6 +8589,84 @@ export default function Home() {
     }
   };
 
+  const applyTodayFoodPayload = useCallback((payload: NutritionTodayResponse) => {
+    const date = payload.date;
+    setNutritionLogs((current) => {
+      const otherDays = current.filter((entry) => entry.date !== date);
+      return [...otherDays, ...payload.items];
+    });
+    setDashboard((current) => {
+      if (!current || current.date !== date) return current;
+      const targets = current.targets;
+      const totals = payload.totals;
+      const metric = (value: number, target: number | null | undefined) => {
+        const safeValue = Number(value) || 0;
+        const safeTarget = target ? Number(target) : null;
+        return {
+          eaten: safeValue,
+          target: safeTarget,
+          left: safeTarget ? Math.max(safeTarget - safeValue, 0) : null,
+          over: safeTarget ? Math.max(safeValue - safeTarget, 0) : null,
+          percent: safeTarget ? Math.min(Math.max((safeValue / safeTarget) * 100, 0), 100) : 0,
+        };
+      };
+      return {
+        ...current,
+        nutrition_today: {
+          calories: Number(totals.calories) || 0,
+          protein: Number(totals.protein) || 0,
+          carbs: Number(totals.carbs) || 0,
+          fat: Number(totals.fat) || 0,
+        },
+        food: {
+          calories: metric(totals.calories, targets.target_calories),
+          protein: metric(totals.protein, targets.protein_grams),
+          carbs: metric(totals.carbs, targets.carb_grams),
+          fat: metric(totals.fat, targets.fat_grams),
+          has_targets: Boolean(targets.target_calories && targets.protein_grams && targets.carb_grams && targets.fat_grams),
+          has_food_logged: Boolean((Number(totals.calories) || 0) > 0 || (Number(totals.protein) || 0) > 0 || (Number(totals.carbs) || 0) > 0 || (Number(totals.fat) || 0) > 0),
+        },
+      };
+    });
+  }, []);
+
+  const refreshTodayFoodOnly = useCallback(async (date = forms.nutrition.date) => {
+    const selectedDate = date || todayString();
+    console.info("[food] refreshing today-only nutrition", selectedDate);
+    const payload = await apiGet<NutritionTodayResponse>(`/api/nutrition/today?date=${encodeURIComponent(selectedDate)}`, SETTINGS_API_TIMEOUT_MS);
+    applyTodayFoodPayload(payload);
+    return payload;
+  }, [applyTodayFoodPayload, forms.nutrition.date]);
+
+  const refreshFoodShortcutsOnly = useCallback(async () => {
+    setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts", SETTINGS_API_TIMEOUT_MS));
+  }, []);
+
+  const submitFoodAndRefreshToday = useCallback(async (event: FormEvent, action: () => Promise<void>, success: string, date = forms.nutrition.date) => {
+    event.preventDefault();
+    setMessage(null);
+    setApiError(null);
+    try {
+      await action();
+      await refreshTodayFoodOnly(date);
+      setMessage(success);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Food update failed.");
+    }
+  }, [forms.nutrition.date, refreshTodayFoodOnly]);
+
+  const submitWithoutRefresh = useCallback(async (event: FormEvent, action: () => Promise<void>, success: string) => {
+    event.preventDefault();
+    setMessage(null);
+    setApiError(null);
+    try {
+      await action();
+      setMessage(success);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Action failed.");
+    }
+  }, []);
+
   const moveWorkoutDate = useCallback(async (workoutId: string, newDate: string) => {
     setMessage(null);
     setApiError(null);
@@ -8026,6 +8690,125 @@ export default function Home() {
       .catch((error) => setApiError(error instanceof Error ? error.message : "Unable to load strength trend."));
   };
 
+  const refreshTrainingData = useCallback(async (showErrors = false, nextLimit = 50) => {
+    const failures: string[] = [];
+    const historyPath = `/api/training/history?limit=${nextLimit}&days=${trainingHistoryMeta.rawWindowDays || 180}`;
+    const [history, status, trends, summary, summaryStatus] = await Promise.allSettled([
+      apiGet<TrainingHistoryResponse>(historyPath, DEFAULT_API_TIMEOUT_MS),
+      apiGet<HevySyncStatus>("/api/training/sync/hevy/status", SETTINGS_API_TIMEOUT_MS),
+      apiGet<StrengthTrendResponse>(strengthTrendPath(), DEFAULT_API_TIMEOUT_MS),
+      apiGet<TrainingSummaryResponse>("/api/training/summary?window=weekly&period=all", DEFAULT_API_TIMEOUT_MS),
+      apiGet<TrainingSummaryStatusResponse>("/api/training/summary/status", SETTINGS_API_TIMEOUT_MS),
+    ]) as [PromiseSettledResult<TrainingHistoryResponse>, PromiseSettledResult<HevySyncStatus>, PromiseSettledResult<StrengthTrendResponse>, PromiseSettledResult<TrainingSummaryResponse>, PromiseSettledResult<TrainingSummaryStatusResponse>];
+    let historyDebug: TrainingHistoryResponse["debug"] | undefined;
+    if (history.status === "fulfilled") {
+      setWorkoutHistory(history.value.items);
+      setTrainingHistoryMeta({
+        rawWindowDays: Number(history.value.raw_window_days || history.value.days || trainingHistoryMeta.rawWindowDays || 180),
+        hasMoreRecent: Boolean(history.value.has_more_recent),
+        limit: Number(history.value.limit || nextLimit),
+        message: history.value.message || "",
+      });
+      historyDebug = history.value.debug;
+    } else {
+      failures.push(history.reason instanceof Error ? history.reason.message : "Training history failed.");
+    }
+    if (status.status === "fulfilled") {
+      setHevySync((current) => ({
+        ...status.value,
+        hevy_rows: status.value.hevy_rows ?? historyDebug?.hevy_rows ?? current?.hevy_rows,
+        hevy_workouts: status.value.hevy_workouts ?? historyDebug?.hevy_workouts ?? current?.hevy_workouts,
+        latest_workout_date: status.value.latest_workout_date ?? historyDebug?.latest_workout_date ?? current?.latest_workout_date,
+        latest_workout_title: status.value.latest_workout_title ?? historyDebug?.latest_workout_title ?? current?.latest_workout_title,
+      }));
+    } else {
+      failures.push(status.reason instanceof Error ? status.reason.message : "Hevy status failed.");
+    }
+    if (trends.status === "fulfilled") {
+      setStrengthTrends(trends.value);
+      setSelectedExercise((current) => current || trends.value.selected_exercise || trends.value.exercise_options[0] || "");
+    } else {
+      failures.push(trends.reason instanceof Error ? trends.reason.message : "Strength trends failed.");
+    }
+    if (summary.status === "fulfilled") {
+      setTrainingSummary(summary.value);
+    } else {
+      failures.push(summary.reason instanceof Error ? summary.reason.message : "Training summary failed.");
+    }
+    if (summaryStatus.status === "fulfilled") {
+      setTrainingSummaryStatus(summaryStatus.value);
+    } else {
+      failures.push(summaryStatus.reason instanceof Error ? summaryStatus.reason.message : "Training summary status failed.");
+    }
+    if (showErrors && failures.length) {
+      setApiError(`Training refresh failed: ${failures.join(" ")}`);
+    }
+  }, [strengthTrendPath, trainingHistoryMeta.rawWindowDays]);
+
+  useEffect(() => {
+    if (activePage !== "training") return;
+    void refreshTrainingData(false);
+  }, [activePage, refreshTrainingData]);
+
+  const loadMoreTrainingHistory = useCallback(() => {
+    const nextLimit = trainingHistoryMeta.limit + 50;
+    void refreshTrainingData(true, nextLimit);
+  }, [refreshTrainingData, trainingHistoryMeta.limit]);
+
+  const refreshTrainingSummaryStatus = useCallback(async () => {
+    const [summary, status] = await Promise.all([
+      apiGet<TrainingSummaryResponse>("/api/training/summary?window=weekly&period=all", DEFAULT_API_TIMEOUT_MS),
+      apiGet<TrainingSummaryStatusResponse>("/api/training/summary/status", SETTINGS_API_TIMEOUT_MS),
+    ]);
+    setTrainingSummary(summary);
+    setTrainingSummaryStatus(status);
+  }, []);
+
+  const exportRawHevyData = useCallback(async () => {
+    setTrainingDataAction("exporting");
+    setApiError(null);
+    setMessage(null);
+    try {
+      const response = await fetch(apiUrl("/api/training/export/hevy-raw"), {
+        cache: "no-store",
+        credentials: "include",
+      });
+      if (!response.ok) {
+        const text = await response.text();
+        throw new Error(text || `Raw Hevy export failed (${response.status}).`);
+      }
+      const blob = await response.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = csvFilenameFromDisposition(response.headers.get("Content-Disposition"));
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(objectUrl);
+      setMessage("Raw Hevy data exported.");
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Raw Hevy export failed.");
+    } finally {
+      setTrainingDataAction("idle");
+    }
+  }, []);
+
+  const rebuildTrainingSummaries = useCallback(async () => {
+    setTrainingDataAction("rebuilding");
+    setApiError(null);
+    setMessage(null);
+    try {
+      const result = await apiSend<{ raw_rows_summarized?: number; weekly_summaries?: number; monthly_summaries?: number }>("/api/training/consolidate-history", "POST", {});
+      await refreshTrainingSummaryStatus();
+      setMessage(`Training summaries rebuilt: ${(result.raw_rows_summarized ?? 0).toLocaleString()} older rows summarized.`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Training summary rebuild failed.");
+    } finally {
+      setTrainingDataAction("idle");
+    }
+  }, [refreshTrainingSummaryStatus]);
+
   const syncHevyNow = useCallback(async (showMessage = true) => {
     setHevySyncing(true);
     setApiError(null);
@@ -8038,27 +8821,40 @@ export default function Home() {
         throw new Error(result.message ?? "Hevy sync failed.");
       }
       setHevySync({
+        status: result.status,
+        configured: true,
         last_synced_at: result.last_synced_at,
-        last_error: result.failures?.join(" ") ?? "",
+        last_error: result.status === "error" ? result.failures?.join(" ") ?? result.message ?? "Hevy sync failed." : "",
         last_result: result as unknown as Record<string, unknown>,
+        hevy_rows: result.hevy_rows,
+        hevy_workouts: result.hevy_workouts,
+        latest_workout_date: result.latest_workout_date,
+        latest_workout_title: result.latest_workout_title,
       });
+      await refreshTrainingData(true);
       if (showMessage) {
         const failureText = result.failures?.length ? ` ${result.failures.length} failures.` : "";
-        setMessage(`Hevy sync complete: ${result.saved_workouts} workouts updated, ${result.deleted_rows} rows deleted.${failureText}`);
+        const importText = result.imported_rows !== undefined ? `, ${result.imported_rows} rows imported` : "";
+        setMessage(`Hevy sync complete: ${result.saved_workouts} workouts updated${importText}, ${result.deleted_rows} rows deleted.${failureText}`);
       }
-      await refreshAll();
     } catch (error) {
       const messageText = error instanceof Error ? error.message : "Hevy sync failed.";
       setApiError(messageText);
       setHevySync((state) => ({
+        status: "error",
+        configured: state?.configured,
         last_synced_at: state?.last_synced_at ?? "",
         last_error: messageText,
         last_result: state?.last_result ?? {},
+        hevy_rows: state?.hevy_rows,
+        hevy_workouts: state?.hevy_workouts,
+        latest_workout_date: state?.latest_workout_date,
+        latest_workout_title: state?.latest_workout_title,
       }));
     } finally {
       setHevySyncing(false);
     }
-  }, [refreshAll]);
+  }, [refreshTrainingData]);
 
   const validateNutritionForm = () => {
     const entry = forms.nutrition;
@@ -8291,6 +9087,23 @@ export default function Home() {
             await apiSend("/api/goals/apply-suggested-macros", "POST", {});
           }, "Suggested macros applied.")
         }
+        onRunNutritionEngine={() =>
+          void submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+            const selectedDate = forms.nutrition.date || todayString();
+            const result = await apiSend<RecommendationRunResponse>(
+              `/api/recommendations/run?date=${encodeURIComponent(selectedDate)}&finalize_day=true`,
+              "POST",
+              {},
+            );
+            if (result.dashboard) {
+              setDashboard(result.dashboard);
+            }
+            const history = await apiGet<{ items: DailyNutritionSummary[]; adherence: NutritionAdherence }>("/api/nutrition/history", SETTINGS_API_TIMEOUT_MS);
+            setNutritionHistory(history.items);
+            setNutritionAdherence(history.adherence);
+            await refreshTodayFoodOnly(selectedDate);
+          }, "Daily nutrition summary finalized and recommendations refreshed.")
+        }
         nutritionHistory={nutritionHistory}
         nutritionAdherence={nutritionAdherence}
         shortcuts={shortcutData.items}
@@ -8305,7 +9118,7 @@ export default function Home() {
         servingPreview={calculateServingPreview(servingForm)}
         labelUploadResult={labelUploadResult}
         onLabelUpload={(file) => {
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          void submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             const formData = new FormData();
             formData.append("file", file);
             const result = await apiUpload<LabelUploadResult>("/api/nutrition/label-upload", formData);
@@ -8314,7 +9127,7 @@ export default function Home() {
           }, "Nutrition label uploaded.")
         }}
         onSaveServingShortcut={() =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          void submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             const validationError = validateServingForm();
             if (validationError) throw new Error(validationError);
             const preview = calculateServingPreview(servingForm);
@@ -8336,6 +9149,7 @@ export default function Home() {
               notes: servingForm.source_label_file ? `Label: ${servingForm.source_label_file}` : "Serving-scaled shortcut",
               source: "manual_serving_scale",
             });
+            await refreshFoodShortcutsOnly();
           }, "Serving-scaled food saved as shortcut.")
         }
         aiText={aiText}
@@ -8349,7 +9163,7 @@ export default function Home() {
         shortcutSuggestion={shortcutSuggestion}
         onUseSuggestion={() => {
           if (!shortcutSuggestion) return;
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          void submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             const path = shortcutSuggestion.type === "shortcut"
               ? `/api/nutrition/shortcuts/${shortcutSuggestion.id}/log`
               : shortcutSuggestion.type === "frequent"
@@ -8367,7 +9181,7 @@ export default function Home() {
           setShortcutSuggestion(null);
         }}
         onParseFood={(event) =>
-          submitAndRefresh(event, async () => {
+          submitWithoutRefresh(event, async () => {
             const savedMatch = findSavedFoodMatch(aiText, shortcutData.items, shortcutData.meal_templates, shortcutData.frequent_foods);
             if (savedMatch && !forceAiParse) {
               setShortcutSuggestion(savedMatch);
@@ -8402,7 +9216,7 @@ export default function Home() {
           }, "Food text parsed. Review before saving.").finally(() => setParseLoading(false))
         }
         onSaveParsedFoods={(event) =>
-          submitAndRefresh(event, async () => {
+          submitFoodAndRefreshToday(event, async () => {
             await saveParsedFoodsToToday();
             setParsedFoods([]);
             setParseResult(null);
@@ -8410,27 +9224,30 @@ export default function Home() {
           }, "Confirmed parsed food entries saved.")
         }
         onSaveShortcut={(event) =>
-          submitAndRefresh(event, async () => {
+          submitWithoutRefresh(event, async () => {
             await saveParsedShortcut();
+            await refreshFoodShortcutsOnly();
           }, "Saved AI parse as a food shortcut.")
         }
         onSaveMealTemplate={(event) =>
-          submitAndRefresh(event, async () => {
+          submitWithoutRefresh(event, async () => {
             await saveParsedMealTemplate();
+            await refreshFoodShortcutsOnly();
           }, "Saved AI parse as a meal template.")
         }
         onSaveAndLogToday={(event) =>
-          submitAndRefresh(event, async () => {
+          submitFoodAndRefreshToday(event, async () => {
             await saveParsedShortcut();
             await saveParsedMealTemplate();
             await saveParsedFoodsToToday();
+            await refreshFoodShortcutsOnly();
             setParsedFoods([]);
             setParseResult(null);
             setAiText("");
           }, "Saved shortcut/template and logged food today.")
         }
         onLogShortcut={(shortcutId) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcutId}/log`, "POST", {
               date: forms.nutrition.date,
               meal_type: DEFAULT_MEAL_TYPE,
@@ -8438,13 +9255,15 @@ export default function Home() {
           }, "Shortcut logged.")
         }
         onCreateShortcut={(shortcut) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
+            await refreshFoodShortcutsOnly();
           }, "Preset saved.")
         }
         onCreateAndLogPreset={(shortcut) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             const created = await apiSend<{ item: FoodShortcut }>("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
+            await refreshFoodShortcutsOnly();
             await apiSend(`/api/nutrition/shortcuts/${created.item.shortcut_id}/log`, "POST", {
               date: forms.nutrition.date,
               meal_type: DEFAULT_MEAL_TYPE,
@@ -8452,7 +9271,7 @@ export default function Home() {
           }, "Preset saved and logged.")
         }
         onLogFrequentFood={(foodName) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/frequent-foods/${encodeURIComponent(foodName)}/log`, "POST", {
               date: forms.nutrition.date,
               meal_type: DEFAULT_MEAL_TYPE,
@@ -8460,29 +9279,31 @@ export default function Home() {
           }, "Frequent food logged.")
         }
         onDeleteFoodLog={(entry) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             if (!entry.food_log_id) throw new Error("Food log ID is missing.");
             await apiDelete(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`);
-          }, "Food entry removed.")
+          }, "Food entry removed.", entry.date)
         }
         onUpdateFoodLog={(entry, updates) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             if (!entry.food_log_id) throw new Error("Food log ID is missing.");
             await apiSend(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`, "PUT", updates);
-          }, "Food icon updated.")
+          }, "Food icon updated.", entry.date)
         }
         onUpdateShortcut={(shortcut) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", shortcutMutationPayload(shortcut));
+            await refreshFoodShortcutsOnly();
           }, "Shortcut updated.")
         }
         onDeleteShortcut={(shortcutId) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiDelete(`/api/nutrition/shortcuts/${shortcutId}`);
+            await refreshFoodShortcutsOnly();
           }, "Shortcut deleted.")
         }
         onLogMealTemplate={(templateName) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/meal-templates/${encodeURIComponent(templateName)}/log`, "POST", {
               date: forms.nutrition.date || todayString(),
               meal_type: DEFAULT_MEAL_TYPE,
@@ -8490,14 +9311,15 @@ export default function Home() {
           }, "Meal template added to log.")
         }
         onRenameMealTemplate={(templateName, nextName) =>
-          submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+          submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/meal-templates/${encodeURIComponent(templateName)}`, "PUT", {
               template_name: nextName,
             });
+            await refreshFoodShortcutsOnly();
           }, "Meal template renamed.")
         }
         onSubmit={(event) =>
-          submitAndRefresh(event, async () => {
+          submitFoodAndRefreshToday(event, async () => {
             setManualFoodError(null);
             if (manualFoodMode === "serving") {
               const validationError = validateServingForm();
@@ -8621,6 +9443,7 @@ export default function Home() {
     training: (
       <TrainingPage
         workoutHistory={workoutHistory}
+        trainingHistoryMeta={trainingHistoryMeta}
         onMoveWorkout={moveWorkoutDate}
         strength={strengthTrends}
         selectedExercise={selectedExercise}
@@ -8641,7 +9464,7 @@ export default function Home() {
           void syncHevyNow(true);
         }}
         onPreviewHevy={() => {
-          void submitAndRefresh(
+          void submitWithoutRefresh(
             { preventDefault: () => undefined } as FormEvent,
             async () => {
               const result = await apiSend<{
@@ -8662,9 +9485,10 @@ export default function Home() {
           );
         }}
         onConfirmHevy={() => {
-          void submitAndRefresh(
-            { preventDefault: () => undefined } as FormEvent,
-            async () => {
+          void (async () => {
+            setMessage(null);
+            setApiError(null);
+            try {
               const result = await apiSend<{
                 status: string;
                 message?: string;
@@ -8673,21 +9497,33 @@ export default function Home() {
                 skipped_duplicates: number;
                 failures?: string[];
                 last_synced_at?: string;
+                hevy_rows?: number;
+                hevy_workouts?: number;
+                latest_workout_date?: string;
+                latest_workout_title?: string;
               }>("/api/training/import/hevy", "POST", { page_size: 10, pages: 1 });
               if (result.status === "error") {
                 throw new Error(result.message ?? "Hevy import failed.");
               }
               setHevyPreview(null);
               setHevySync({
+                status: result.status,
+                configured: true,
                 last_synced_at: result.last_synced_at ?? "",
-                last_error: result.failures?.join(" ") ?? "",
+                last_error: result.status === "error" ? result.failures?.join(" ") ?? result.message ?? "Hevy import failed." : "",
                 last_result: result as unknown as Record<string, unknown>,
+                hevy_rows: result.hevy_rows,
+                hevy_workouts: result.hevy_workouts,
+                latest_workout_date: result.latest_workout_date,
+                latest_workout_title: result.latest_workout_title,
               });
+              await refreshTrainingData(true);
               const failureText = result.failures?.length ? ` ${result.failures.length} failures.` : "";
               setMessage(`Imported ${result.imported_workouts} Hevy workouts (${result.imported_rows} rows). Skipped ${result.skipped_duplicates} duplicates.${failureText}`);
-            },
-            "Hevy import complete.",
-          );
+            } catch (error) {
+              setApiError(error instanceof Error ? error.message : "Hevy import failed.");
+            }
+          })();
         }}
         onCancelHevy={() => setHevyPreview(null)}
         onAnalyzeTraining={() => {
@@ -8703,6 +9539,7 @@ export default function Home() {
             "AI training analysis complete.",
           );
         }}
+        onLoadMoreTraining={loadMoreTrainingHistory}
         onImportStrava={() => {
           void submitAndRefresh(
             { preventDefault: () => undefined } as FormEvent,
@@ -8728,6 +9565,11 @@ export default function Home() {
         bodyMetrics={bodyMetrics}
         recoveryTrend={dashboard?.recovery_trend ?? []}
         trainingVolume={dashboard?.training_volume ?? []}
+        trainingSummary={trainingSummary}
+        trainingSummaryStatus={trainingSummaryStatus}
+        onExportRawHevy={exportRawHevyData}
+        onRebuildTrainingSummaries={rebuildTrainingSummaries}
+        trainingDataAction={trainingDataAction}
         workoutHistory={workoutHistory}
         onMoveWorkout={moveWorkoutDate}
         strength={strengthTrends}

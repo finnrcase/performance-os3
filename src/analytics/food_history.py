@@ -41,6 +41,8 @@ SUMMARY_COLUMNS = [
     "fat_delta",
     "adherence_score",
     "nutrition_logged",
+    "logged_day",
+    "finalized",
     "notes",
 ]
 
@@ -59,6 +61,16 @@ OPTIONAL_MICROS = [
 
 def _empty_summary() -> pd.DataFrame:
     return pd.DataFrame(columns=SUMMARY_COLUMNS)
+
+
+def _boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    if pd.isna(value):
+        return False
+    if isinstance(value, (int, float)):
+        return bool(value)
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "logged", "finalized"}
 
 
 def _target_value(targets: dict | None, key: str) -> float | None:
@@ -159,6 +171,8 @@ def build_daily_nutrition_summary(nutrition_log_df: pd.DataFrame, targets: dict 
     grouped["fat_delta"] = grouped["total_fat"] - grouped["target_fat"]
     grouped["adherence_score"] = grouped.apply(_adherence_score, axis=1)
     grouped["nutrition_logged"] = ~grouped["total_calories"].apply(is_missing_nutrition_day)
+    grouped["logged_day"] = grouped["nutrition_logged"]
+    grouped["finalized"] = False
     grouped["notes"] = ""
 
     for column in OPTIONAL_MICROS:
@@ -188,6 +202,17 @@ def load_daily_nutrition_summary() -> pd.DataFrame:
     summary_df["nutrition_logged"] = ~pd.to_numeric(
         summary_df["total_calories"], errors="coerce"
     ).apply(is_missing_nutrition_day)
+    if "logged_day" not in summary_df.columns or summary_df["logged_day"].isna().all():
+        summary_df["logged_day"] = summary_df["nutrition_logged"]
+    else:
+        summary_df["logged_day"] = summary_df["logged_day"].apply(_boolish)
+    if "finalized" not in summary_df.columns or summary_df["finalized"].isna().all():
+        # Legacy persisted summary rows predate the explicit finalized flag. Treat
+        # real logged summaries as finalized so historical coaching data survives
+        # the migration without rereading raw food rows.
+        summary_df["finalized"] = summary_df["nutrition_logged"]
+    else:
+        summary_df["finalized"] = summary_df["finalized"].apply(_boolish)
     return summary_df[SUMMARY_COLUMNS]
 
 
@@ -216,6 +241,16 @@ def _calendarized_summary(summary_df: pd.DataFrame, days: int, today: str | pd.T
     for column in ["target_calories", "target_protein", "target_carbs", "target_fat", "adherence_score"]:
         merged[column] = pd.to_numeric(merged[column], errors="coerce")
     merged["nutrition_logged"] = ~merged["total_calories"].apply(is_missing_nutrition_day)
+    if "logged_day" not in merged.columns or merged["logged_day"].isna().all():
+        merged["logged_day"] = merged["nutrition_logged"]
+    else:
+        merged["logged_day"] = merged["logged_day"].apply(_boolish)
+    if "finalized" not in merged.columns or merged["finalized"].isna().all():
+        merged["finalized"] = False
+    else:
+        merged["finalized"] = merged["finalized"].apply(_boolish)
+    missing_mask = merged["total_calories"].apply(is_missing_nutrition_day)
+    merged.loc[missing_mask, ["nutrition_logged", "logged_day"]] = False
     merged["date"] = merged["date"].dt.date.astype(str)
     return merged[SUMMARY_COLUMNS]
 
@@ -226,6 +261,32 @@ def get_nutrition_history(days: int = 30) -> pd.DataFrame:
     if summary_df.empty:
         return summary_df
     return _calendarized_summary(summary_df, days).sort_values("date").reset_index(drop=True)
+
+
+def finalized_nutrition_summary(summary_df: pd.DataFrame) -> pd.DataFrame:
+    """Return only finalized real-food day summaries for coaching engines."""
+    if summary_df is None or summary_df.empty:
+        return _empty_summary()
+    df = summary_df.copy()
+    for column in SUMMARY_COLUMNS:
+        if column not in df.columns:
+            df[column] = pd.NA
+    df["total_calories"] = pd.to_numeric(df["total_calories"], errors="coerce").fillna(0)
+    df["nutrition_logged"] = ~df["total_calories"].apply(is_missing_nutrition_day)
+    df["logged_day"] = df.get("logged_day", df["nutrition_logged"]).apply(_boolish)
+    df["finalized"] = df.get("finalized", False).apply(_boolish)
+    df = df[df["finalized"] & df["nutrition_logged"] & df["logged_day"]].copy()
+    if df.empty:
+        return _empty_summary()
+    return df[SUMMARY_COLUMNS].sort_values("date").reset_index(drop=True)
+
+
+def get_finalized_nutrition_history(days: int = 60) -> pd.DataFrame:
+    """Return a calendarized window backed only by finalized daily summaries."""
+    finalized_df = finalized_nutrition_summary(load_daily_nutrition_summary())
+    if finalized_df.empty:
+        return _empty_summary()
+    return _calendarized_summary(finalized_df, days).sort_values("date").reset_index(drop=True)
 
 
 def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7, today: str | pd.Timestamp | None = None) -> dict:
@@ -249,13 +310,19 @@ def calculate_calorie_adherence(summary_df: pd.DataFrame, days: int = 7, today: 
         "confidence": "low",
         "data_quality_note": "No nutrition has been logged yet.",
     }
+    has_finalized_column = summary_df is not None and "finalized" in summary_df.columns
     df = _calendarized_summary(summary_df, days, today=today)
     for column in ["total_calories", "target_calories", "total_protein", "target_protein", "adherence_score"]:
         df[column] = pd.to_numeric(df.get(column), errors="coerce")
 
     window_days = len(df)
-    # Only days with real intake count; 0-calorie days are missing logs.
-    logged = df[~df["total_calories"].apply(is_missing_nutrition_day)]
+    # Only finalized days with real intake count; 0-calorie or live days are
+    # missing logs for long-term adherence and adaptive target decisions.
+    if has_finalized_column and "finalized" in df.columns:
+        finalized_mask = df["finalized"].apply(_boolish)
+    else:
+        finalized_mask = pd.Series(True, index=df.index)
+    logged = df[finalized_mask & ~df["total_calories"].apply(is_missing_nutrition_day)]
     missing_days = window_days - len(logged)
     if logged.empty:
         result = dict(empty)
@@ -300,18 +367,24 @@ def get_food_history_for_optimization(summary_df: pd.DataFrame) -> pd.DataFrame:
     lean-bulk, baseline-learning and correlation engines never treat a forgotten
     log as a real under-eating day.
     """
+    columns = ["date", "calories", "protein", "carbs", "fat", "target_calories", "target_protein", "calories_delta", "protein_delta", "adherence_score"]
     if summary_df.empty:
-        return pd.DataFrame(columns=["date", "calories", "protein", "target_calories", "target_protein", "calories_delta", "protein_delta", "adherence_score"])
+        return pd.DataFrame(columns=columns)
     df = summary_df.copy()
     df["total_calories"] = pd.to_numeric(df["total_calories"], errors="coerce")
+    if "finalized" in df.columns:
+        df["finalized"] = df["finalized"].apply(_boolish)
+        df = df[df["finalized"]]
     df = df[~df["total_calories"].apply(is_missing_nutrition_day)]
     if df.empty:
-        return pd.DataFrame(columns=["date", "calories", "protein", "target_calories", "target_protein", "calories_delta", "protein_delta", "adherence_score"])
+        return pd.DataFrame(columns=columns)
     return pd.DataFrame(
         {
             "date": df["date"],
             "calories": pd.to_numeric(df["total_calories"], errors="coerce").fillna(0),
             "protein": pd.to_numeric(df["total_protein"], errors="coerce").fillna(0),
+            "carbs": pd.to_numeric(df["total_carbs"], errors="coerce").fillna(0),
+            "fat": pd.to_numeric(df["total_fat"], errors="coerce").fillna(0),
             "target_calories": pd.to_numeric(df["target_calories"], errors="coerce"),
             "target_protein": pd.to_numeric(df["target_protein"], errors="coerce"),
             "calories_delta": pd.to_numeric(df["calories_delta"], errors="coerce"),

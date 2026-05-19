@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -35,8 +36,13 @@ WITHINGS_MEASURE_RESPONSE = {
 
 class WithingsSyncTest(unittest.TestCase):
     def setUp(self):
+        self.env_patch = patch.dict(os.environ, {"DATABASE_URL": ""})
+        self.env_patch.start()
         self.client = TestClient(app)
         configure_test_auth(self.client)
+
+    def tearDown(self):
+        self.env_patch.stop()
 
     def test_sync_imports_scale_measurements_into_body_metrics_idempotently(self):
         with tempfile.TemporaryDirectory() as temp_dir:

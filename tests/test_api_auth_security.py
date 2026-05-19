@@ -6,6 +6,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from backend.main import PUBLIC_API_PATHS, _cors_origins, app
+from backend.routes.utils import sanitize_sensitive_data
 from tests.auth_helpers import ACCESS_COOKIE, TEST_APP_PASSWORD, TEST_SESSION_SECRET, create_session_token
 
 
@@ -97,6 +98,27 @@ class ApiAuthSecurityTest(unittest.TestCase):
 
     def test_cors_includes_production_vercel_origin(self):
         self.assertIn("https://performance-os-rho.vercel.app", _cors_origins())
+
+    def test_sensitive_payload_sanitizer_redacts_secrets_but_keeps_status(self):
+        sanitized = sanitize_sensitive_data(
+            {
+                "api_key": "hevy-secret",
+                "metadata": {
+                    "access_token": "oauth-access",
+                    "refresh_token": "oauth-refresh",
+                    "token_status": "valid",
+                    "strava_client_secret": "Configured",
+                    "database_url": "postgres://user:pass@example/db",
+                },
+            }
+        )
+
+        self.assertEqual(sanitized["api_key"], "••••")
+        self.assertEqual(sanitized["metadata"]["access_token"], "••••")
+        self.assertEqual(sanitized["metadata"]["refresh_token"], "••••")
+        self.assertEqual(sanitized["metadata"]["database_url"], "••••")
+        self.assertEqual(sanitized["metadata"]["token_status"], "valid")
+        self.assertEqual(sanitized["metadata"]["strava_client_secret"], "Configured")
 
 
 if __name__ == "__main__":

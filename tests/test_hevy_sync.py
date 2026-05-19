@@ -84,7 +84,7 @@ class HevySyncTest(unittest.TestCase):
 
     def test_sync_endpoint_returns_polled_result_without_real_hevy_call(self):
         training_log = pd.DataFrame(columns=training_module.TRAINING_COLUMNS)
-        with patch(
+        with patch("backend.routes.training.is_hevy_api_configured", return_value=True), patch(
             "backend.routes.training.sync_hevy_events",
             return_value={
                 "events": 1,
@@ -94,6 +94,19 @@ class HevySyncTest(unittest.TestCase):
                 "training_log": training_log,
                 "last_synced_at": "2026-05-13T16:05:00+00:00",
             },
+        ), patch(
+            "backend.routes.training.import_hevy_workouts",
+            return_value={
+                "imported_workouts": 0,
+                "imported_rows": 0,
+                "skipped_duplicates": 0,
+                "failures": [],
+                "training_log": training_log,
+                "last_synced_at": "2026-05-13T16:05:00+00:00",
+            },
+        ), patch(
+            "backend.routes.training.save_hevy_sync_state",
+            return_value={"last_sync_at": "2026-05-13T16:05:00+00:00", "last_error": "", "last_result": {}},
         ):
             response = self.client.post("/api/training/sync/hevy")
 
@@ -102,6 +115,51 @@ class HevySyncTest(unittest.TestCase):
         self.assertEqual(data["status"], "ok")
         self.assertEqual(data["saved_workouts"], 1)
         self.assertEqual(data["last_synced_at"], "2026-05-13T16:05:00+00:00")
+
+    def test_sync_endpoint_imports_recent_workouts_when_events_are_empty(self):
+        rows = pd.DataFrame(
+            [
+                {
+                    **{column: "" for column in training_module.TRAINING_COLUMNS},
+                    "workout_id": "hevy-workout-1",
+                    "date": "2026-05-13",
+                    "workout_type": "Strength",
+                    "exercise": "Bench Press",
+                    "sets": 1,
+                    "reps": 5,
+                    "weight": 225,
+                    "source": "hevy",
+                    "hevy_workout_id": "hevy-workout-1",
+                }
+            ],
+            columns=training_module.TRAINING_COLUMNS,
+        )
+        with patch("backend.routes.training.is_hevy_api_configured", return_value=True), patch(
+            "backend.routes.training.sync_hevy_events",
+            return_value={"events": 0, "saved_workouts": 0, "deleted_rows": 0, "failures": [], "training_log": pd.DataFrame(columns=training_module.TRAINING_COLUMNS)},
+        ), patch(
+            "backend.routes.training.import_hevy_workouts",
+            return_value={
+                "imported_workouts": 1,
+                "imported_rows": 1,
+                "skipped_duplicates": 0,
+                "failures": [],
+                "training_log": rows,
+                "last_synced_at": "2026-05-13T16:06:00+00:00",
+            },
+        ), patch(
+            "backend.routes.training.save_hevy_sync_state",
+            return_value={"last_sync_at": "2026-05-13T16:06:00+00:00", "last_error": "", "last_result": {}},
+        ):
+            response = self.client.post("/api/training/sync/hevy")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["saved_workouts"], 1)
+        self.assertEqual(data["imported_rows"], 1)
+        self.assertEqual(data["hevy_rows"], 1)
+        self.assertEqual(data["latest_workout_date"], "2026-05-13")
 
     def test_backend_does_not_register_background_hevy_poller(self):
         self.assertFalse(hasattr(backend_main, "_hevy_poll_loop"))
@@ -119,10 +177,16 @@ class HevySyncTest(unittest.TestCase):
         self.assertTrue(state["safe_mode"])
 
     def test_sync_endpoint_catches_unexpected_hevy_failures(self):
-        with patch("backend.routes.training.sync_hevy_events", side_effect=RuntimeError("database connection reset")), patch(
+        with patch("backend.routes.training.is_hevy_api_configured", return_value=True), patch(
+            "backend.routes.training.sync_hevy_events",
+            side_effect=RuntimeError("database connection reset"),
+        ), patch(
+            "backend.routes.training.import_hevy_workouts",
+            side_effect=RuntimeError("recent import failed"),
+        ), patch(
             "backend.routes.training.save_hevy_sync_state",
             return_value={"last_sync_at": "", "last_error": "database connection reset", "last_result": {"status": "error"}},
-        ), patch("backend.routes.training.load_training_log", return_value=pd.DataFrame(columns=training_module.TRAINING_COLUMNS)):
+        ), patch("backend.routes.training.load_live_training_log", return_value=pd.DataFrame(columns=training_module.TRAINING_COLUMNS)):
             response = self.client.post("/api/training/sync/hevy")
 
         self.assertEqual(response.status_code, 200)

@@ -277,9 +277,9 @@ def load_nutrition_log() -> pd.DataFrame:
     return _normalize_nutrition_log(entries_df, persist_backfill=True)
 
 
-def load_recent_nutrition_log(days: int = 14, max_rows: int = 5000) -> pd.DataFrame:
+def load_recent_nutrition_log(days: int = 14, max_rows: int = 5000, statement_timeout_ms: int | None = None) -> pd.DataFrame:
     """Load a bounded nutrition slice for startup/dashboard requests."""
-    entries_df = load_dataframe_recent("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS, days=days, max_rows=max_rows)
+    entries_df = load_dataframe_recent("nutrition_log", NUTRITION_LOG_PATH, NUTRITION_COLUMNS, days=days, max_rows=max_rows, statement_timeout_ms=statement_timeout_ms)
     return _normalize_nutrition_log(entries_df, persist_backfill=False)
 
 

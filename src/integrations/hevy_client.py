@@ -85,6 +85,15 @@ def _get_api_key(api_key: str | None = None) -> str:
     return resolved_key
 
 
+def is_hevy_api_configured(api_key: str | None = None) -> bool:
+    """Return whether a Hevy API key can be resolved without exposing it."""
+    try:
+        _get_api_key(api_key)
+        return True
+    except HevyIntegrationError:
+        return False
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

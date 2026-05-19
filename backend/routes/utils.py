@@ -16,6 +16,46 @@ from fastapi import HTTPException, Request, status
 
 ACCESS_COOKIE = "performance_os_access"
 SESSION_MAX_AGE_SECONDS = 60 * 60 * 24 * 30
+SENSITIVE_VALUE = "••••"
+
+_SENSITIVE_KEY_NAMES = {
+    "api_key",
+    "apikey",
+    "access_token",
+    "authorization",
+    "client_secret",
+    "cookie",
+    "database_url",
+    "db_url",
+    "dsn",
+    "id_token",
+    "password",
+    "postgres_url",
+    "refresh_token",
+    "secret",
+    "session_secret",
+    "session_token",
+}
+
+_SAFE_TOKEN_KEYS = {
+    "token_status",
+    "token_storage",
+    "token_type",
+}
+
+_SAFE_STATUS_VALUES = {
+    "auto from app url",
+    "check integrations",
+    "configured",
+    "connected",
+    "disconnected",
+    "expired",
+    "missing",
+    "not configured",
+    "ready to connect",
+    "refresh soon",
+    "valid",
+}
 
 
 def sign_session(timestamp: str, secret: str) -> str:
@@ -78,3 +118,44 @@ def dataframe_records(df: pd.DataFrame) -> list[dict]:
         {key: clean_value(value) for key, value in row.items()}
         for row in df.to_dict(orient="records")
     ]
+
+
+def is_sensitive_key(key: object) -> bool:
+    """Return true for fields that must not be echoed to frontend/debug output."""
+    normalized = str(key).strip().lower().replace("-", "_")
+    if not normalized or normalized in _SAFE_TOKEN_KEYS:
+        return False
+    if normalized in _SENSITIVE_KEY_NAMES:
+        return True
+    if normalized.endswith("_api_key"):
+        return True
+    if normalized.endswith("_access_token") or normalized.endswith("_refresh_token"):
+        return True
+    if normalized.endswith("_secret") or normalized.endswith("_password"):
+        return True
+    if "database_url" in normalized:
+        return True
+    return False
+
+
+def mask_sensitive_value(value: Any) -> Any:
+    """Preserve empty values while masking configured secrets."""
+    if value in (None, ""):
+        return value
+    if isinstance(value, str) and value.strip().lower() in _SAFE_STATUS_VALUES:
+        return value
+    return SENSITIVE_VALUE
+
+
+def sanitize_sensitive_data(value: Any) -> Any:
+    """Recursively redact secret-like fields from API/debug/export payloads."""
+    if isinstance(value, dict):
+        sanitized = {}
+        for key, item in value.items():
+            sanitized[key] = mask_sensitive_value(item) if is_sensitive_key(key) else sanitize_sensitive_data(item)
+        return sanitized
+    if isinstance(value, list):
+        return [sanitize_sensitive_data(item) for item in value]
+    if isinstance(value, tuple):
+        return [sanitize_sensitive_data(item) for item in value]
+    return value

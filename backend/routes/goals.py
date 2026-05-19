@@ -8,11 +8,10 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 import pandas as pd
 
-from src.analytics.food_history import build_daily_nutrition_summary, save_daily_nutrition_summary
+from src.analytics.food_history import get_finalized_nutrition_history
 from src.analytics.training_workload import analyze_training_workload
 from src.body_metrics import load_body_metrics
 from src.goals import build_automatic_goals, load_user_goals, save_user_goals
-from src.nutrition import load_nutrition_log
 from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets, load_nutrition_targets, save_nutrition_targets
 from src.optimization.adaptive_nutrition_engine import (
     append_nutrition_recommendation_history,
@@ -21,7 +20,7 @@ from src.optimization.adaptive_nutrition_engine import (
 )
 from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recommendation
 from src.recovery import load_recovery_log, load_sleep_entries
-from src.training import TRAINING_COLUMNS, load_recent_training_log, recent_training_window
+from src.training import TRAINING_COLUMNS, load_recent_training_log, recent_training_window, training_raw_window_days
 
 
 router = APIRouter(tags=["goals"])
@@ -89,7 +88,7 @@ def _goal_response(goals: dict, *, include_training: bool = False) -> dict:
     logger.info("[goals] response started include_training=%s", include_training)
 
     body_metrics = _safe_goal_block("load_body_metrics", lambda: pd.DataFrame(), load_body_metrics, debug)
-    nutrition_log = _safe_goal_block("load_nutrition_log", lambda: pd.DataFrame(), load_nutrition_log, debug)
+    nutrition_summary = _safe_goal_block("load_finalized_nutrition_summary", lambda: pd.DataFrame(), lambda: get_finalized_nutrition_history(60), debug)
     active_targets = _safe_goal_block("load_nutrition_targets", lambda: None, load_nutrition_targets, debug)
 
     training_log = pd.DataFrame(columns=TRAINING_COLUMNS)
@@ -128,7 +127,7 @@ def _goal_response(goals: dict, *, include_training: bool = False) -> dict:
             lambda: _fallback_targets(goals),
             lambda: calculate_macro_targets(
                 goals,
-                nutrition_df=nutrition_log,
+                nutrition_df=nutrition_summary,
                 training_df=training_log,
                 recovery_df=None,
                 body_metrics_df=body_metrics,
@@ -162,7 +161,7 @@ def _goal_response(goals: dict, *, include_training: bool = False) -> dict:
             "warnings": warnings,
             "checks": debug,
             "counts": {
-                "nutrition_rows": len(nutrition_log) if isinstance(nutrition_log, pd.DataFrame) else 0,
+                "nutrition_rows": len(nutrition_summary) if isinstance(nutrition_summary, pd.DataFrame) else 0,
                 "body_metric_rows": len(body_metrics) if isinstance(body_metrics, pd.DataFrame) else 0,
                 "training_rows": len(training_log) if isinstance(training_log, pd.DataFrame) else 0,
             },
@@ -175,8 +174,8 @@ def _goal_response(goals: dict, *, include_training: bool = False) -> dict:
 
 def _calculate_suggested_targets(goals: dict):
     body_metrics = load_body_metrics()
-    nutrition_log = load_nutrition_log()
-    training_log = load_recent_training_log(days=180, max_rows=20000)
+    nutrition_summary = get_finalized_nutrition_history(60)
+    training_log = load_recent_training_log(days=training_raw_window_days(), max_rows=20000)
     recovery_log = load_recovery_log()
     sleep_log = load_sleep_entries()
     goals = build_automatic_goals(goals, body_metrics_df=body_metrics, training_df=training_log)
@@ -184,14 +183,13 @@ def _calculate_suggested_targets(goals: dict):
     workload = analyze_training_workload(training_log, bodyweight=goals["current_bodyweight"])
     base_targets = calculate_macro_targets(
         goals,
-        nutrition_df=nutrition_log,
+        nutrition_df=nutrition_summary,
         training_df=training_log,
         recovery_df=recovery_log,
         body_metrics_df=body_metrics,
         workload_data=workload,
     )
     current_targets = active_targets or base_targets
-    nutrition_summary = build_daily_nutrition_summary(nutrition_log, current_targets)
     adaptive_recommendation = build_adaptive_nutrition_recommendation(
         user_goals=goals,
         body_metrics_df=body_metrics,
@@ -202,7 +200,6 @@ def _calculate_suggested_targets(goals: dict):
         sleep_df=sleep_log,
     )
     recommended_targets = adaptive_recommendation["recommendedTargets"]
-    nutrition_summary = build_daily_nutrition_summary(nutrition_log, recommended_targets)
     return recommended_targets, nutrition_summary, adaptive_recommendation
 
 
@@ -238,7 +235,6 @@ def apply_suggested_macros() -> dict:
     previous_targets = load_nutrition_targets()
     targets, nutrition_summary, adaptive_recommendation = _calculate_suggested_targets(goals)
     save_nutrition_targets(targets)
-    save_daily_nutrition_summary(nutrition_summary)
     append_nutrition_recommendation_history(
         {
             "source": "apply_suggested_macros",

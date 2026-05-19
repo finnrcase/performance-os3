@@ -1,6 +1,5 @@
 from pathlib import Path
 from shutil import copyfileobj
-from typing import Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -11,12 +10,14 @@ from src.analytics.food_history import (
     build_daily_nutrition_summary,
     calculate_calorie_adherence,
     get_nutrition_history,
+    load_daily_nutrition_summary,
     save_daily_nutrition_summary,
 )
 from src.ai.food_parser import analyze_food_text, parse_food_text
 from src.nutrition import (
     add_food_shortcut,
     add_meal_template_items,
+    calculate_daily_totals,
     create_food_entry,
     delete_food_log_entry,
     delete_food_shortcut,
@@ -58,7 +59,7 @@ class NutritionEntry(BaseModel):
     date: str
     meal_type: str
     food_name: str = Field(min_length=1)
-    iconType: Literal["bagel", "protein_bar", "oats", "protein_shake", "chicken"] | None = None
+    iconType: str | None = None
     calories: float = Field(ge=0)
     protein: float = Field(ge=0)
     carbs: float = Field(ge=0)
@@ -81,7 +82,7 @@ class FoodParseRequest(BaseModel):
 
 
 class FoodLogUpdatePayload(BaseModel):
-    iconType: Literal["bagel", "protein_bar", "oats", "protein_shake", "chicken"] | None = None
+    iconType: str | None = None
 
 
 class FoodAnalyzeTextRequest(BaseModel):
@@ -162,10 +163,101 @@ class MealTemplateRenamePayload(BaseModel):
 
 
 def rebuild_daily_summary() -> pd.DataFrame:
-    """Rebuild persisted daily summary from detailed food logs."""
+    """Legacy/manual rebuild helper.
+
+    Normal food logging should not call this. Daily summaries are finalized
+    explicitly so the recommendation engine never reprocesses raw food rows on
+    routine UI refreshes.
+    """
     summary_df = build_daily_nutrition_summary(load_nutrition_log(), load_nutrition_targets())
     save_daily_nutrition_summary(summary_df)
     return summary_df
+
+
+def _target_payload(targets: dict | None) -> dict:
+    targets = targets or {}
+    return {
+        "calories": targets.get("target_calories"),
+        "protein": targets.get("protein_grams"),
+        "carbs": targets.get("carb_grams"),
+        "fat": targets.get("fat_grams"),
+    }
+
+
+def nutrition_today_payload(date: str | None = None) -> dict:
+    """Return a fast, live single-day food payload without analytics rebuilds."""
+    selected_date = str(date or pd.Timestamp.today().date().isoformat())
+    entries_df = load_nutrition_log()
+    if entries_df.empty:
+        items_df = entries_df
+    else:
+        items_df = entries_df.loc[entries_df["date"].astype(str) == selected_date].copy()
+    totals = calculate_daily_totals(items_df, selected_date)
+    totals["fiber"] = float(pd.to_numeric(items_df.get("fiber", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()) if not items_df.empty else 0.0
+    summary_df = load_daily_nutrition_summary()
+    matching_summary = (
+        summary_df.loc[summary_df["date"].astype(str) == selected_date]
+        if not summary_df.empty and "date" in summary_df.columns
+        else pd.DataFrame()
+    )
+    finalized = bool(matching_summary.iloc[-1].get("finalized")) if not matching_summary.empty else False
+    return {
+        "date": selected_date,
+        "items": dataframe_records(items_df),
+        "totals": totals,
+        "targets": _target_payload(load_nutrition_targets()),
+        "finalized": finalized,
+        "status": "finalized" if finalized else "live",
+    }
+
+
+def finalize_daily_nutrition_summary(date: str | None = None) -> dict:
+    """Persist one day-level nutrition summary on explicit request only."""
+    selected_date = str(date or pd.Timestamp.today().date().isoformat())
+    entries_df = load_nutrition_log()
+    targets = load_nutrition_targets()
+    if entries_df.empty:
+        day_entries = entries_df
+    else:
+        day_entries = entries_df.loc[entries_df["date"].astype(str) == selected_date].copy()
+    day_summary = build_daily_nutrition_summary(day_entries, targets)
+    if day_summary.empty:
+        day_summary = pd.DataFrame(
+            [
+                {
+                    "date": selected_date,
+                    "total_calories": 0,
+                    "total_protein": 0,
+                    "total_carbs": 0,
+                    "total_fat": 0,
+                    "fiber": pd.NA,
+                    "sodium": pd.NA,
+                    "target_calories": targets.get("target_calories") if targets else None,
+                    "target_protein": targets.get("protein_grams") if targets else None,
+                    "target_carbs": targets.get("carb_grams") if targets else None,
+                    "target_fat": targets.get("fat_grams") if targets else None,
+                    "adherence_score": None,
+                    "nutrition_logged": False,
+                    "logged_day": False,
+                    "finalized": True,
+                    "notes": "Finalized as missing food log.",
+                }
+            ]
+        )
+    day_summary["finalized"] = True
+    day_summary["logged_day"] = day_summary["nutrition_logged"]
+    existing_summary = load_daily_nutrition_summary()
+    if not existing_summary.empty and "date" in existing_summary.columns:
+        existing_summary = existing_summary.loc[existing_summary["date"].astype(str) != selected_date].copy()
+    merged_summary = pd.concat([existing_summary, day_summary], ignore_index=True)
+    save_daily_nutrition_summary(merged_summary)
+    matching = merged_summary.loc[merged_summary["date"].astype(str) == selected_date] if not merged_summary.empty else pd.DataFrame()
+    return {
+        "status": "ok",
+        "date": selected_date,
+        "summary": dataframe_records(matching)[0] if not matching.empty else None,
+        "message": "Daily nutrition summary finalized.",
+    }
 
 
 def _looks_non_food(text: str) -> bool:
@@ -179,9 +271,18 @@ def _looks_non_food(text: str) -> bool:
 
 
 @router.get("/api/nutrition/logs")
-def get_nutrition_logs() -> dict:
+def get_nutrition_logs(date: str | None = None) -> dict:
     """Return saved local nutrition logs."""
-    return {"items": dataframe_records(load_nutrition_log())}
+    entries_df = load_nutrition_log()
+    if date and not entries_df.empty:
+        entries_df = entries_df.loc[entries_df["date"].astype(str) == str(date)].copy()
+    return {"items": dataframe_records(entries_df)}
+
+
+@router.get("/api/nutrition/today")
+def get_nutrition_today(date: str | None = None) -> dict:
+    """Return live single-day food logs and totals without running recommendations."""
+    return nutrition_today_payload(date)
 
 
 @router.post("/api/nutrition/logs")
@@ -191,8 +292,7 @@ def add_nutrition_log(entry: NutritionEntry) -> dict:
     food_entry = create_food_entry(**entry.model_dump())
     entries_df = pd.concat([entries_df, pd.DataFrame([food_entry])], ignore_index=True)
     save_nutrition_log(entries_df)
-    rebuild_daily_summary()
-    return {"item": food_entry, "items": dataframe_records(load_nutrition_log())}
+    return {"item": food_entry, **nutrition_today_payload(entry.date)}
 
 
 @router.delete("/api/nutrition/logs/{food_log_id}")
@@ -202,10 +302,9 @@ def remove_nutrition_log(food_log_id: str, _: None = Depends(require_authenticat
         deleted_entry = delete_food_log_entry(food_log_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    rebuild_daily_summary()
     return {
         "deleted": deleted_entry,
-        "items": dataframe_records(load_nutrition_log()),
+        **nutrition_today_payload(str(deleted_entry.get("date") or "")),
     }
 
 
@@ -216,10 +315,9 @@ def update_nutrition_log(food_log_id: str, payload: FoodLogUpdatePayload, _: Non
         updated_entry = update_food_log_entry(food_log_id, payload.model_dump(exclude_unset=True))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    rebuild_daily_summary()
     return {
         "item": updated_entry,
-        "items": dataframe_records(load_nutrition_log()),
+        **nutrition_today_payload(str(updated_entry.get("date") or "")),
     }
 
 
@@ -249,13 +347,18 @@ def upload_nutrition_label(file: UploadFile = File(...)) -> dict:
 
 @router.get("/api/nutrition/history")
 def get_daily_nutrition_history(days: int = 30) -> dict:
-    """Return day-level nutrition summaries and adherence analytics."""
-    rebuild_daily_summary()
+    """Return finalized day-level nutrition summaries and adherence analytics."""
     history_df = get_nutrition_history(days)
     return {
         "items": dataframe_records(history_df),
         "adherence": calculate_calorie_adherence(history_df, days=7),
     }
+
+
+@router.post("/api/nutrition/finalize-day")
+def finalize_nutrition_day(date: str | None = None) -> dict:
+    """Explicitly rebuild/store daily nutrition summary for analytics."""
+    return finalize_daily_nutrition_summary(date)
 
 
 @router.post("/api/nutrition/ai/parse")
@@ -336,8 +439,7 @@ def log_food_bulk(payload: FoodLogBulkRequest) -> dict:
         entries.append(entry)
     entries_df = pd.concat([entries_df, pd.DataFrame(entries)], ignore_index=True)
     save_nutrition_log(entries_df)
-    rebuild_daily_summary()
-    return {"items": dataframe_records(load_nutrition_log()), "saved": len(entries)}
+    return {**nutrition_today_payload(payload.date), "saved": len(entries)}
 
 
 @router.get("/api/nutrition/shortcuts")
@@ -381,8 +483,7 @@ def log_shortcut(shortcut_id: str, payload: ShortcutLogPayload) -> dict:
         entry = log_food_shortcut(shortcut_id, date=payload.date, meal_type=payload.meal_type)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    rebuild_daily_summary()
-    return {"item": entry, "items": dataframe_records(load_nutrition_log())}
+    return {"item": entry, **nutrition_today_payload(payload.date)}
 
 
 @router.post("/api/nutrition/meal-templates")
@@ -415,8 +516,7 @@ def log_template(template_name: str, payload: ShortcutLogPayload) -> dict:
         result = log_meal_template(template_name, date=payload.date, meal_type=payload.meal_type)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    rebuild_daily_summary()
-    return {"item": result, "items": dataframe_records(load_nutrition_log())}
+    return {"item": result, **nutrition_today_payload(payload.date)}
 
 
 @router.post("/api/nutrition/frequent-foods/{food_name}/log")
@@ -426,5 +526,4 @@ def log_frequent(food_name: str, payload: ShortcutLogPayload) -> dict:
         entry = log_frequent_food(food_name, date=payload.date, meal_type=payload.meal_type)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    rebuild_daily_summary()
-    return {"item": entry, "items": dataframe_records(load_nutrition_log())}
+    return {"item": entry, **nutrition_today_payload(payload.date)}

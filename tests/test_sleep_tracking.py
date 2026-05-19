@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,8 +14,13 @@ from tests.auth_helpers import configure_test_auth
 
 class SleepTrackingTest(unittest.TestCase):
     def setUp(self):
+        self.env_patch = patch.dict(os.environ, {"DATABASE_URL": ""})
+        self.env_patch.start()
         self.client = TestClient(app)
         configure_test_auth(self.client)
+
+    def tearDown(self):
+        self.env_patch.stop()
 
     def test_sleep_entries_derive_from_manual_recovery_logs(self):
         with tempfile.TemporaryDirectory() as temp_dir:

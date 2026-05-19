@@ -158,7 +158,7 @@ def _check_backend(environment: str) -> dict:
     )
 
 
-def _check_database(environment: str) -> dict:
+def _check_database(environment: str, run_external_checks: bool = True) -> dict:
     required = ["DATABASE_URL"]
     missing = _missing_env_vars(required)
     if missing:
@@ -172,6 +172,15 @@ def _check_database(environment: str) -> dict:
             user_action_required=production_warning,
             user_action_message="Add the Supabase Postgres connection string as DATABASE_URL in Railway backend env vars and redeploy." if production_warning else "",
             details={"storage": "local_files", "expected_tables": ALL_DATASET_TABLES},
+        )
+    if not run_external_checks:
+        return _component(
+            configured=True,
+            status="yellow",
+            message="DATABASE_URL is configured; live Postgres check was skipped.",
+            required_env_vars=required,
+            missing_env_vars=[],
+            details={"storage": "postgres", "live_check": "skipped", "expected_tables": ALL_DATASET_TABLES},
         )
 
     try:
@@ -300,17 +309,24 @@ def _check_openai(run_external_checks: bool) -> dict:
     )
 
 
-def _check_strava(settings: dict, environment: str) -> dict:
+def _check_strava(settings: dict, environment: str, run_external_checks: bool = True) -> dict:
     required = ["STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET", "STRAVA_REDIRECT_URI"]
     missing = _missing_env_vars(["STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET"])
     redirect_uri = _config_value("STRAVA_REDIRECT_URI")
     if not redirect_uri:
         missing.append("STRAVA_REDIRECT_URI")
-    latest_strava = _latest_date(load_training_log(), "strava")
-    sync_state = load_strava_sync_state()
-    last_sync = str(sync_state.get("last_synced_at", "") or "")
-    token_metadata = get_strava_safe_token_metadata()
     token_storage = "postgres" if use_database() else "local_files"
+    latest_strava = ""
+    last_sync = ""
+    token_metadata = {
+        "connected": bool(_config_value("STRAVA_ACCESS_TOKEN") and _config_value("STRAVA_REFRESH_TOKEN")),
+        "token_status": "configured" if _config_value("STRAVA_ACCESS_TOKEN") and _config_value("STRAVA_REFRESH_TOKEN") else "missing",
+    }
+    if run_external_checks:
+        latest_strava = _latest_date(load_training_log(), "strava")
+        sync_state = load_strava_sync_state()
+        last_sync = str(sync_state.get("last_synced_at", "") or "")
+        token_metadata = get_strava_safe_token_metadata()
 
     if missing:
         return _component(
@@ -336,6 +352,21 @@ def _check_strava(settings: dict, environment: str) -> dict:
             user_action_required=True,
             user_action_message=f"Set STRAVA_REDIRECT_URI to {EXPECTED_STRAVA_REDIRECT_URI} in Railway, add api-production-b3ff.up.railway.app as the Strava callback domain, redeploy, then reconnect Strava.",
             details={"token_storage": token_storage, "configured_redirect_uri_matches_expected": False, "expected_redirect_uri": EXPECTED_STRAVA_REDIRECT_URI},
+        )
+
+    if not run_external_checks:
+        token_configured = bool(_config_value("STRAVA_ACCESS_TOKEN") and _config_value("STRAVA_REFRESH_TOKEN"))
+        return _component(
+            configured=True,
+            status="green" if token_configured else "yellow",
+            message="Strava env vars are configured; token/storage checks were skipped." if token_configured else "Strava client credentials are configured; OAuth token check was skipped.",
+            required_env_vars=required,
+            last_successful_sync=last_sync,
+            latest_record=latest_strava,
+            reconnect_required=not token_configured,
+            user_action_required=not token_configured,
+            user_action_message="Reconnect Strava from Settings if OAuth tokens are missing." if not token_configured else "",
+            details={"token_storage": token_storage, "token_status": token_metadata.get("token_status", "skipped"), "live_check": "skipped", "expected_redirect_uri": EXPECTED_STRAVA_REDIRECT_URI},
         )
 
     status = get_strava_connection_status()
@@ -396,10 +427,14 @@ def _check_hevy(run_external_checks: bool, settings: dict) -> dict:
     env_key = _config_value("HEVY_API_KEY")
     settings_key = str(settings.get("integrations", {}).get("hevy_api_key", "") or "").strip()
     configured = bool(env_key or settings_key)
-    latest_hevy = _latest_date(load_training_log(), "hevy")
-    state = load_hevy_sync_state()
-    last_sync = str(state.get("last_sync_at", "") or "")
-    last_error = str(state.get("last_error", "") or "")
+    latest_hevy = ""
+    last_sync = ""
+    last_error = ""
+    if run_external_checks:
+        latest_hevy = _latest_date(load_training_log(), "hevy")
+        state = load_hevy_sync_state()
+        last_sync = str(state.get("last_sync_at", "") or "")
+        last_error = str(state.get("last_error", "") or "")
     if not configured:
         return _component(
             configured=False,
@@ -422,6 +457,16 @@ def _check_hevy(run_external_checks: bool, settings: dict) -> dict:
             latest_record=latest_hevy,
             user_action_required=True,
             user_action_message="Move HEVY_API_KEY into Railway backend env vars and redeploy.",
+        )
+    if not run_external_checks:
+        return _component(
+            configured=True,
+            status="green",
+            message="HEVY_API_KEY is configured; live Hevy check was skipped.",
+            required_env_vars=required,
+            last_successful_sync=last_sync,
+            latest_record=latest_hevy,
+            details={"live_check": "skipped"},
         )
     if last_error:
         base_status = "yellow"
@@ -449,15 +494,21 @@ def _check_hevy(run_external_checks: bool, settings: dict) -> dict:
     )
 
 
-def _check_withings(environment: str) -> dict:
+def _check_withings(environment: str, run_external_checks: bool = True) -> dict:
     required = ["WITHINGS_CLIENT_ID", "WITHINGS_CLIENT_SECRET", "WITHINGS_REDIRECT_URI"]
     missing = _missing_env_vars(required)
     redirect_uri = _config_value("WITHINGS_REDIRECT_URI")
-    latest_weight = _latest_date(load_body_metrics())
-    sync_state = load_withings_sync_state()
-    last_sync = str(sync_state.get("last_synced_at", "") or "")
-    latest_withings = str(sync_state.get("latest_measurement_date", "") or sync_state.get("latest_measure_date", "") or "") or latest_weight
-    last_error = str(sync_state.get("last_error", "") or "")
+    latest_weight = ""
+    sync_state = {}
+    last_sync = ""
+    latest_withings = ""
+    last_error = ""
+    if run_external_checks:
+        latest_weight = _latest_date(load_body_metrics())
+        sync_state = load_withings_sync_state()
+        last_sync = str(sync_state.get("last_synced_at", "") or "")
+        latest_withings = str(sync_state.get("latest_measurement_date", "") or sync_state.get("latest_measure_date", "") or "") or latest_weight
+        last_error = str(sync_state.get("last_error", "") or "")
     token_storage = "postgres" if use_database() else "local_files"
     route_details = {
         "connect_endpoint": "/api/withings/connect",
@@ -496,6 +547,18 @@ def _check_withings(environment: str) -> dict:
             user_action_required=True,
             user_action_message=f"Set WITHINGS_REDIRECT_URI to {EXPECTED_WITHINGS_REDIRECT_URI} in Railway and add that exact URL in the Withings developer console callback URLs, then redeploy and reconnect.",
             details={**route_details, "configured_redirect_uri_matches_expected": False},
+        )
+    if not run_external_checks:
+        return _component(
+            configured=True,
+            status="yellow",
+            message="Withings credentials are configured; OAuth token check was skipped.",
+            required_env_vars=required,
+            last_successful_sync=last_sync,
+            latest_record=latest_withings,
+            reconnect_required=True,
+            user_action_required=False,
+            details={**route_details, "live_check": "skipped"},
         )
     status = get_withings_connection_status()
     if status != "Connected":
@@ -678,11 +741,11 @@ def build_integration_status_report(settings: dict | None = None, run_external_c
         "checked_at": _now_iso(),
     }
     report["backend"] = _check_backend(environment)
-    report["database"] = _check_database(environment)
+    report["database"] = _check_database(environment, run_external_checks)
     report["openai"] = _check_openai(run_external_checks)
-    report["strava"] = _check_strava(current_settings, environment)
+    report["strava"] = _check_strava(current_settings, environment, run_external_checks)
     report["hevy"] = _check_hevy(run_external_checks, current_settings)
-    report["withings"] = _check_withings(environment)
+    report["withings"] = _check_withings(environment, run_external_checks)
     report["frontend"] = _scan_frontend_source()
     report["other_integrations"] = _check_other_integrations(current_settings)
     report["required_user_actions"] = _collect_required_actions(report)

@@ -9,11 +9,13 @@ This module handles:
 
 import pandas as pd
 import numpy as np
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, load_dataframe_recent, mark_dataframe_deletes, save_dataframe
+from src.storage import load_dataframe, load_dataframe_recent, load_document, mark_dataframe_deletes, save_dataframe, save_document
 from src.training_schedule import is_run_row
 
 TRAINING_COLUMNS = [
@@ -38,6 +40,91 @@ TRAINING_COLUMNS = [
 ]
 
 TRAINING_LOG_PATH = processed_data_path("training_log.csv")
+WEEKLY_TRAINING_SUMMARY_PATH = processed_data_path("weekly_training_summary.csv")
+MONTHLY_TRAINING_SUMMARY_PATH = processed_data_path("monthly_training_summary.csv")
+EXERCISE_PR_HISTORY_PATH = processed_data_path("exercise_pr_history.csv")
+MUSCLE_GROUP_VOLUME_HISTORY_PATH = processed_data_path("muscle_group_volume_history.csv")
+TRAINING_SUMMARY_STATE_PATH = processed_data_path("training_summary_state.json")
+
+TRAINING_SUMMARY_COLUMNS = [
+    "period_start",
+    "period_end",
+    "period_label",
+    "workout_count",
+    "total_sets",
+    "hard_sets",
+    "total_reps",
+    "total_volume",
+    "duration_minutes",
+    "training_frequency_per_week",
+    "volume_by_muscle_group",
+    "hard_sets_by_muscle_group",
+    "top_exercises",
+    "best_set_by_exercise",
+    "best_estimated_1rm_by_exercise",
+    "prs",
+    "source_counts",
+    "latest_workout_date",
+]
+
+EXERCISE_PR_HISTORY_COLUMNS = [
+    "exercise",
+    "date",
+    "workout_id",
+    "estimated_1rm",
+    "weight",
+    "reps",
+    "source",
+    "period_start",
+]
+
+MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS = [
+    "period_type",
+    "period_start",
+    "period_end",
+    "period_label",
+    "muscle_group",
+    "workout_count",
+    "total_sets",
+    "hard_sets",
+    "total_reps",
+    "total_volume",
+    "latest_workout_date",
+]
+
+
+def training_raw_window_days() -> int:
+    """Return the live raw set-level training window."""
+    try:
+        return max(30, min(int(os.getenv("TRAINING_RAW_WINDOW_DAYS", "180")), 730))
+    except ValueError:
+        return 180
+
+
+def _default_training_summary_state() -> dict:
+    return {
+        "last_rebuilt_at": "",
+        "cutoff_days": training_raw_window_days(),
+        "cutoff_date": "",
+        "raw_rows_total": 0,
+        "raw_rows_summarized": 0,
+        "weekly_summaries": 0,
+        "monthly_summaries": 0,
+        "exercise_prs": 0,
+        "muscle_group_periods": 0,
+    }
+
+
+def load_training_summary_state() -> dict:
+    state = _default_training_summary_state()
+    state.update(load_document("training_summary_state", TRAINING_SUMMARY_STATE_PATH, state))
+    return state
+
+
+def save_training_summary_state(state: dict) -> dict:
+    payload = _default_training_summary_state()
+    payload.update(state or {})
+    return save_document("training_summary_state", TRAINING_SUMMARY_STATE_PATH, payload)
 
 
 def _empty_training_log() -> pd.DataFrame:
@@ -173,14 +260,52 @@ def load_training_log() -> pd.DataFrame:
     return _normalize_training_log(load_dataframe("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS))
 
 
-def load_recent_training_log(days: int = 365, max_rows: int = 20000) -> pd.DataFrame:
+def load_recent_training_log(days: int = 365, max_rows: int = 20000, statement_timeout_ms: int | None = None) -> pd.DataFrame:
     """Load a bounded recent training slice for live dashboard/goal analytics."""
-    return _normalize_training_log(load_dataframe_recent("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS, days=days, max_rows=max_rows))
+    return _normalize_training_log(load_dataframe_recent("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS, days=days, max_rows=max_rows, statement_timeout_ms=statement_timeout_ms))
+
+
+def load_live_training_log(days: int | None = None, max_rows: int = 20000, statement_timeout_ms: int | None = None) -> pd.DataFrame:
+    """Load raw set-level rows that are safe for live UI/analytics paths."""
+    window_days = training_raw_window_days() if days is None else max(1, min(int(days), training_raw_window_days()))
+    return load_recent_training_log(days=window_days, max_rows=max_rows, statement_timeout_ms=statement_timeout_ms)
 
 
 def save_training_log(df) -> None:
     """Save training entries to local CSV."""
     save_dataframe("training_log", TRAINING_LOG_PATH, df, TRAINING_COLUMNS)
+
+
+def load_weekly_training_summary() -> pd.DataFrame:
+    return load_dataframe("weekly_training_summary", WEEKLY_TRAINING_SUMMARY_PATH, TRAINING_SUMMARY_COLUMNS)
+
+
+def save_weekly_training_summary(df: pd.DataFrame) -> None:
+    save_dataframe("weekly_training_summary", WEEKLY_TRAINING_SUMMARY_PATH, df, TRAINING_SUMMARY_COLUMNS)
+
+
+def load_monthly_training_summary() -> pd.DataFrame:
+    return load_dataframe("monthly_training_summary", MONTHLY_TRAINING_SUMMARY_PATH, TRAINING_SUMMARY_COLUMNS)
+
+
+def save_monthly_training_summary(df: pd.DataFrame) -> None:
+    save_dataframe("monthly_training_summary", MONTHLY_TRAINING_SUMMARY_PATH, df, TRAINING_SUMMARY_COLUMNS)
+
+
+def load_exercise_pr_history() -> pd.DataFrame:
+    return load_dataframe("exercise_pr_history", EXERCISE_PR_HISTORY_PATH, EXERCISE_PR_HISTORY_COLUMNS)
+
+
+def save_exercise_pr_history(df: pd.DataFrame) -> None:
+    save_dataframe("exercise_pr_history", EXERCISE_PR_HISTORY_PATH, df, EXERCISE_PR_HISTORY_COLUMNS)
+
+
+def load_muscle_group_volume_history() -> pd.DataFrame:
+    return load_dataframe("muscle_group_volume_history", MUSCLE_GROUP_VOLUME_HISTORY_PATH, MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS)
+
+
+def save_muscle_group_volume_history(df: pd.DataFrame) -> None:
+    save_dataframe("muscle_group_volume_history", MUSCLE_GROUP_VOLUME_HISTORY_PATH, df, MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS)
 
 
 def move_workout_date(workout_id: str, new_date: str) -> dict:
@@ -306,6 +431,227 @@ def calculate_training_volume(df, date=None) -> pd.DataFrame:
         .sort_values("date")
         .reset_index(drop=True)
     )
+
+
+def _jsonish_counts(series: pd.Series) -> dict[str, int]:
+    counts = series.fillna("").astype(str).str.strip()
+    counts = counts[counts != ""]
+    return {str(key): int(value) for key, value in counts.value_counts().to_dict().items()}
+
+
+def _prepare_training_for_summary(training_df: pd.DataFrame) -> pd.DataFrame:
+    if training_df is None or training_df.empty:
+        return pd.DataFrame(columns=[*TRAINING_COLUMNS, "date_dt", "total_reps", "volume", "hard_sets", "estimated_1rm"])
+    df = _normalize_training_log(training_df).copy()
+    df["date_dt"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date_dt"])
+    if df.empty:
+        return pd.DataFrame(columns=[*TRAINING_COLUMNS, "date_dt", "total_reps", "volume", "hard_sets", "estimated_1rm"])
+    for column in ["sets", "reps", "weight", "rpe", "duration_minutes"]:
+        df[column] = pd.to_numeric(df[column], errors="coerce").fillna(0)
+    inferred_set_mask = (df["sets"] <= 0) & ((df["reps"] > 0) | (df["weight"] > 0))
+    df.loc[inferred_set_mask, "sets"] = 1
+    df["total_reps"] = df["sets"] * df["reps"]
+    df["volume"] = df["sets"] * df["reps"] * df["weight"]
+    df["hard_sets"] = np.where(df["rpe"] >= 7, df["sets"], 0)
+    missing_hard_sets = (df["hard_sets"] <= 0) & (df["rpe"] <= 0) & (df["weight"] > 0) & (df["reps"] > 0)
+    df.loc[missing_hard_sets, "hard_sets"] = df.loc[missing_hard_sets, "sets"]
+    df["estimated_1rm"] = np.where(
+        (df["weight"] > 0) & (df["reps"] > 0),
+        df["weight"] * (1 + (df["reps"] / 30)),
+        0,
+    )
+    return df
+
+
+def _period_bounds(df: pd.DataFrame, period: str) -> pd.DataFrame:
+    period_df = df.copy()
+    if period == "weekly":
+        start = period_df["date_dt"].dt.normalize() - pd.to_timedelta(period_df["date_dt"].dt.weekday, unit="D")
+        period_df["period_start"] = start.dt.date.astype(str)
+        period_df["period_end"] = (start + pd.Timedelta(days=6)).dt.date.astype(str)
+        iso = period_df["date_dt"].dt.isocalendar()
+        period_df["period_label"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
+    else:
+        start = period_df["date_dt"].dt.to_period("M").dt.start_time
+        period_df["period_start"] = start.dt.date.astype(str)
+        period_df["period_end"] = (start + pd.offsets.MonthEnd(0)).dt.date.astype(str)
+        period_df["period_label"] = start.dt.strftime("%Y-%m")
+    return period_df
+
+
+def _summarize_periods(training_df: pd.DataFrame, period: str) -> pd.DataFrame:
+    df = _period_bounds(_prepare_training_for_summary(training_df), period)
+    if df.empty:
+        return pd.DataFrame(columns=TRAINING_SUMMARY_COLUMNS)
+    rows: list[dict] = []
+    for period_start, group in df.groupby("period_start", sort=True):
+        workout_keys = group[["date", "workout_id"]].drop_duplicates()
+        duration_by_workout = group.groupby(["date", "workout_id"], dropna=False)["duration_minutes"].max()
+        muscle_groups = group["muscle_group"].fillna("").astype(str).str.strip().replace("", "Unknown")
+        volume_by_muscle = group.assign(_muscle_group=muscle_groups).groupby("_muscle_group")["volume"].sum().sort_values(ascending=False)
+        hard_sets_by_muscle = group.assign(_muscle_group=muscle_groups).groupby("_muscle_group")["hard_sets"].sum().sort_values(ascending=False)
+        top_exercises = (
+            group[group["exercise"].fillna("").astype(str).str.strip() != ""]
+            .groupby("exercise", as_index=False)["volume"]
+            .sum()
+            .sort_values("volume", ascending=False)
+            .head(8)
+        )
+        best_1rm = (
+            group[(group["exercise"].fillna("").astype(str).str.strip() != "") & (group["estimated_1rm"] > 0)]
+            .groupby("exercise")["estimated_1rm"]
+            .max()
+            .sort_values(ascending=False)
+            .head(12)
+        )
+        best_sets = []
+        best_set_rows = (
+            group[(group["exercise"].fillna("").astype(str).str.strip() != "") & (group["estimated_1rm"] > 0)]
+            .sort_values(["exercise", "estimated_1rm", "weight", "reps"], ascending=[True, False, False, False])
+        )
+        for exercise, exercise_rows in best_set_rows.groupby("exercise", sort=True):
+            row = exercise_rows.iloc[0]
+            best_sets.append(
+                {
+                    "exercise": str(exercise),
+                    "date": row["date_dt"].date().isoformat(),
+                    "weight": round(float(row.get("weight", 0) or 0), 1),
+                    "reps": int(round(float(row.get("reps", 0) or 0))),
+                    "estimated_1rm": round(float(row.get("estimated_1rm", 0) or 0), 1),
+                }
+            )
+        prs = [
+            {"exercise": str(exercise), "estimated_1rm": round(float(value), 1)}
+            for exercise, value in best_1rm.head(8).items()
+        ]
+        period_days = max(1, (pd.to_datetime(group["period_end"].iloc[0]) - pd.to_datetime(group["period_start"].iloc[0])).days + 1)
+        rows.append(
+            {
+                "period_start": str(period_start),
+                "period_end": str(group["period_end"].iloc[0]),
+                "period_label": str(group["period_label"].iloc[0]),
+                "workout_count": int(len(workout_keys)),
+                "total_sets": int(round(float(group["sets"].sum()))),
+                "hard_sets": int(round(float(group["hard_sets"].sum()))),
+                "total_reps": int(round(float(group["total_reps"].sum()))),
+                "total_volume": round(float(group["volume"].sum()), 1),
+                "duration_minutes": round(float(duration_by_workout.sum()), 1),
+                "training_frequency_per_week": round(float(len(workout_keys)) / period_days * 7, 2),
+                "volume_by_muscle_group": {str(key): round(float(value), 1) for key, value in volume_by_muscle.items()},
+                "hard_sets_by_muscle_group": {str(key): int(round(float(value))) for key, value in hard_sets_by_muscle.items()},
+                "top_exercises": [
+                    {"exercise": str(item["exercise"]), "volume": round(float(item["volume"]), 1)}
+                    for item in top_exercises.to_dict(orient="records")
+                ],
+                "best_set_by_exercise": best_sets[:12],
+                "best_estimated_1rm_by_exercise": {str(key): round(float(value), 1) for key, value in best_1rm.items()},
+                "prs": prs,
+                "source_counts": _jsonish_counts(group["source"]),
+                "latest_workout_date": str(group["date_dt"].max().date()),
+            }
+        )
+    return pd.DataFrame(rows, columns=TRAINING_SUMMARY_COLUMNS)
+
+
+def _build_exercise_pr_history(training_df: pd.DataFrame) -> pd.DataFrame:
+    df = _prepare_training_for_summary(training_df)
+    if df.empty:
+        return pd.DataFrame(columns=EXERCISE_PR_HISTORY_COLUMNS)
+    df = df[(df["exercise"].fillna("").astype(str).str.strip() != "") & (df["estimated_1rm"] > 0)].copy()
+    if df.empty:
+        return pd.DataFrame(columns=EXERCISE_PR_HISTORY_COLUMNS)
+    df = df.sort_values(["exercise", "date_dt", "estimated_1rm"])
+    rows: list[dict] = []
+    for exercise, group in df.groupby("exercise", sort=True):
+        best = 0.0
+        for _, row in group.iterrows():
+            estimated = float(row["estimated_1rm"] or 0)
+            if estimated <= best + 0.01:
+                continue
+            best = estimated
+            date_value = row["date_dt"].date().isoformat()
+            week_start = row["date_dt"].normalize() - pd.Timedelta(days=int(row["date_dt"].weekday()))
+            rows.append(
+                {
+                    "exercise": str(exercise),
+                    "date": date_value,
+                    "workout_id": str(row.get("workout_id", "")),
+                    "estimated_1rm": round(estimated, 1),
+                    "weight": round(float(row.get("weight", 0) or 0), 1),
+                    "reps": int(round(float(row.get("reps", 0) or 0))),
+                    "source": str(row.get("source", "") or ""),
+                    "period_start": week_start.date().isoformat(),
+                }
+            )
+    return pd.DataFrame(rows, columns=EXERCISE_PR_HISTORY_COLUMNS)
+
+
+def _build_muscle_group_volume_history(training_df: pd.DataFrame, period: str) -> pd.DataFrame:
+    df = _period_bounds(_prepare_training_for_summary(training_df), period)
+    if df.empty:
+        return pd.DataFrame(columns=MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS)
+    df["_muscle_group"] = df["muscle_group"].fillna("").astype(str).str.strip().replace("", "Unknown")
+    rows: list[dict] = []
+    for (period_start, muscle_group), group in df.groupby(["period_start", "_muscle_group"], sort=True):
+        rows.append(
+            {
+                "period_type": period,
+                "period_start": str(period_start),
+                "period_end": str(group["period_end"].iloc[0]),
+                "period_label": str(group["period_label"].iloc[0]),
+                "muscle_group": str(muscle_group),
+                "workout_count": int(group[["date", "workout_id"]].drop_duplicates().shape[0]),
+                "total_sets": int(round(float(group["sets"].sum()))),
+                "hard_sets": int(round(float(group["hard_sets"].sum()))),
+                "total_reps": int(round(float(group["total_reps"].sum()))),
+                "total_volume": round(float(group["volume"].sum()), 1),
+                "latest_workout_date": str(group["date_dt"].max().date()),
+            }
+        )
+    return pd.DataFrame(rows, columns=MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS)
+
+
+def consolidate_old_training_history(cutoff_days: int | None = None, training_df: pd.DataFrame | None = None) -> dict:
+    """Create lightweight summaries for raw rows older than the live window.
+
+    This first phase intentionally does not delete or archive raw rows. Live
+    endpoints ignore old set-level data, while this manual job preserves the
+    long-term signal in summary datasets.
+    """
+    days = training_raw_window_days() if cutoff_days is None else max(30, int(cutoff_days))
+    source_df = load_training_log() if training_df is None else training_df
+    prepared = _prepare_training_for_summary(source_df)
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
+    old_df = prepared[prepared["date_dt"] < cutoff].copy()
+    weekly = _summarize_periods(old_df, "weekly")
+    monthly = _summarize_periods(old_df, "monthly")
+    prs = _build_exercise_pr_history(old_df)
+    muscle_weekly = _build_muscle_group_volume_history(old_df, "weekly")
+    muscle_monthly = _build_muscle_group_volume_history(old_df, "monthly")
+    muscle = pd.concat([muscle_weekly, muscle_monthly], ignore_index=True) if not muscle_weekly.empty or not muscle_monthly.empty else pd.DataFrame(columns=MUSCLE_GROUP_VOLUME_HISTORY_COLUMNS)
+
+    save_weekly_training_summary(weekly)
+    save_monthly_training_summary(monthly)
+    save_exercise_pr_history(prs)
+    save_muscle_group_volume_history(muscle)
+
+    result = {
+        "status": "ok",
+        "cutoff_days": days,
+        "cutoff_date": cutoff.date().isoformat(),
+        "raw_rows_total": int(len(prepared)),
+        "raw_rows_summarized": int(len(old_df)),
+        "weekly_summaries": int(len(weekly)),
+        "monthly_summaries": int(len(monthly)),
+        "exercise_prs": int(len(prs)),
+        "muscle_group_periods": int(len(muscle)),
+        "raw_rows_deleted": 0,
+        "message": "Historical summaries updated. Raw set-level rows were preserved.",
+    }
+    result["last_rebuilt_at"] = datetime.now(timezone.utc).isoformat()
+    save_training_summary_state(result)
+    return result
 
 
 class TrainingLogger:

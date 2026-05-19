@@ -34,6 +34,10 @@ DATAFRAME_TABLES = {
     "ai_food_cache": "ai_food_cache",
     "usda_food_cache": "usda_food_cache",
     "verified_food_cache": "verified_food_cache",
+    "weekly_training_summary": "weekly_training_summary",
+    "monthly_training_summary": "monthly_training_summary",
+    "exercise_pr_history": "exercise_pr_history",
+    "muscle_group_volume_history": "muscle_group_volume_history",
 }
 DATAFRAME_DATE_TABLES = {
     "nutrition_log",
@@ -52,6 +56,7 @@ DOCUMENT_TABLES = {
     "personal_records": "personal_records",
     "hevy_sync_state": "integration_sync_state",
     "training_schedule_profile": "training_schedule_profiles",
+    "training_summary_state": "training_summary_state",
 }
 
 ALL_DATASET_TABLES = sorted({*DATAFRAME_TABLES.values(), *DOCUMENT_TABLES.values()})
@@ -109,6 +114,12 @@ def dataframe_row_key(dataset: str, record: dict[str, Any], row_index: int | Non
         return _composite_key(dataset, record, ["id"])
     if dataset == "daily_nutrition_summary":
         return _composite_key(dataset, record, ["date"])
+    if dataset in {"weekly_training_summary", "monthly_training_summary"}:
+        return _composite_key(dataset, record, ["period_start"])
+    if dataset == "exercise_pr_history":
+        return _composite_key(dataset, record, ["exercise", "date", "workout_id"])
+    if dataset == "muscle_group_volume_history":
+        return _composite_key(dataset, record, ["period_type", "period_start", "muscle_group"])
     if dataset in {"ai_food_cache", "usda_food_cache", "verified_food_cache"}:
         for fields in (["cache_key"], ["query"], ["normalized_name"], ["food_name"], ["fdc_id"]):
             key = _composite_key(dataset, record, fields)
@@ -342,24 +353,38 @@ def load_dataframe(dataset: str, path: Path, columns: list[str]) -> pd.DataFrame
     return df[columns]
 
 
-def load_dataframe_recent(dataset: str, path: Path, columns: list[str], *, date_column: str = "date", days: int = 365, max_rows: int = 20000) -> pd.DataFrame:
+def load_dataframe_recent(
+    dataset: str,
+    path: Path,
+    columns: list[str],
+    *,
+    date_column: str = "date",
+    days: int = 365,
+    max_rows: int = 20000,
+    statement_timeout_ms: int | None = None,
+) -> pd.DataFrame:
     """Load a recent slice of a dataframe dataset by ISO date without scanning all rows in Python."""
     cutoff = (datetime.now().date() - timedelta(days=max(int(days), 0))).isoformat()
     if use_database():
         def load_recent_from_db() -> pd.DataFrame:
             ensure_database_schema()
             table = _table_for_dataframe(dataset)
+            json_key = "".join(character for character in str(date_column) if character.isalnum() or character == "_")
+            if json_key != date_column or not json_key:
+                raise ValueError(f"Invalid dataframe date column: {date_column}")
             with _connect() as conn:
                 with conn.cursor() as cur:
+                    if statement_timeout_ms:
+                        cur.execute("SET LOCAL statement_timeout = %s", (f"{max(int(statement_timeout_ms), 1)}ms",))
                     cur.execute(
                         f"""
                         SELECT data
                         FROM {table}
-                        WHERE COALESCE(data->>%s, '') >= %s
-                        ORDER BY data->>%s DESC, row_order DESC, id DESC
+                        WHERE COALESCE(data->>'{json_key}', '') >= %s
+                        ORDER BY data->>'{json_key}' DESC, row_order DESC, id DESC
                         LIMIT %s
                         """,
-                        (date_column, cutoff, date_column, int(max_rows)),
+                        (cutoff, int(max_rows)),
                     )
                     rows = [row[0] for row in cur.fetchall()]
             if not rows:

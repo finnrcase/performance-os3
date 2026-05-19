@@ -11,8 +11,8 @@ import pandas as pd
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import Response
 
-from backend.routes.utils import require_authenticated_request
-from src.analytics.food_history import DAILY_NUTRITION_SUMMARY_PATH, SUMMARY_COLUMNS, build_daily_nutrition_summary, save_daily_nutrition_summary
+from backend.routes.utils import require_authenticated_request, sanitize_sensitive_data
+from src.analytics.food_history import DAILY_NUTRITION_SUMMARY_PATH, SUMMARY_COLUMNS, build_daily_nutrition_summary
 from src.analytics.personal_records import PERSONAL_RECORDS_PATH
 from src.analytics.personal_response_learning import generate_personal_response_learning
 from src.analytics.strength_trends import calculate_estimated_1rm
@@ -734,12 +734,16 @@ def export_full_backup(_: None = Depends(require_authenticated_request)) -> Resp
     bundle = {
         "version": 1,
         "exported_at": datetime.now(timezone.utc).isoformat(),
+        "security": {
+            "secrets_redacted": True,
+            "note": "Integration credentials, API keys, OAuth tokens, passwords, and database URLs are not included in exports.",
+        },
         "dataframes": {
             dataset: _dataframe_records(load_dataframe(dataset, path, columns))
             for dataset, (path, columns) in BACKUP_DATASETS.items()
         },
         "documents": {
-            name: _json_ready(load_document(name, path, {}))
+            name: _json_ready(sanitize_sensitive_data(load_document(name, path, {})))
             for name, path in BACKUP_DOCUMENTS.items()
         },
         "derived": _json_ready(derived),
@@ -829,9 +833,6 @@ async def _run_backup_import(file: UploadFile, skip_documents: bool, import_mode
             if not dry_run:
                 save_document(name, path, document)
             document_count += 1
-
-    if not dry_run and ("nutrition_log" in imported or (not skip_documents and "nutrition_targets" in incoming_documents)):
-        save_daily_nutrition_summary(build_daily_nutrition_summary(load_nutrition_log(), load_nutrition_targets()))
 
     return {
         "status": "ok",

@@ -1,11 +1,13 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
 from backend.main import app
+from src.analytics import food_history as food_history_module
 from src import nutrition as nutrition_module
 from tests.auth_helpers import configure_test_auth
 
@@ -72,8 +74,13 @@ SAMPLE_ANALYSIS = {
 
 class FoodTextApiTest(unittest.TestCase):
     def setUp(self):
+        self.env_patch = patch.dict(os.environ, {"DATABASE_URL": ""})
+        self.env_patch.start()
         self.client = TestClient(app)
         configure_test_auth(self.client)
+
+    def tearDown(self):
+        self.env_patch.stop()
 
     def test_analyze_text_rejects_empty_input(self):
         response = self.client.post("/api/food/analyze-text", json={"date": "2026-05-13", "text": "   "})
@@ -100,7 +107,7 @@ class FoodTextApiTest(unittest.TestCase):
             temp_path = Path(temp_dir) / "nutrition_log.csv"
             with patch.object(nutrition_module, "NUTRITION_LOG_PATH", temp_path), patch(
                 "backend.routes.nutrition.rebuild_daily_summary", return_value=None
-            ):
+            ) as rebuild_summary:
                 response = self.client.post(
                     "/api/food/log-bulk",
                     json={
@@ -116,6 +123,79 @@ class FoodTextApiTest(unittest.TestCase):
                 self.assertEqual(float(saved["calories"].sum()), 526.0)
                 self.assertEqual(saved.iloc[0]["created_via"], "text_ai")
                 self.assertFalse(bool(saved.iloc[0]["needs_review"]))
+                rebuild_summary.assert_not_called()
+
+    def test_manual_food_log_returns_today_payload_without_summary_rebuild(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir) / "nutrition_log.csv"
+            with patch.object(nutrition_module, "NUTRITION_LOG_PATH", temp_path), patch(
+                "backend.routes.nutrition.rebuild_daily_summary", return_value=None
+            ) as rebuild_summary:
+                response = self.client.post(
+                    "/api/nutrition/logs",
+                    json={
+                        "date": "2026-05-13",
+                        "meal_type": "Food",
+                        "food_name": "Kirkland bagel",
+                        "calories": 280,
+                        "protein": 11,
+                        "carbs": 56,
+                        "fat": 2,
+                    },
+                )
+
+                self.assertEqual(response.status_code, 200)
+                payload = response.json()
+                self.assertEqual(payload["date"], "2026-05-13")
+                self.assertEqual(len(payload["items"]), 1)
+                self.assertEqual(payload["totals"]["calories"], 280)
+                self.assertEqual(payload["status"], "live")
+                rebuild_summary.assert_not_called()
+
+    def test_finalize_day_persists_daily_summary_explicitly(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            nutrition_path = Path(temp_dir) / "nutrition_log.csv"
+            summary_path = Path(temp_dir) / "daily_nutrition_summary.csv"
+            targets = {"target_calories": 2400, "protein_grams": 190, "carb_grams": 300, "fat_grams": 70}
+            with patch.object(nutrition_module, "NUTRITION_LOG_PATH", nutrition_path), patch.object(
+                food_history_module, "DAILY_NUTRITION_SUMMARY_PATH", summary_path
+            ), patch("backend.routes.nutrition.load_nutrition_targets", return_value=targets):
+                self.client.post(
+                    "/api/nutrition/logs",
+                    json={
+                        "date": "2026-05-13",
+                        "meal_type": "Food",
+                        "food_name": "Nurri shake",
+                        "calories": 150,
+                        "protein": 30,
+                        "carbs": 4,
+                        "fat": 3,
+                    },
+                )
+
+                response = self.client.post("/api/nutrition/finalize-day?date=2026-05-13")
+
+                self.assertEqual(response.status_code, 200)
+                summary = response.json()["summary"]
+                self.assertEqual(summary["date"], "2026-05-13")
+                self.assertEqual(summary["total_calories"], 150)
+                self.assertTrue(summary["logged_day"])
+                self.assertTrue(summary["finalized"])
+                today = self.client.get("/api/nutrition/today?date=2026-05-13").json()
+                self.assertTrue(today["finalized"])
+                self.assertEqual(today["status"], "finalized")
+
+    def test_nutrition_history_reads_summaries_without_rebuilding_raw_logs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            summary_path = Path(temp_dir) / "daily_nutrition_summary.csv"
+            with patch.object(food_history_module, "DAILY_NUTRITION_SUMMARY_PATH", summary_path), patch(
+                "backend.routes.nutrition.build_daily_nutrition_summary",
+                side_effect=AssertionError("history must not rebuild raw nutrition logs"),
+            ):
+                response = self.client.get("/api/nutrition/history?days=7")
+
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("items", response.json())
 
     def test_meal_template_can_be_renamed_without_losing_foods(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -151,7 +231,7 @@ class FoodTextApiTest(unittest.TestCase):
             nutrition_path = Path(temp_dir) / "nutrition_log.csv"
             with patch.object(nutrition_module, "MEAL_TEMPLATES_PATH", templates_path), patch.object(
                 nutrition_module, "NUTRITION_LOG_PATH", nutrition_path
-            ), patch("backend.routes.nutrition.rebuild_daily_summary", return_value=None):
+            ), patch("backend.routes.nutrition.rebuild_daily_summary", return_value=None) as rebuild_summary:
                 self.client.post(
                     "/api/nutrition/meal-templates",
                     json={
@@ -174,6 +254,7 @@ class FoodTextApiTest(unittest.TestCase):
                 self.assertEqual(len(saved), 2)
                 self.assertEqual(set(saved["date"]), {"2026-05-13"})
                 self.assertEqual(float(saved["calories"].sum()), 396.0)
+                rebuild_summary.assert_not_called()
 
 
 if __name__ == "__main__":

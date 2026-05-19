@@ -1,6 +1,7 @@
 """FastAPI backend for the production Performance OS frontend."""
 
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from datetime import date, datetime, timezone
 import logging
 import math
@@ -15,12 +16,18 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 from backend.routes import body_metrics, export as data_export, goals, integrations, nutrition, personal_records, recovery, training, withings
-from backend.routes.utils import ACCESS_COOKIE, SESSION_MAX_AGE_SECONDS, create_session_token, dataframe_records, require_authenticated_request
+from backend.routes.utils import (
+    ACCESS_COOKIE,
+    SESSION_MAX_AGE_SECONDS,
+    create_session_token,
+    dataframe_records,
+    require_authenticated_request,
+    sanitize_sensitive_data,
+)
 from src.analytics.food_history import (
-    build_daily_nutrition_summary,
     calculate_calorie_adherence,
+    get_finalized_nutrition_history,
     get_food_history_for_optimization,
-    save_daily_nutrition_summary,
 )
 from src.analytics.muscle_balance import analyze_muscle_balance
 from src.analytics.personal_records import update_personal_records_from_logs
@@ -33,7 +40,7 @@ from src.analytics.weekly_report import generate_weekly_performance_report
 from src.analytics.workout_quality import calculate_workout_quality
 from src.body_metrics import BODY_METRICS_COLUMNS, load_body_metrics
 from src.goals import build_automatic_goals, load_user_goals
-from src.nutrition import NUTRITION_COLUMNS, calculate_daily_totals, load_nutrition_log, load_recent_nutrition_log
+from src.nutrition import NUTRITION_COLUMNS, NUTRITION_LOG_PATH, calculate_daily_totals, load_nutrition_log, load_recent_nutrition_log
 from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets, load_nutrition_targets
 from src.optimization.adaptive_nutrition_engine import build_adaptive_nutrition_recommendation
 from src.optimization.high_value_features import build_optimization_features
@@ -41,7 +48,7 @@ from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recomme
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
-from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, calculate_training_volume, load_recent_training_log, load_training_log, recent_training_window
+from src.training import TRAINING_COLUMNS, TRAINING_LOG_PATH, calculate_training_volume, load_recent_training_log, load_training_log, recent_training_window, training_raw_window_days
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import load_hevy_sync_state
 from src.storage import count_dataframe_rows, debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
@@ -113,14 +120,18 @@ LOGGED_REQUEST_PATHS = {
     "/api/settings",
     "/api/goals",
     "/api/dashboard/core",
+    "/api/debug/dashboard-core",
     "/api/dashboard",
 }
-LIVE_TRAINING_DAYS = 365
+LIVE_TRAINING_DAYS = training_raw_window_days()
 LIVE_TRAINING_MAX_ROWS = 20000
 CORE_TRAINING_DAYS = 90
 CORE_TRAINING_MAX_ROWS = 5000
 GOALS_TRAINING_DAYS = 90
 WORKLOAD_TRAINING_DAYS = 84
+CORE_BLOCK_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_BLOCK_TIMEOUT_MS", "900"))
+CORE_DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_DB_TIMEOUT_MS", "750"))
+CORE_BLOCK_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("DASHBOARD_CORE_WORKERS", "4")), thread_name_prefix="dashboard-core")
 
 
 @app.middleware("http")
@@ -209,6 +220,11 @@ class AuthLoginPayload(BaseModel):
     password: str = ""
 
 
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "300"))
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "20"))
+_LOGIN_FAILURES: dict[str, list[float]] = {}
+
+
 def _production_like() -> bool:
     return bool(
         os.getenv("RAILWAY_ENVIRONMENT")
@@ -219,6 +235,12 @@ def _production_like() -> bool:
 
 
 def _session_cookie_options() -> dict:
+    # Auth/session deployment contract:
+    # - Railway backend must define SESSION_SECRET and APP_PASSWORD.
+    # - Vercel/Next should proxy browser /api/* calls to BACKEND_API_URL or
+    #   NEXT_PUBLIC_API_URL so the performance_os_access cookie remains usable.
+    # Keep SameSite/Secure behavior conservative here; production cross-site
+    # cookies require Secure + SameSite=None, local dev uses lax.
     production = _production_like()
     return {
         "httponly": True,
@@ -229,8 +251,36 @@ def _session_cookie_options() -> dict:
     }
 
 
+def _login_rate_key(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",", 1)[0].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
+
+def _recent_login_failures(key: str, now: float | None = None) -> list[float]:
+    current = now or time.time()
+    cutoff = current - LOGIN_RATE_LIMIT_WINDOW_SECONDS
+    attempts = [timestamp for timestamp in _LOGIN_FAILURES.get(key, []) if timestamp >= cutoff]
+    if attempts:
+        _LOGIN_FAILURES[key] = attempts
+    else:
+        _LOGIN_FAILURES.pop(key, None)
+    return attempts
+
+
+def _enforce_login_rate_limit(request: Request) -> str:
+    key = _login_rate_key(request)
+    if len(_recent_login_failures(key)) >= LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many login attempts. Try again shortly.",
+        )
+    return key
+
+
 @app.post("/api/auth/login")
-def auth_login(payload: AuthLoginPayload, response: Response) -> dict:
+def auth_login(payload: AuthLoginPayload, response: Response, request: Request) -> dict:
     """Validate the private access password and issue the backend session cookie."""
     configured_password = os.getenv("APP_PASSWORD", "")
     session_secret = os.getenv("SESSION_SECRET", "")
@@ -238,9 +288,12 @@ def auth_login(payload: AuthLoginPayload, response: Response) -> dict:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="APP_PASSWORD is not configured on the backend")
     if not session_secret:
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="SESSION_SECRET is not configured on the backend")
+    rate_key = _enforce_login_rate_limit(request)
     if payload.password != configured_password:
+        _LOGIN_FAILURES.setdefault(rate_key, []).append(time.time())
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password")
 
+    _LOGIN_FAILURES.pop(rate_key, None)
     response.set_cookie(
         key=ACCESS_COOKIE,
         value=create_session_token(session_secret),
@@ -279,13 +332,14 @@ def initialize_storage() -> None:
 @app.on_event("shutdown")
 def log_shutdown() -> None:
     """Log ASGI shutdown; the platform provides the external stop reason."""
-    logger.warning("Backend shutdown signal received; no API-managed background workers are running.")
+    CORE_BLOCK_EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    logger.warning("Backend shutdown signal received; no polling/background sync workers are running.")
 
 
 @app.get("/api/debug/db")
 def debug_db() -> dict:
     """Return a fresh Postgres SELECT 1 diagnostic."""
-    return debug_database_connection()
+    return _public_json(debug_database_connection())
 
 
 @app.get("/api/debug/startup")
@@ -314,7 +368,8 @@ def debug_startup() -> dict:
 
     db = measure("db", debug_database_connection)
     training_rows_total = measure("count_training_rows_total", lambda: count_dataframe_rows("training_log", TRAINING_LOG_PATH))
-    nutrition_df = measure("load_nutrition_log", load_nutrition_log)
+    nutrition_rows_total = measure("count_nutrition_rows_total", lambda: count_dataframe_rows("nutrition_log", NUTRITION_LOG_PATH))
+    nutrition_df = measure("load_recent_nutrition_log_2d", lambda: load_recent_nutrition_log(days=2, max_rows=500, statement_timeout_ms=CORE_DB_STATEMENT_TIMEOUT_MS))
     body_df = measure("load_body_metrics", load_body_metrics)
     recovery_df = measure("load_recovery_log", load_recovery_log)
     training_df = measure("load_recent_training_log_90d", lambda: load_recent_training_log(days=90, max_rows=10000))
@@ -329,7 +384,7 @@ def debug_startup() -> dict:
     )
     failed = [block for block in blocks if block.get("status") == "error"]
     slow = sorted(blocks, key=lambda item: float(item.get("duration_ms") or 0), reverse=True)
-    return _json_safe(
+    return _public_json(
         {
             "status": "ok" if not failed else "degraded",
             "storage": "postgres" if use_database() else "local_files",
@@ -337,7 +392,8 @@ def debug_startup() -> dict:
             "counts": {
                 "training_rows_total": training_rows_total if isinstance(training_rows_total, int) else None,
                 "training_rows_90d": len(training_90d) if isinstance(training_90d, pd.DataFrame) else None,
-                "nutrition_rows": len(nutrition_df) if isinstance(nutrition_df, pd.DataFrame) else None,
+                "nutrition_rows_total": nutrition_rows_total if isinstance(nutrition_rows_total, int) else None,
+                "nutrition_rows_recent": len(nutrition_df) if isinstance(nutrition_df, pd.DataFrame) else None,
                 "body_metric_rows": len(body_df) if isinstance(body_df, pd.DataFrame) else None,
                 "recovery_rows": len(recovery_df) if isinstance(recovery_df, pd.DataFrame) else None,
             },
@@ -414,6 +470,105 @@ def _safe_dashboard_block(
     return result
 
 
+def _safe_core_block(
+    name: str,
+    dashboard_errors: list[dict],
+    dashboard_status: dict[str, bool],
+    dashboard_timings_ms: dict[str, float],
+    fallback,
+    func,
+    *,
+    timeout_ms: int = CORE_BLOCK_TIMEOUT_MS,
+):
+    """Run one dashboard-core block with a hard request-facing timeout."""
+    started = time.perf_counter()
+    logger.info("Dashboard core block started: %s", name)
+    future = CORE_BLOCK_EXECUTOR.submit(func)
+    try:
+        value = future.result(timeout=max(timeout_ms, 1) / 1000)
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        record = {"block": name, "name": name, "status": "ok", "duration_ms": duration_ms}
+        if isinstance(value, pd.DataFrame):
+            record["rows"] = len(value)
+            logger.info("Dashboard core block completed: %s rows=%s in %.1f ms", name, len(value), duration_ms)
+        else:
+            logger.info("Dashboard core block completed: %s in %.1f ms", name, duration_ms)
+        dashboard_errors.append(record)
+        dashboard_status[name] = True
+        dashboard_timings_ms[name] = duration_ms
+        return value
+    except FutureTimeoutError:
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        future.cancel()
+        logger.warning("Dashboard core block timed out: %s after %.1f ms", name, duration_ms)
+        dashboard_errors.append(
+            {
+                "block": name,
+                "name": name,
+                "status": "timeout",
+                "error_type": "TimeoutError",
+                "message": f"{name} exceeded {timeout_ms}ms and was skipped.",
+                "duration_ms": duration_ms,
+            }
+        )
+        dashboard_status[name] = False
+        dashboard_timings_ms[name] = duration_ms
+    except Exception as exc:
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Dashboard core block failed: %s", name)
+        dashboard_errors.append(
+            {
+                "block": name,
+                "name": name,
+                "status": "error",
+                "error_type": type(exc).__name__,
+                "message": str(exc) or type(exc).__name__,
+                "duration_ms": duration_ms,
+            }
+        )
+        dashboard_status[name] = False
+        dashboard_timings_ms[name] = duration_ms
+    try:
+        return fallback() if callable(fallback) else fallback
+    except Exception as fallback_exc:
+        logger.exception("Dashboard core fallback failed: %s", name)
+        dashboard_errors.append(
+            {
+                "block": f"{name}_fallback",
+                "name": f"{name}_fallback",
+                "status": "error",
+                "error_type": type(fallback_exc).__name__,
+                "message": str(fallback_exc) or type(fallback_exc).__name__,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            }
+        )
+        return None
+
+
+def _core_dataframe_block(
+    name: str,
+    loader,
+    columns: list[str],
+    dashboard_errors: list[dict],
+    dashboard_status: dict[str, bool],
+    dashboard_timings_ms: dict[str, float],
+    *,
+    timeout_ms: int = CORE_BLOCK_TIMEOUT_MS,
+) -> pd.DataFrame:
+    value = _safe_core_block(
+        name,
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: pd.DataFrame(columns=columns),
+        loader,
+        timeout_ms=timeout_ms,
+    )
+    if isinstance(value, pd.DataFrame):
+        return value
+    return pd.DataFrame(columns=columns)
+
+
 def _load_dashboard_frame(
     name: str,
     loader,
@@ -439,6 +594,20 @@ def _recent_training_for_analytics(days: int = LIVE_TRAINING_DAYS, max_rows: int
     training_df = load_recent_training_log(days=days, max_rows=max_rows)
     logger.info("load_recent_training_log(%sd) rows=%s took %.1f ms", days, len(training_df), (time.perf_counter() - started) * 1000)
     return training_df
+
+
+def _recent_training_for_core() -> pd.DataFrame:
+    started = time.perf_counter()
+    training_df = load_recent_training_log(days=30, max_rows=500, statement_timeout_ms=CORE_DB_STATEMENT_TIMEOUT_MS)
+    logger.info("dashboard_core load_recent_training_log rows=%s took %.1f ms", len(training_df), (time.perf_counter() - started) * 1000)
+    return training_df
+
+
+def _recent_nutrition_for_core() -> pd.DataFrame:
+    started = time.perf_counter()
+    nutrition_df = load_recent_nutrition_log(days=2, max_rows=500, statement_timeout_ms=CORE_DB_STATEMENT_TIMEOUT_MS)
+    logger.info("dashboard_core load_recent_nutrition_log rows=%s took %.1f ms", len(nutrition_df), (time.perf_counter() - started) * 1000)
+    return nutrition_df
 
 
 def _training_window(training_df: pd.DataFrame, days: int) -> pd.DataFrame:
@@ -489,6 +658,11 @@ def _json_safe(value):
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _public_json(value):
+    """Return JSON-safe API output with secret-like fields redacted."""
+    return _json_safe(sanitize_sensitive_data(value))
 
 
 def _target_number(targets: dict, key: str, default: float = 0.0) -> float:
@@ -771,7 +945,7 @@ def _fallback_extra_run_readiness() -> dict:
 
 
 def _failed_dashboard_blocks(blocks: list[dict]) -> list[dict]:
-    return [block for block in blocks if block.get("status") == "error"]
+    return [block for block in blocks if block.get("status") in {"error", "timeout"}]
 
 
 def _dashboard_status_label(blocks: list[dict]) -> str:
@@ -819,6 +993,18 @@ def _safe_hevy_sync_debug() -> dict:
         "last_error": last_error,
         "last_result": state.get("last_result", {}) if isinstance(state.get("last_result", {}), dict) else {},
         "safe_mode": bool(state.get("safe_mode") or last_error),
+    }
+
+
+def _deferred_hevy_sync_debug() -> dict:
+    return {
+        "status": "deferred",
+        "last_sync_at": "",
+        "last_event_cursor": "",
+        "last_error": "",
+        "last_result": {},
+        "safe_mode": True,
+        "message": "Hevy sync state is deferred on dashboard core startup.",
     }
 
 
@@ -911,7 +1097,7 @@ def _core_dashboard_fallback(exc: Exception, duration_ms: float) -> dict:
             "dashboard_status": "degraded",
             "errors": blocks,
             "blocks": blocks,
-            "hevy_sync": _safe_hevy_sync_debug(),
+            "hevy_sync": _deferred_hevy_sync_debug(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": {"dashboard": False},
             "timings_ms": {"dashboard": round(duration_ms, 1)},
@@ -974,91 +1160,150 @@ def _build_dashboard_core_payload() -> dict:
     dashboard_timings_ms: dict[str, float] = {}
 
     logger.info(
-        "Dashboard core blocks configured: nutrition_recent=%sd/%s rows, training_recent=%sd/%s rows; advanced analytics disabled.",
-        7,
-        2000,
-        CORE_TRAINING_DAYS,
-        CORE_TRAINING_MAX_ROWS,
+        "Dashboard core blocks configured: nutrition_recent=%sd/%s rows, training_recent=%sd/%s rows, block_timeout=%sms; advanced analytics disabled.",
+        2,
+        500,
+        30,
+        500,
+        CORE_BLOCK_TIMEOUT_MS,
     )
-    nutrition_df = _load_dashboard_frame("nutrition_loaded", lambda: load_recent_nutrition_log(days=7, max_rows=2000), NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(CORE_TRAINING_DAYS, CORE_TRAINING_MAX_ROWS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    nutrition_df = _core_dataframe_block("load_nutrition", _recent_nutrition_for_core, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    body_metrics_df = _core_dataframe_block("load_body_metrics", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _core_dataframe_block("load_training", _recent_training_for_core, TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    recovery_df = pd.DataFrame(columns=RECOVERY_COLUMNS)
+    sleep_df = pd.DataFrame(columns=SLEEP_ENTRY_COLUMNS)
+    dashboard_errors.append({"block": "load_recovery", "name": "load_recovery", "status": "skipped", "duration_ms": 0, "message": "Deferred outside dashboard core startup."})
+    dashboard_errors.append({"block": "load_sleep", "name": "load_sleep", "status": "skipped", "duration_ms": 0, "message": "Deferred outside dashboard core startup."})
+    dashboard_status["load_recovery"] = True
+    dashboard_status["load_sleep"] = True
+    dashboard_timings_ms["load_recovery"] = 0
+    dashboard_timings_ms["load_sleep"] = 0
 
-    goals = _safe_dashboard_block(
-        "goals_core",
+    goals = _safe_core_block(
+        "build_goals",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         _fallback_goals,
         lambda: build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=pd.DataFrame(columns=TRAINING_COLUMNS)),
+        timeout_ms=700,
     )
     if not isinstance(goals, dict):
         goals = _fallback_goals()
-    targets = _safe_dashboard_block(
-        "targets_core",
+    targets = _safe_core_block(
+        "calculate_targets",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: _fallback_targets(goals),
-        lambda: load_nutrition_targets() or _fallback_targets(goals),
+        lambda: load_nutrition_targets() or calculate_macro_targets(
+            goals,
+            nutrition_df=pd.DataFrame(columns=NUTRITION_COLUMNS),
+            training_df=pd.DataFrame(columns=TRAINING_COLUMNS),
+            recovery_df=pd.DataFrame(columns=RECOVERY_COLUMNS),
+            body_metrics_df=body_metrics_df.tail(30) if isinstance(body_metrics_df, pd.DataFrame) else pd.DataFrame(columns=BODY_METRICS_COLUMNS),
+            workload_data=_fallback_training_workload(),
+        ),
+        timeout_ms=700,
     )
     if not isinstance(targets, dict):
         targets = _fallback_targets(goals)
-    nutrition_totals = _safe_dashboard_block(
-        "nutrition_today_core",
+    nutrition_totals = _safe_core_block(
+        "food_summary",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: {"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0},
         lambda: calculate_daily_totals(nutrition_df, today),
+        timeout_ms=300,
     )
-    latest_bodyweight, bodyweight_trend = _safe_dashboard_block(
-        "bodyweight_core",
+    latest_bodyweight, bodyweight_trend = _safe_core_block(
+        "weight_summary",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: (None, []),
         lambda: _bodyweight_snapshot(body_metrics_df),
+        timeout_ms=400,
     )
-    latest_workout = _safe_dashboard_block(
-        "latest_workout_core",
+    latest_workout = _safe_core_block(
+        "latest_workout",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: None,
         lambda: _latest_workout_snapshot(training_df),
+        timeout_ms=300,
     )
 
-    food_tile = _safe_dashboard_block(
+    food_tile = _safe_core_block(
         "food_tile_core",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: _food_dashboard_tile({"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}, targets),
         lambda: _food_dashboard_tile(nutrition_totals, targets),
+        timeout_ms=300,
     )
     if not isinstance(food_tile, dict):
         food_tile = _food_dashboard_tile({"calories": 0.0, "protein": 0.0, "carbs": 0.0, "fat": 0.0}, targets)
-    weight_tile = _safe_dashboard_block(
+    weight_tile = _safe_core_block(
         "weight_tile_core",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today),
         lambda: _weight_dashboard_tile(body_metrics_df, bodyweight_trend, today),
+        timeout_ms=300,
     )
     if not isinstance(weight_tile, dict):
         weight_tile = _weight_dashboard_tile(pd.DataFrame(columns=BODY_METRICS_COLUMNS), [], today)
-    lift_tile = _safe_dashboard_block(
+    lift_tile = _safe_core_block(
         "lift_tile_core",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
-        lambda: _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today),
-        lambda: _lift_performance_tile(training_df, today),
+        lambda: _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today),
+        lambda: _lift_performance_tile_core(training_df, today),
+        timeout_ms=400,
     )
     if not isinstance(lift_tile, dict):
-        lift_tile = _lift_performance_tile(pd.DataFrame(columns=TRAINING_COLUMNS), today)
+        lift_tile = _lift_performance_tile_core(pd.DataFrame(columns=TRAINING_COLUMNS), today)
+    latest_recovery = _safe_core_block(
+        "recovery_summary",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: None,
+        lambda: dataframe_records(recovery_df.sort_values("date").tail(1))[0] if not recovery_df.empty else None,
+        timeout_ms=300,
+    )
+    recovery_tile = _safe_core_block(
+        "recovery_tile_core",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        lambda: {**_recovery_dashboard_tile(recovery_df, latest_recovery, today), "extra_run_readiness": _fallback_extra_run_readiness()},
+        timeout_ms=300,
+    )
+    counts = _safe_core_block(
+        "counts",
+        dashboard_errors,
+        dashboard_status,
+        dashboard_timings_ms,
+        lambda: {"nutrition": 0, "body_metrics": 0, "recovery": 0, "sleep": 0, "training": 0},
+        lambda: {
+            "nutrition": len(nutrition_df),
+            "body_metrics": len(body_metrics_df),
+            "recovery": len(recovery_df),
+            "sleep": len(sleep_df),
+            "training": len(training_df),
+        },
+        timeout_ms=200,
+    )
+    if not isinstance(counts, dict):
+        counts = {"nutrition": 0, "body_metrics": 0, "recovery": 0, "sleep": 0, "training": 0}
 
     payload = {
         "date": today,
@@ -1068,14 +1313,7 @@ def _build_dashboard_core_payload() -> dict:
         "workout_quality": _fallback_workout_quality(),
         "todays_action": _fallback_todays_action(),
         "weekly_report": _fallback_weekly_report(),
-        "recovery": _safe_dashboard_block(
-            "recovery_tile_core",
-            dashboard_errors,
-            dashboard_status,
-            dashboard_timings_ms,
-            lambda: {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
-            lambda: {**_recovery_dashboard_tile(pd.DataFrame(columns=RECOVERY_COLUMNS), None, today), "extra_run_readiness": _fallback_extra_run_readiness()},
-        ),
+        "recovery": recovery_tile,
         "prs": {"bench_press": None, "mile_time": None},
         "goals": goals,
         "targets": targets,
@@ -1085,7 +1323,7 @@ def _build_dashboard_core_payload() -> dict:
         "latest_bodyweight": latest_bodyweight,
         "bodyweight_trend": bodyweight_trend,
         "weight_feedback": _fallback_weight_feedback(),
-        "latest_recovery": None,
+        "latest_recovery": latest_recovery,
         "recovery_trend": [],
         "latest_workout": latest_workout,
         "strength_trend_summary": {"exercise": "", "label": "deferred", "summary": "Strength trends hydrate after startup."},
@@ -1098,20 +1336,14 @@ def _build_dashboard_core_payload() -> dict:
         "personal_learning": _fallback_personal_learning(),
         "optimization": _fallback_optimization_features(targets),
         "recommendation": _fallback_performance_plan(),
-        "counts": {
-            "nutrition": len(nutrition_df),
-            "body_metrics": len(body_metrics_df),
-            "recovery": 0,
-            "sleep": 0,
-            "training": len(training_df),
-        },
+        "counts": counts,
         "errors": _failed_dashboard_blocks(dashboard_errors),
         "debug": {
             "dashboard_status": _dashboard_status_label(dashboard_errors),
             "mode": "core",
             "errors": _failed_dashboard_blocks(dashboard_errors),
             "blocks": dashboard_errors,
-            "hevy_sync": _safe_hevy_sync_debug(),
+            "hevy_sync": _deferred_hevy_sync_debug(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
             "status": dashboard_status,
             "timings_ms": dashboard_timings_ms,
@@ -1186,23 +1418,15 @@ def _build_dashboard_payload() -> dict:
     if not isinstance(targets, dict):
         targets = _fallback_targets(goals)
     daily_nutrition_summary = _safe_dashboard_block(
-        "daily_nutrition_summary",
+        "load_finalized_daily_nutrition_summary",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
         lambda: pd.DataFrame(),
-        lambda: build_daily_nutrition_summary(nutrition_df, targets),
+        lambda: get_finalized_nutrition_history(60),
     )
     if not isinstance(daily_nutrition_summary, pd.DataFrame):
         daily_nutrition_summary = pd.DataFrame()
-    _safe_dashboard_block(
-        "save_daily_nutrition_summary",
-        dashboard_errors,
-        dashboard_status,
-        dashboard_timings_ms,
-        lambda: None,
-        lambda: save_daily_nutrition_summary(daily_nutrition_summary),
-    )
     nutrition_for_optimization = _safe_dashboard_block(
         "food_history_optimization",
         dashboard_errors,
@@ -1353,7 +1577,7 @@ def _build_dashboard_payload() -> dict:
         lambda: generate_performance_recommendations(
             recovery_df=recovery_df,
             training_df=training_df,
-            nutrition_df=nutrition_df,
+            nutrition_df=nutrition_for_optimization,
             body_metrics_df=body_metrics_df,
             target_calories=targets.get("target_calories"),
             target_protein=targets.get("protein_grams"),
@@ -1635,7 +1859,39 @@ def dashboard_core() -> dict:
     payload["debug"]["total_duration_ms"] = elapsed_ms
     status_label = payload.get("debug", {}).get("dashboard_status", "ok")
     logger.info("Dashboard core request completed in %.1f ms with status=%s", elapsed_ms, status_label)
-    return _json_safe(payload)
+    return _public_json(payload)
+
+
+@app.get("/api/debug/dashboard-core")
+def dashboard_core_debug() -> dict:
+    """Return per-block dashboard-core diagnostics without running advanced analytics."""
+    started = time.perf_counter()
+    logger.info("Dashboard core debug request started.")
+    try:
+        payload = _build_dashboard_core_payload()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Dashboard core debug fell back to safe diagnostics.")
+        payload = _core_dashboard_fallback(exc, elapsed_ms)
+        payload.setdefault("debug", {})["mode"] = "core_debug_fallback"
+    debug = payload.get("debug", {}) if isinstance(payload, dict) else {}
+    blocks = debug.get("blocks") if isinstance(debug.get("blocks"), list) else []
+    slow = sorted(blocks, key=lambda item: float(item.get("duration_ms") or 0), reverse=True)
+    failed = _failed_dashboard_blocks(blocks)
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    return _public_json(
+        {
+            "status": debug.get("dashboard_status") or _dashboard_status_label(blocks),
+            "storage": "postgres" if use_database() else "local_files",
+            "counts": payload.get("counts", {}) if isinstance(payload, dict) else {},
+            "blocks": blocks,
+            "failed_blocks": failed,
+            "likely_bottleneck": slow[0].get("block") if slow else None,
+            "suggested_action": _dashboard_suggested_action(blocks),
+            "duration_ms": duration_ms,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
 
 
 @app.get("/api/dashboard")
@@ -1656,7 +1912,7 @@ def dashboard() -> dict:
     status_label = payload.get("debug", {}).get("dashboard_status", "ok")
     failed_count = len(payload.get("debug", {}).get("errors", []))
     logger.info("Dashboard request completed in %.1f ms with status=%s failed_blocks=%s", elapsed_ms, status_label, failed_count)
-    return _json_safe(payload)
+    return _public_json(payload)
 
 
 @app.get("/api/dashboard/debug")
@@ -1672,7 +1928,39 @@ def dashboard_debug() -> dict:
         payload = _core_dashboard_fallback(exc, elapsed_ms)
     debug_payload = _dashboard_debug_payload(payload)
     debug_payload["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
-    return _json_safe(debug_payload)
+    return _public_json(debug_payload)
+
+
+@app.post("/api/recommendations/run")
+def run_recommendations(date: str | None = None, finalize_day: bool = True) -> dict:
+    """Explicitly finalize nutrition and run the heavier recommendation stack."""
+    started = time.perf_counter()
+    logger.info("Manual recommendation engine run started finalize_day=%s date=%s", finalize_day, date)
+    finalized_summary = None
+    if finalize_day:
+        finalized_summary = nutrition.finalize_daily_nutrition_summary(date)
+    try:
+        payload = _build_dashboard_payload()
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 1)
+        logger.exception("Manual recommendation engine fell back to core payload.")
+        payload = _core_dashboard_fallback(exc, elapsed_ms)
+        payload.setdefault("debug", {})["mode"] = "recommendation_fallback"
+    duration_ms = round((time.perf_counter() - started) * 1000, 1)
+    logger.info("Manual recommendation engine run completed in %.1f ms", duration_ms)
+    return _public_json(
+        {
+            "status": "ok",
+            "message": "Recommendation engine completed from finalized daily nutrition summaries.",
+            "finalized_summary": finalized_summary,
+            "recommendation": payload.get("recommendation"),
+            "adaptive_recommendation": payload.get("adaptive_recommendation"),
+            "lean_bulk_decision": payload.get("lean_bulk_decision"),
+            "optimization": payload.get("optimization"),
+            "dashboard": payload,
+            "duration_ms": duration_ms,
+        }
+    )
 
 
 def _left(actual: float, target: float | None) -> dict:
@@ -1908,6 +2196,31 @@ def _lift_performance_tile(training_df: pd.DataFrame, today: str) -> dict:
         "comparison": f"{today_row['workout_type']} · {today_row['muscle_group']}",
         "today_volume": round(today_volume, 0),
         "percent_vs_average": round(percent, 1),
+        "run_summary": run_summary,
+    }
+
+
+def _lift_performance_tile_core(training_df: pd.DataFrame, today: str) -> dict:
+    """Return only the planned/completed training state needed for startup."""
+    day_summary = summarize_training_day(training_df, today)
+    run_summary = _today_run_summary(training_df, today)
+    return {
+        "planned_workout": day_summary["planned_workout"],
+        "completed_workouts": day_summary["completed_workouts"],
+        "completed_summary": day_summary["completed_summary"],
+        "schedule_match": day_summary["schedule_match"],
+        "match_label": day_summary["match_label"],
+        "sources": day_summary["sources"],
+        "has_run": day_summary["has_run"],
+        "has_lift": day_summary["has_lift"],
+        "cardio_indicator": day_summary["cardio_indicator"],
+        "extra_run_added": day_summary["extra_run_added"],
+        "recovery_status_relative_to_plan": day_summary["recovery_status_relative_to_plan"],
+        "status": f"Today: {day_summary['planned_workout']}",
+        "summary": f"Completed: {day_summary['completed_summary']}" if day_summary["completed_summary"] else "Workout not logged yet",
+        "comparison": None,
+        "today_volume": None,
+        "percent_vs_average": None,
         "run_summary": run_summary,
     }
 

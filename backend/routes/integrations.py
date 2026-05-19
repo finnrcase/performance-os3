@@ -15,6 +15,7 @@ from fastapi.responses import RedirectResponse
 from openai import APIConnectionError, APIStatusError, AuthenticationError, OpenAI, RateLimitError
 from pydantic import BaseModel, Field
 
+from backend.routes.utils import sanitize_sensitive_data
 from src.config import INTEGRATION_FIELDS, fitbit_google_health_status, integration_status, load_settings, mask_secret, normalize_accent_color, save_settings
 from src.ai.food_parser import get_openai_key_status
 from src.body_metrics import load_body_metrics
@@ -643,6 +644,25 @@ def _settings_response(settings: dict, *, include_live_status: bool = False) -> 
     }
 
 
+def _lightweight_services_from_report(report: dict) -> dict:
+    services: dict[str, dict] = {}
+    for key in ["openai", "hevy", "strava", "withings"]:
+        component = report.get(key, {}) if isinstance(report.get(key), dict) else {}
+        status = str(component.get("status", "gray") or "gray")
+        configured = bool(component.get("configured"))
+        if key == "strava":
+            configured = configured or bool(os.getenv("STRAVA_CLIENT_ID") and os.getenv("STRAVA_CLIENT_SECRET") and os.getenv("STRAVA_ACCESS_TOKEN") and os.getenv("STRAVA_REFRESH_TOKEN"))
+        services[key] = {
+            "configured": configured,
+            "status": "error" if status == "red" else "ok" if configured else "unconfigured",
+            "message": component.get("message", ""),
+            "last_synced_at": component.get("last_successful_sync", ""),
+            "latest_record": component.get("latest_record", ""),
+            "reconnect_required": bool(component.get("reconnect_required")),
+        }
+    return services
+
+
 @router.get("/api/settings")
 def get_settings() -> dict:
     """Return lightweight masked local settings without integration probes."""
@@ -676,9 +696,12 @@ def update_settings(payload: SettingsPayload) -> dict:
 def get_integration_statuses(external_checks: bool = Query(default=True)) -> dict:
     """Return a secret-safe integration diagnostics report plus legacy settings data."""
     settings = load_settings()
-    response = _settings_response(settings, include_live_status=True)
-    response.update(build_integration_status_report(settings=settings, run_external_checks=external_checks))
-    return response
+    response = _settings_response(settings, include_live_status=external_checks)
+    report = build_integration_status_report(settings=settings, run_external_checks=external_checks)
+    response.update(report)
+    if not external_checks:
+        response["services"] = _lightweight_services_from_report(report)
+    return sanitize_sensitive_data(response)
 
 
 @router.get("/api/integrations/test")
@@ -702,7 +725,7 @@ def test_api_connections() -> dict:
             except Exception:
                 logger.exception("%s API connection test failed without exposing credentials.", name.title())
                 results[name] = _test_result("api_unreachable", f"{name.title()} API test failed unexpectedly.", checked_at)
-    return {"checkedAt": checked_at, **results}
+    return sanitize_sensitive_data({"checkedAt": checked_at, **results})
 
 
 @router.get("/api/integrations/strava/auth-url")

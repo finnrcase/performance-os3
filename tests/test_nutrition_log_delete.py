@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,13 @@ from src import nutrition as nutrition_module
 
 
 class NutritionLogDeleteTest(unittest.TestCase):
+    def setUp(self):
+        self.env_patch = patch.dict(os.environ, {"DATABASE_URL": ""})
+        self.env_patch.start()
+
+    def tearDown(self):
+        self.env_patch.stop()
+
     def test_food_log_ids_delete_single_entry_and_clear_date(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             nutrition_path = Path(temp_dir) / "nutrition_log.csv"
