@@ -4,7 +4,7 @@
     "builder": "NIXPACKS"
   },
   "deploy": {
-    "startCommand": "uvicorn backend.main:app --host 0.0.0.0 --port $PORT",
+    "startCommand": "DASHBOARD_CORE_BLOCK_TIMEOUT_MS=3000 DASHBOARD_CORE_DB_TIMEOUT_MS=2500 uvicorn backend.main:app --host 0.0.0.0 --port $PORT",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300
   }
