@@ -1371,7 +1371,7 @@ async function trackedApiGet<T>(
   try {
     const url = apiUrl(meta.path);
     if (meta.key === "dashboard_core") {
-      console.info("[startup] requesting dashboard core", url);
+      console.info("[startup] dashboard_core url", url);
     }
     const response = await fetchWithTimeout(url, { cache: "no-store", credentials: "include" }, timeoutMs);
     const responseText = await response.text();
@@ -7377,6 +7377,10 @@ function StartupDebugPage({
           title="Startup Debug"
           action={
             <div className="flex flex-wrap gap-2">
+              <button type="button" onClick={() => window.open("/api/debug/proxy-dashboard-core", "_blank", "noopener,noreferrer")} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                <ExternalLink className="h-4 w-4" />
+                Core probe
+              </button>
               <button type="button" onClick={() => window.open("/api/debug/proxy", "_blank", "noopener,noreferrer")} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
                 <ExternalLink className="h-4 w-4" />
                 Proxy probe
@@ -7892,8 +7896,8 @@ export default function Home() {
         label: "Dashboard",
         path: "/api/dashboard/core",
         timeoutMs: STARTUP_API_TIMEOUT_MS,
-        required: true,
-        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug)),
+        required: false,
+        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: false }, STARTUP_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "goals",
@@ -7918,7 +7922,9 @@ export default function Home() {
 
     const runStartupStep = async (step: (typeof steps)[number]) => {
       const started = performance.now();
+      console.info("[startup] starting", step.key);
       await step.run();
+      console.info("[startup] finished", step.key);
       console.info(`[startup] ${step.key} loaded in ${Math.round(performance.now() - started)} ms`);
     };
 
