@@ -64,7 +64,12 @@ def get_exercise_history(training_df: pd.DataFrame, exercise_name: str) -> pd.Da
     df = _strength_rows(training_df)
     if df.empty or not exercise_name:
         return pd.DataFrame(columns=["date", "weight", "reps", "rpe", "volume", "estimated_1rm"])
-    return df[df["exercise"].str.lower() == str(exercise_name).strip().lower()].reset_index(drop=True)
+    df = df[df["exercise"].str.lower() == str(exercise_name).strip().lower()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=["date", "weight", "reps", "rpe", "volume", "estimated_1rm"])
+    latest = df["date"].max()
+    df = df[df["date"] >= latest - pd.Timedelta(days=84)].copy()
+    return df.reset_index(drop=True)
 
 
 def calculate_volume_by_exercise(training_df: pd.DataFrame) -> pd.DataFrame:

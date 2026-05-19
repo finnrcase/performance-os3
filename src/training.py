@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, mark_dataframe_deletes, save_dataframe
+from src.storage import load_dataframe, load_dataframe_recent, mark_dataframe_deletes, save_dataframe
 from src.training_schedule import is_run_row
 
 TRAINING_COLUMNS = [
@@ -121,10 +121,7 @@ def _hydrate_legacy_import_metadata(training_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def load_training_log() -> pd.DataFrame:
-    """Load training entries from local CSV."""
-    training_df = load_dataframe("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS)
-
+def _normalize_training_log(training_df: pd.DataFrame) -> pd.DataFrame:
     for column in TRAINING_COLUMNS:
         if column not in training_df.columns:
             training_df[column] = np.nan
@@ -151,6 +148,16 @@ def load_training_log() -> pd.DataFrame:
         training_df[column] = training_df[column].fillna("").astype(str)
 
     return _hydrate_legacy_import_metadata(training_df)
+
+
+def load_training_log() -> pd.DataFrame:
+    """Load training entries from local CSV/Postgres."""
+    return _normalize_training_log(load_dataframe("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS))
+
+
+def load_recent_training_log(days: int = 365, max_rows: int = 20000) -> pd.DataFrame:
+    """Load a bounded recent training slice for live dashboard/goal analytics."""
+    return _normalize_training_log(load_dataframe_recent("training_log", TRAINING_LOG_PATH, TRAINING_COLUMNS, days=days, max_rows=max_rows))
 
 
 def save_training_log(df) -> None:

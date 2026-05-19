@@ -26,7 +26,7 @@ from src.nutrition import calculate_daily_totals, load_nutrition_log
 from src.nutrition_targets import calculate_macro_targets
 from src.goals import build_automatic_goals, load_user_goals
 from src.recovery import load_recovery_log
-from src.training import add_training_entry, load_training_log, move_workout_date
+from src.training import add_training_entry, load_recent_training_log, load_training_log, move_workout_date
 from src.training_schedule import load_training_schedule_profile, planned_training_for_date, save_training_schedule_profile
 
 
@@ -212,14 +212,14 @@ def get_training_exercises() -> dict:
 @router.get("/api/training/strength-trends")
 def get_strength_trends(exercise_name: str = "", date_range: str = "12w", muscle_group: str = "") -> dict:
     """Return exercise-level and muscle-group strength trend analytics."""
-    training_df = load_training_log()
+    training_df = load_recent_training_log(days=84)
     if not exercise_name and not training_df.empty:
         exercise_counts = training_df["exercise"].fillna("").astype(str).str.strip()
         exercise_counts = exercise_counts[exercise_counts != ""]
         if not exercise_counts.empty:
             exercise_name = exercise_counts.value_counts().index[0]
     return {
-        "exercise_options": get_training_exercises()["items"],
+        "exercise_options": sorted(training_df["exercise"].fillna("").astype(str).str.strip().replace("", pd.NA).dropna().unique().tolist()) if not training_df.empty else [],
         "selected_exercise": exercise_name,
         "trend": calculate_strength_trend(training_df, exercise_name),
         "volume_by_exercise": dataframe_records(calculate_volume_by_exercise(training_df)),

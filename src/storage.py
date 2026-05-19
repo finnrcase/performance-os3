@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -323,6 +324,45 @@ def load_dataframe(dataset: str, path: Path, columns: list[str]) -> pd.DataFrame
         if not path.exists():
             return pd.DataFrame(columns=columns)
         df = pd.read_csv(path)
+
+    for column in columns:
+        if column not in df.columns:
+            df[column] = pd.NA
+    return df[columns]
+
+
+def load_dataframe_recent(dataset: str, path: Path, columns: list[str], *, date_column: str = "date", days: int = 365, max_rows: int = 20000) -> pd.DataFrame:
+    """Load a recent slice of a dataframe dataset by ISO date without scanning all rows in Python."""
+    cutoff = (datetime.now().date() - timedelta(days=max(int(days), 0))).isoformat()
+    if use_database():
+        def load_recent_from_db() -> pd.DataFrame:
+            ensure_database_schema()
+            table = _table_for_dataframe(dataset)
+            with _connect() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""
+                        SELECT data
+                        FROM {table}
+                        WHERE COALESCE(data->>%s, '') >= %s
+                        ORDER BY data->>%s DESC, row_order DESC, id DESC
+                        LIMIT %s
+                        """,
+                        (date_column, cutoff, date_column, int(max_rows)),
+                    )
+                    rows = [row[0] for row in cur.fetchall()]
+            if not rows:
+                return pd.DataFrame(columns=columns)
+            return pd.DataFrame(rows)
+
+        df = _with_database_retry(load_recent_from_db)
+    else:
+        df = load_dataframe(dataset, path, columns)
+        if not df.empty and date_column in df.columns:
+            parsed_dates = pd.to_datetime(df[date_column], errors="coerce")
+            df = df[parsed_dates >= pd.Timestamp(cutoff)]
+            if max_rows and len(df) > max_rows:
+                df = df.assign(_parsed_date=parsed_dates.loc[df.index]).sort_values("_parsed_date", ascending=False).head(max_rows).drop(columns=["_parsed_date"])
 
     for column in columns:
         if column not in df.columns:

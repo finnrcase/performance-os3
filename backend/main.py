@@ -41,7 +41,7 @@ from src.optimization.lean_bulk_engine import generate_lean_bulk_calorie_recomme
 from src.optimization.performance_engine import generate_performance_recommendations
 from src.optimization.run_readiness import generate_extra_run_readiness
 from src.recovery import RECOVERY_COLUMNS, SLEEP_ENTRY_COLUMNS, load_recovery_log, load_sleep_entries
-from src.training import TRAINING_COLUMNS, calculate_training_volume, load_training_log
+from src.training import TRAINING_COLUMNS, calculate_training_volume, load_recent_training_log, load_training_log
 from src.training_schedule import is_run_row, is_strength_row, summarize_training_day
 from src.integrations.hevy_client import load_hevy_sync_state
 from src.storage import debug_database_connection, ensure_database_schema, is_database_unavailable_error, production_storage_warnings, use_database
@@ -115,6 +115,10 @@ LOGGED_REQUEST_PATHS = {
     "/api/dashboard/core",
     "/api/dashboard",
 }
+LIVE_TRAINING_DAYS = 365
+LIVE_TRAINING_MAX_ROWS = 20000
+GOALS_TRAINING_DAYS = 90
+WORKLOAD_TRAINING_DAYS = 84
 
 
 @app.middleware("http")
@@ -355,8 +359,25 @@ def _load_dashboard_frame(
     fallback = lambda: pd.DataFrame(columns=columns)
     value = _safe_dashboard_block(name, dashboard_errors, dashboard_status, dashboard_timings_ms, fallback, loader)
     if isinstance(value, pd.DataFrame):
+        logger.info("%s rows: %s", name, len(value))
         return value
     return fallback()
+
+
+def _recent_training_for_analytics(days: int = LIVE_TRAINING_DAYS, max_rows: int = LIVE_TRAINING_MAX_ROWS) -> pd.DataFrame:
+    started = time.perf_counter()
+    training_df = load_recent_training_log(days=days, max_rows=max_rows)
+    logger.info("load_recent_training_log(%sd) rows=%s took %.1f ms", days, len(training_df), (time.perf_counter() - started) * 1000)
+    return training_df
+
+
+def _training_window(training_df: pd.DataFrame, days: int) -> pd.DataFrame:
+    if training_df.empty:
+        return training_df
+    df = training_df.copy()
+    parsed_dates = pd.to_datetime(df.get("date"), errors="coerce")
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
+    return df[parsed_dates >= cutoff].copy()
 
 
 def _json_safe(value):
@@ -836,7 +857,7 @@ def _dashboard_context() -> dict:
     body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     recovery_df = _load_dashboard_frame("recovery_loaded", load_recovery_log, RECOVERY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     sleep_df = _load_dashboard_frame("sleep_loaded", load_sleep_entries, SLEEP_ENTRY_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    training_df = _load_dashboard_frame("training_loaded", load_training_log, TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(LIVE_TRAINING_DAYS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     return {
         "errors": dashboard_errors,
         "status": dashboard_status,
@@ -884,7 +905,7 @@ def _build_dashboard_core_payload() -> dict:
 
     nutrition_df = _load_dashboard_frame("nutrition_loaded", load_nutrition_log, NUTRITION_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
     body_metrics_df = _load_dashboard_frame("body_metrics_loaded", load_body_metrics, BODY_METRICS_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
-    training_df = _load_dashboard_frame("training_loaded", load_training_log, TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
+    training_df = _load_dashboard_frame("training_loaded", lambda: _recent_training_for_analytics(LIVE_TRAINING_DAYS), TRAINING_COLUMNS, dashboard_errors, dashboard_status, dashboard_timings_ms)
 
     goals = _safe_dashboard_block(
         "goals_core",
@@ -1009,6 +1030,9 @@ def _build_dashboard_payload() -> dict:
     recovery_df = context["recovery_df"]
     sleep_df = context["sleep_df"]
     training_df = context["training_df"]
+    goals_training_df = _training_window(training_df, GOALS_TRAINING_DAYS)
+    workload_training_df = _training_window(training_df, WORKLOAD_TRAINING_DAYS)
+    logger.info("Dashboard training rows: loaded=%s goals_window=%s workload_window=%s", len(training_df), len(goals_training_df), len(workload_training_df))
 
     today = pd.Timestamp.today().date().isoformat()
     goals = _safe_dashboard_block(
@@ -1017,7 +1041,7 @@ def _build_dashboard_payload() -> dict:
         dashboard_status,
         dashboard_timings_ms,
         _fallback_goals,
-        lambda: build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=training_df),
+        lambda: build_automatic_goals(load_user_goals(), body_metrics_df=body_metrics_df, training_df=goals_training_df),
     )
     if not isinstance(goals, dict):
         goals = _fallback_goals()
@@ -1035,7 +1059,7 @@ def _build_dashboard_payload() -> dict:
         dashboard_status,
         dashboard_timings_ms,
         _fallback_training_workload,
-        lambda: analyze_training_workload(training_df, bodyweight=goals.get("current_bodyweight")),
+        lambda: analyze_training_workload(workload_training_df, bodyweight=goals.get("current_bodyweight")),
     )
     if not isinstance(training_workload, dict):
         training_workload = _fallback_training_workload()
@@ -1048,7 +1072,7 @@ def _build_dashboard_payload() -> dict:
         lambda: calculate_macro_targets(
             goals,
             nutrition_df=nutrition_df,
-            training_df=training_df,
+            training_df=goals_training_df,
             recovery_df=recovery_df,
             body_metrics_df=body_metrics_df,
             workload_data=training_workload,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -10,6 +12,9 @@ import pandas as pd
 from src.analytics.training_workload import analyze_training_workload
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
+
+logger = logging.getLogger(__name__)
+GOAL_TRAINING_WINDOW_DAYS = 90
 
 USER_GOALS_PATH = processed_data_path("user_goals.json")
 
@@ -58,17 +63,20 @@ def _latest_body_fat(body_metrics_df: pd.DataFrame | None) -> float | None:
 
 def build_automatic_goals(saved_goals: dict | None = None, body_metrics_df: pd.DataFrame | None = None, training_df: pd.DataFrame | None = None) -> dict:
     """Build the app's default conservative lean-bulk strategy from local logs."""
+    started = time.perf_counter()
     saved = _coerce_goal_data(saved_goals)
     current_weight = _latest_bodyweight(body_metrics_df, saved["current_bodyweight"])
-    workload = analyze_training_workload(training_df if training_df is not None else pd.DataFrame(), bodyweight=current_weight)["current"]
-    has_training_history = training_df is not None and not training_df.empty
+    analytics_training = _recent_training_window(training_df, GOAL_TRAINING_WINDOW_DAYS)
+    logger.info("build_automatic_goals training rows input=%s window=%s", 0 if training_df is None else len(training_df), len(analytics_training))
+    workload = analyze_training_workload(analytics_training, bodyweight=current_weight)["current"]
+    has_training_history = not analytics_training.empty
     strength_source = float(workload.get("strength_workouts_per_week") or 0) if has_training_history else DEFAULT_USER_GOALS["training_frequency_per_week"]
     cardio_source = float(workload.get("runs_per_week") or 0) if has_training_history else DEFAULT_USER_GOALS["cardio_frequency_per_week"]
     strength_days = max(0, min(7, round(strength_source)))
     cardio_days = max(0, min(7, round(cardio_source)))
     total_training_days = strength_days + cardio_days
     activity_level = "Very High" if total_training_days >= 7 else "High" if total_training_days >= 5 else "Moderate" if total_training_days >= 3 else "Low"
-    return {
+    result = {
         **saved,
         "current_bodyweight": current_weight,
         "goal_bodyweight": round(current_weight * 1.03, 1),
@@ -80,6 +88,17 @@ def build_automatic_goals(saved_goals: dict | None = None, body_metrics_df: pd.D
         "activity_level": activity_level,
         "aggressiveness": "Conservative",
     }
+    logger.info("build_automatic_goals completed in %.1f ms", (time.perf_counter() - started) * 1000)
+    return result
+
+
+def _recent_training_window(training_df: pd.DataFrame | None, days: int) -> pd.DataFrame:
+    if training_df is None or training_df.empty:
+        return pd.DataFrame()
+    df = training_df.copy()
+    parsed_dates = pd.to_datetime(df.get("date"), errors="coerce")
+    cutoff = pd.Timestamp.today().normalize() - pd.Timedelta(days=days)
+    return df[parsed_dates >= cutoff].copy()
 
 
 def _coerce_goal_data(data: dict | None) -> dict:

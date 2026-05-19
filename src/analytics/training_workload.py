@@ -79,6 +79,9 @@ def _prepare_training(training_df: pd.DataFrame) -> pd.DataFrame:
     df = training_df.copy()
     df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
     df = df.dropna(subset=["date"])
+    if not df.empty:
+        latest = df["date"].max()
+        df = df[df["date"] >= latest - pd.Timedelta(days=84)].copy()
     for column in ["sets", "reps", "weight", "duration_minutes", "rpe"]:
         values = df[column] if column in df.columns else pd.Series(0, index=df.index)
         df[column] = pd.to_numeric(values, errors="coerce").fillna(0)
