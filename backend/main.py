@@ -7,6 +7,7 @@ import logging
 import math
 import os
 import time
+import traceback
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -132,6 +133,16 @@ WORKLOAD_TRAINING_DAYS = 84
 CORE_BLOCK_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_BLOCK_TIMEOUT_MS", "900"))
 CORE_DB_STATEMENT_TIMEOUT_MS = int(os.getenv("DASHBOARD_CORE_DB_TIMEOUT_MS", "750"))
 CORE_BLOCK_EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("DASHBOARD_CORE_WORKERS", "4")), thread_name_prefix="dashboard-core")
+CORE_REQUIRED_BLOCKS = {
+    "dashboard_core",
+    "load_nutrition",
+    "load_training",
+    "load_goals",
+    "calculate_targets",
+    "today_food_summary",
+    "weight_summary",
+    "lift_tile_core",
+}
 
 
 @app.middleware("http")
@@ -433,7 +444,7 @@ def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):
                 "name": name,
                 "status": "error",
                 "error_type": type(exc).__name__,
-                "message": str(exc) or type(exc).__name__,
+                "message": _exception_debug_message(exc),
                 "duration_ms": duration_ms,
             }
         )
@@ -447,7 +458,7 @@ def safe_block(name: str, dashboard_errors: list[dict], fallback, fn):
                     "name": f"{name}_fallback",
                     "status": "error",
                     "error_type": type(fallback_exc).__name__,
-                    "message": str(fallback_exc) or type(fallback_exc).__name__,
+                    "message": _exception_debug_message(fallback_exc),
                     "duration_ms": round((time.perf_counter() - start) * 1000, 1),
                 }
             )
@@ -508,6 +519,8 @@ def _safe_core_block(
                 "status": "timeout",
                 "error_type": "TimeoutError",
                 "message": f"{name} exceeded {timeout_ms}ms and was skipped.",
+                "function": getattr(func, "__name__", repr(func)),
+                "endpoint": "/api/dashboard/core",
                 "duration_ms": duration_ms,
             }
         )
@@ -522,7 +535,10 @@ def _safe_core_block(
                 "name": name,
                 "status": "error",
                 "error_type": type(exc).__name__,
-                "message": str(exc) or type(exc).__name__,
+                "message": _exception_debug_message(exc),
+                "function": getattr(func, "__name__", repr(func)),
+                "endpoint": "/api/dashboard/core",
+                "trace_excerpt": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=4)),
                 "duration_ms": duration_ms,
             }
         )
@@ -538,7 +554,10 @@ def _safe_core_block(
                 "name": f"{name}_fallback",
                 "status": "error",
                 "error_type": type(fallback_exc).__name__,
-                "message": str(fallback_exc) or type(fallback_exc).__name__,
+                "message": _exception_debug_message(fallback_exc),
+                "function": getattr(fallback, "__name__", repr(fallback)),
+                "endpoint": "/api/dashboard/core",
+                "trace_excerpt": "".join(traceback.format_exception(type(fallback_exc), fallback_exc, fallback_exc.__traceback__, limit=4)),
                 "duration_ms": round((time.perf_counter() - started) * 1000, 1),
             }
         )
@@ -663,6 +682,16 @@ def _json_safe(value):
 def _public_json(value):
     """Return JSON-safe API output with secret-like fields redacted."""
     return _json_safe(sanitize_sensitive_data(value))
+
+
+def _exception_debug_message(exc: Exception) -> str:
+    """Return an actionable exception message for diagnostic API payloads."""
+    if isinstance(exc, SyntaxError):
+        location = f"{exc.filename or 'unknown'}:{exc.lineno or '?'}"
+        text = str(exc.text or "").strip()
+        details = str(exc) or type(exc).__name__
+        return f"{details} at {location}{f' near {text[:180]!r}' if text else ''}"
+    return str(exc) or type(exc).__name__
 
 
 def _target_number(targets: dict, key: str, default: float = 0.0) -> float:
@@ -948,7 +977,26 @@ def _failed_dashboard_blocks(blocks: list[dict]) -> list[dict]:
     return [block for block in blocks if block.get("status") in {"error", "timeout"}]
 
 
+def _block_identifier(block: dict) -> str:
+    return str(block.get("block") or block.get("name") or "")
+
+
+def _required_core_failures(blocks: list[dict]) -> list[dict]:
+    failed = _failed_dashboard_blocks(blocks)
+    return [block for block in failed if _block_identifier(block) in CORE_REQUIRED_BLOCKS]
+
+
+def _required_core_failure_names(blocks: list[dict]) -> list[str]:
+    return [_block_identifier(block) for block in _required_core_failures(blocks)]
+
+
 def _dashboard_status_label(blocks: list[dict]) -> str:
+    return "degraded" if _failed_dashboard_blocks(blocks) else "ok"
+
+
+def _dashboard_core_status_label(blocks: list[dict]) -> str:
+    if _required_core_failures(blocks):
+        return "failed"
     return "degraded" if _failed_dashboard_blocks(blocks) else "ok"
 
 
@@ -1052,11 +1100,14 @@ def _core_dashboard_fallback(exc: Exception, duration_ms: float) -> dict:
     targets = _fallback_targets(goals)
     blocks = [
         {
-            "block": "dashboard",
-            "name": "dashboard",
+            "block": "dashboard_core",
+            "name": "dashboard_core",
             "status": "error",
             "error_type": type(exc).__name__,
-            "message": str(exc) or type(exc).__name__,
+            "message": _exception_debug_message(exc),
+            "function": "_build_dashboard_core_payload",
+            "endpoint": "/api/dashboard/core",
+            "trace_excerpt": "".join(traceback.format_exception(type(exc), exc, exc.__traceback__, limit=4)),
             "duration_ms": round(duration_ms, 1),
         }
     ]
@@ -1093,14 +1144,18 @@ def _core_dashboard_fallback(exc: Exception, duration_ms: float) -> dict:
         "recommendation": _fallback_performance_plan(),
         "counts": {"nutrition": 0, "body_metrics": 0, "recovery": 0, "sleep": 0, "training": 0},
         "errors": blocks,
+        "ok": False,
+        "core_ready": False,
         "debug": {
-            "dashboard_status": "degraded",
+            "dashboard_status": "failed",
+            "required_blocks": sorted(CORE_REQUIRED_BLOCKS),
+            "required_blocks_failed": ["dashboard_core"],
             "errors": blocks,
             "blocks": blocks,
             "hevy_sync": _deferred_hevy_sync_debug(),
             "generated_at": datetime.now(timezone.utc).isoformat(),
-            "status": {"dashboard": False},
-            "timings_ms": {"dashboard": round(duration_ms, 1)},
+            "status": {"dashboard_core": False},
+            "timings_ms": {"dashboard_core": round(duration_ms, 1)},
         },
     }
 
@@ -1180,7 +1235,7 @@ def _build_dashboard_core_payload() -> dict:
     dashboard_timings_ms["load_sleep"] = 0
 
     goals = _safe_core_block(
-        "build_goals",
+        "load_goals",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
@@ -1209,7 +1264,7 @@ def _build_dashboard_core_payload() -> dict:
     if not isinstance(targets, dict):
         targets = _fallback_targets(goals)
     nutrition_totals = _safe_core_block(
-        "food_summary",
+        "today_food_summary",
         dashboard_errors,
         dashboard_status,
         dashboard_timings_ms,
@@ -1305,7 +1360,12 @@ def _build_dashboard_core_payload() -> dict:
     if not isinstance(counts, dict):
         counts = {"nutrition": 0, "body_metrics": 0, "recovery": 0, "sleep": 0, "training": 0}
 
+    required_blocks_failed = _required_core_failure_names(dashboard_errors)
+    core_ready = not required_blocks_failed
+    core_status = _dashboard_core_status_label(dashboard_errors)
     payload = {
+        "ok": core_ready,
+        "core_ready": core_ready,
         "date": today,
         "food": food_tile,
         "weight": weight_tile,
@@ -1339,8 +1399,10 @@ def _build_dashboard_core_payload() -> dict:
         "counts": counts,
         "errors": _failed_dashboard_blocks(dashboard_errors),
         "debug": {
-            "dashboard_status": _dashboard_status_label(dashboard_errors),
+            "dashboard_status": core_status,
             "mode": "core",
+            "required_blocks": sorted(CORE_REQUIRED_BLOCKS),
+            "required_blocks_failed": required_blocks_failed,
             "errors": _failed_dashboard_blocks(dashboard_errors),
             "blocks": dashboard_errors,
             "hevy_sync": _deferred_hevy_sync_debug(),

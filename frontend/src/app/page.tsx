@@ -6,6 +6,7 @@ import {
   BarChart3,
   Check,
   ChevronDown,
+  Copy,
   Download,
   Dumbbell,
   ExternalLink,
@@ -837,6 +838,8 @@ type WithingsSyncResult = {
 };
 
 type DashboardData = {
+  ok?: boolean;
+  core_ready?: boolean;
   date: string;
   food: {
     calories: { eaten: number; target: number | null; left: number | null; over: number | null; percent: number };
@@ -932,7 +935,9 @@ type DashboardData = {
   counts: { nutrition: number; body_metrics: number; recovery: number; sleep?: number; training: number };
   errors?: DashboardDebugBlock[];
   debug?: {
-    dashboard_status?: "ok" | "degraded" | "error" | string;
+    dashboard_status?: "ok" | "degraded" | "failed" | "error" | string;
+    required_blocks?: string[];
+    required_blocks_failed?: string[];
     errors?: DashboardDebugBlock[];
     blocks?: DashboardDebugBlock[];
     generated_at?: string;
@@ -945,10 +950,13 @@ type DashboardData = {
 type DashboardDebugBlock = {
   block?: string;
   name?: string;
-  status?: "ok" | "error" | string;
+  status?: "ok" | "error" | "timeout" | "skipped" | string;
   error_type?: string;
   message?: string;
   duration_ms?: number;
+  endpoint?: string;
+  function?: string;
+  trace_excerpt?: string;
 };
 
 type StartupDebugEntry = {
@@ -962,6 +970,14 @@ type StartupDebugEntry = {
   errorMessage?: string;
   responseText?: string;
   backendLabel?: string;
+  timestamp: string;
+};
+
+type SystemFailureReport = {
+  dashboard: DashboardData | null;
+  failedBlocks: DashboardDebugBlock[];
+  requiredBlocksFailed: string[];
+  reason: string;
   timestamp: string;
 };
 
@@ -7856,6 +7872,60 @@ function startupDebugSummary(entry: StartupDebugEntry) {
   return `${entry.httpStatus ? `${entry.httpStatus} ` : ""}${entry.errorMessage ?? "Error"}${duration}`;
 }
 
+function dashboardBlockName(block: DashboardDebugBlock) {
+  return block.block || block.name || "unknown";
+}
+
+function dashboardCoreFailed(data: DashboardData | null | undefined) {
+  return Boolean(data && (data.core_ready === false || data.debug?.dashboard_status === "failed"));
+}
+
+function dashboardCoreFailedBlocks(data: DashboardData | null | undefined) {
+  const requiredNames = data?.debug?.required_blocks_failed ?? [];
+  const blocks = data?.debug?.blocks ?? data?.debug?.errors ?? data?.errors ?? [];
+  const matched = blocks.filter((block) => requiredNames.includes(dashboardBlockName(block)) || block.status === "error" || block.status === "timeout");
+  if (matched.length) return matched;
+  return requiredNames.map((name) => ({ block: name, status: "error", message: "Required dashboard core block failed." }));
+}
+
+function dashboardCoreFailureReason(data: DashboardData | null | undefined) {
+  const names = data?.debug?.required_blocks_failed ?? dashboardCoreFailedBlocks(data).map(dashboardBlockName);
+  return names.length
+    ? `Core backend blocks failed: ${names.join(", ")}.`
+    : "Dashboard core reported core_ready=false.";
+}
+
+class CoreSystemFailureError extends Error {
+  readonly dashboard: DashboardData;
+
+  constructor(dashboard: DashboardData) {
+    super(dashboardCoreFailureReason(dashboard));
+    this.name = "CoreSystemFailureError";
+    this.dashboard = dashboard;
+  }
+}
+
+function buildSystemFailureDebugReport(failure: SystemFailureReport, entries: StartupDebugEntry[]) {
+  const dashboardDebug = failure.dashboard?.debug ?? {};
+  return {
+    headline: "System failed to load",
+    reason: failure.reason,
+    endpoint: "/api/dashboard/core",
+    status: dashboardDebug.dashboard_status ?? "failed",
+    ok: failure.dashboard?.ok ?? false,
+    core_ready: failure.dashboard?.core_ready ?? false,
+    generated_at: dashboardDebug.generated_at ?? null,
+    required_blocks: dashboardDebug.required_blocks ?? [],
+    required_blocks_failed: failure.requiredBlocksFailed,
+    failed_blocks: failure.failedBlocks,
+    blocks: dashboardDebug.blocks ?? [],
+    frontend_request_timings: entries,
+    backend_label: publicApiBaseLabel(),
+    vercel_url: typeof window !== "undefined" ? window.location.href : "",
+    timestamp: new Date().toISOString(),
+  };
+}
+
 function StartupDebugPanel({
   entries,
   initiallyOpen = false,
@@ -7928,6 +7998,132 @@ function StartupDebugPanel({
           <p className="mt-3 text-sm text-zinc-400">No startup requests have been recorded yet.</p>
         )
       ) : null}
+    </div>
+  );
+}
+
+function SystemFailureScreen({
+  failure,
+  entries,
+  onRetry,
+}: Readonly<{
+  failure: SystemFailureReport;
+  entries: StartupDebugEntry[];
+  onRetry: () => void;
+}>) {
+  const [debugOpen, setDebugOpen] = useState(true);
+  const report = buildSystemFailureDebugReport(failure, entries);
+  const reportText = JSON.stringify(report, null, 2);
+  const generatedAt = failure.dashboard?.debug?.generated_at ?? failure.timestamp;
+  const copyReport = async () => {
+    try {
+      await navigator.clipboard.writeText(reportText);
+    } catch {
+      window.prompt("Copy debug report", reportText);
+    }
+  };
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-4">
+      <Card className="border-red-400/35 bg-red-400/[0.08]">
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center gap-3">
+              <span className="grid h-10 w-10 shrink-0 place-items-center rounded-lg border border-red-300/30 bg-red-300/10">
+                <AlertTriangle className="h-5 w-5 text-red-100" />
+              </span>
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.16em] text-red-100/70">Startup diagnostics</p>
+                <h2 className="mt-1 text-2xl font-semibold text-white">System failed to load</h2>
+              </div>
+            </div>
+            <p className="mt-4 max-w-3xl text-sm leading-6 text-red-50/80">
+              Core backend blocks failed. The app is paused so bad data is not shown.
+            </p>
+            <div className="mt-4 flex flex-wrap gap-2">
+              {failure.failedBlocks.length ? failure.failedBlocks.map((block) => (
+                <span key={`${dashboardBlockName(block)}-${block.error_type ?? block.status ?? block.message}`} className="rounded-full border border-red-300/30 bg-red-300/10 px-3 py-1 text-xs font-semibold text-red-50">
+                  {dashboardBlockName(block)}: {block.error_type ?? block.status ?? "failed"}
+                </span>
+              )) : (
+                <span className="rounded-full border border-red-300/30 bg-red-300/10 px-3 py-1 text-xs font-semibold text-red-50">
+                  dashboard_core: failed
+                </span>
+              )}
+            </div>
+            <p className="mt-3 text-xs text-red-100/60">Generated {generatedAt}</p>
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <button type="button" onClick={onRetry} className="inline-flex h-10 items-center gap-2 rounded-lg border border-red-200/40 bg-red-200/10 px-3 text-sm font-semibold text-red-50 transition hover:bg-red-200/15">
+              <RefreshCw className="h-4 w-4" />
+              Retry
+            </button>
+            <button type="button" onClick={() => void copyReport()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.07]">
+              <Copy className="h-4 w-4" />
+              Copy debug report
+            </button>
+          </div>
+        </div>
+      </Card>
+
+      <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+        <button type="button" onClick={() => setDebugOpen((value) => !value)} className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-2 text-left">
+          <span className="text-sm font-semibold text-white">Debug report</span>
+          <ChevronDown className={cx("h-4 w-4 text-zinc-400 transition", debugOpen && "rotate-180")} />
+        </button>
+        {debugOpen ? (
+          <div className="mt-3 space-y-4">
+            <div className="grid gap-3 text-xs text-zinc-300 md:grid-cols-2 xl:grid-cols-4">
+              <p><span className="text-zinc-500">Endpoint:</span> /api/dashboard/core</p>
+              <p><span className="text-zinc-500">Status:</span> {String(report.status)}</p>
+              <p><span className="text-zinc-500">Backend:</span> {publicApiBaseLabel()}</p>
+              <p><span className="text-zinc-500">Timestamp:</span> {failure.timestamp}</p>
+              <p className="break-all md:col-span-2 xl:col-span-4"><span className="text-zinc-500">Vercel URL:</span> {typeof window !== "undefined" ? window.location.href : ""}</p>
+            </div>
+
+            <div className="space-y-2">
+              {(failure.failedBlocks.length ? failure.failedBlocks : [{ block: "dashboard_core", status: "error", message: failure.reason }]).map((block) => (
+                <div key={`${dashboardBlockName(block)}-${block.error_type ?? block.message}`} className="rounded-lg border border-red-300/20 bg-red-300/[0.055] p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="font-semibold text-red-50">{dashboardBlockName(block)}</p>
+                    <span className="rounded-full border border-red-300/30 px-2.5 py-1 text-xs font-semibold text-red-50">{block.status ?? "failed"}</span>
+                  </div>
+                  <div className="mt-3 grid gap-2 text-xs text-red-50/80 md:grid-cols-2 xl:grid-cols-4">
+                    <p><span className="text-red-100/50">Error:</span> {block.error_type ?? "--"}</p>
+                    <p><span className="text-red-100/50">Duration:</span> {block.duration_ms != null ? `${block.duration_ms}ms` : "--"}</p>
+                    <p><span className="text-red-100/50">Function:</span> {block.function ?? "--"}</p>
+                    <p><span className="text-red-100/50">Endpoint:</span> {block.endpoint ?? "/api/dashboard/core"}</p>
+                  </div>
+                  {block.message ? <p className="mt-3 break-words text-sm leading-6 text-red-50">{block.message}</p> : null}
+                  {block.trace_excerpt ? <pre className="mt-3 max-h-44 overflow-auto rounded-md bg-black/35 p-3 text-xs leading-5 text-red-50/75">{block.trace_excerpt}</pre> : null}
+                </div>
+              ))}
+            </div>
+
+            <div>
+              <p className="mb-2 text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Frontend request timings</p>
+              <div className="space-y-2">
+                {entries.slice(-12).map((entry) => (
+                  <div key={`${entry.key}-${entry.timestamp}`} className="rounded-lg border border-white/10 bg-zinc-950/70 p-3">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-white">{entry.label}</p>
+                        <p className="mt-1 break-all text-xs text-zinc-500">{entry.path}</p>
+                      </div>
+                      <span className={cx("rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", startupStatusClass(entry.status))}>{entry.status}</span>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-300">{startupDebugSummary(entry)}</p>
+                    {entry.errorMessage ? <p className="mt-2 break-words text-xs leading-5 text-red-100/80">{entry.errorMessage}</p> : null}
+                    {entry.responseText && entry.status !== "ok" ? <pre className="mt-2 max-h-36 overflow-auto rounded-md bg-black/30 p-2 text-xs text-zinc-300">{entry.responseText}</pre> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <pre className="max-h-72 overflow-auto rounded-lg border border-white/10 bg-zinc-950/80 p-3 text-xs leading-5 text-zinc-300">{reportText}</pre>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }
@@ -8249,6 +8445,7 @@ export default function Home() {
   const [message, setMessage] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
+  const [systemFailure, setSystemFailure] = useState<SystemFailureReport | null>(null);
   const [rateLimited, setRateLimited] = useState(false);
   const [startupDebug, setStartupDebug] = useState<StartupDebugEntry[]>([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
@@ -8460,6 +8657,7 @@ export default function Home() {
     const maxAttempts = options?.allowColdStartRetry === false ? 1 : 2;
     setApiError(null);
     setLoadFailures([]);
+    setSystemFailure(null);
 
     type GoalsResponse = {
       goals: Goals;
@@ -8482,8 +8680,34 @@ export default function Home() {
         label: "Dashboard",
         path: "/api/dashboard/core",
         timeoutMs: STARTUP_API_TIMEOUT_MS,
-        required: false,
-        run: async () => setDashboard(await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: false }, STARTUP_API_TIMEOUT_MS, recordStartupDebug)),
+        required: true,
+        run: async () => {
+          const dashboardData = await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug);
+          setDashboard(dashboardData);
+          if (dashboardCoreFailed(dashboardData)) {
+            const failedBlocks = dashboardCoreFailedBlocks(dashboardData);
+            const reason = dashboardCoreFailureReason(dashboardData);
+            recordStartupDebug({
+              key: "dashboard_core_core_failure",
+              label: "Dashboard core readiness",
+              path: "/api/dashboard/core",
+              required: true,
+              status: "error",
+              httpStatus: 200,
+              errorMessage: reason,
+              responseText: JSON.stringify({
+                ok: dashboardData.ok,
+                core_ready: dashboardData.core_ready,
+                dashboard_status: dashboardData.debug?.dashboard_status,
+                required_blocks_failed: dashboardData.debug?.required_blocks_failed,
+                errors: failedBlocks,
+              }, null, 2).slice(0, 4000),
+              backendLabel: publicApiBaseLabel(),
+              timestamp: new Date().toISOString(),
+            });
+            throw new CoreSystemFailureError(dashboardData);
+          }
+        },
       },
       {
         key: "goals",
@@ -8521,6 +8745,8 @@ export default function Home() {
       const failures: string[] = [];
       const requiredFailures: string[] = [];
       const requiredReasons: string[] = [];
+      const requiredFailureBlocks: DashboardDebugBlock[] = [];
+      let coreFailureReport: SystemFailureReport | null = null;
       results.forEach((result, index) => {
         if (result.status === "rejected") {
           const step = steps[index];
@@ -8530,6 +8756,23 @@ export default function Home() {
           if (step.required) {
             requiredFailures.push(step.label);
             requiredReasons.push(reason.toLowerCase());
+            requiredFailureBlocks.push({
+              block: step.key,
+              name: step.key,
+              status: classifyRequestDebugStatus(result.reason),
+              error_type: result.reason instanceof Error ? result.reason.name : "StartupError",
+              message: reason,
+              endpoint: step.path,
+            });
+          }
+          if (result.reason instanceof CoreSystemFailureError) {
+            coreFailureReport = {
+              dashboard: result.reason.dashboard,
+              failedBlocks: dashboardCoreFailedBlocks(result.reason.dashboard),
+              requiredBlocksFailed: result.reason.dashboard.debug?.required_blocks_failed ?? dashboardCoreFailedBlocks(result.reason.dashboard).map(dashboardBlockName),
+              reason,
+              timestamp: new Date().toISOString(),
+            };
           }
         }
       });
@@ -8550,10 +8793,23 @@ export default function Home() {
         }
 
         setLoadFailures(failures);
-        if (failureKind === "auth") {
+        if (coreFailureReport) {
+          setSystemFailure(coreFailureReport);
+          setApiError(null);
+        } else if (failureKind === "auth") {
           scheduleLoginRedirect();
+          setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. ${startupFailureHint(failureKind)}`);
+        } else {
+          const reason = `Core data failed to load: ${requiredFailures.join(", ")}. ${startupFailureHint(failureKind)}`;
+          setSystemFailure({
+            dashboard: null,
+            failedBlocks: requiredFailureBlocks,
+            requiredBlocksFailed: requiredFailureBlocks.map(dashboardBlockName),
+            reason,
+            timestamp: new Date().toISOString(),
+          });
+          setApiError(null);
         }
-        setApiError(`Core data failed to load: ${requiredFailures.join(", ")}. ${startupFailureHint(failureKind)}`);
       } else {
         setLoadFailures(failures);
         if (failures.length > 0) {
@@ -9764,6 +10020,17 @@ export default function Home() {
                 <p className="text-sm text-amber-100">Temporarily rate limited — retrying shortly. This is a server limit, not your account.</p>
               </Card>
             ) : null}
+            {systemFailure ? (
+              <SystemFailureScreen
+                failure={systemFailure}
+                entries={startupDebug}
+                onRetry={() => {
+                  setLoading(true);
+                  void refreshAll();
+                }}
+              />
+            ) : (
+              <>
             {apiError ? (
               <Card className="mb-4 border-red-400/30 bg-red-400/10">
                 <div className="flex flex-wrap items-start justify-between gap-3">
@@ -9820,6 +10087,8 @@ export default function Home() {
               </Card>
             ) : (
               pageContent[activePage]
+            )}
+              </>
             )}
           </div>
         </section>

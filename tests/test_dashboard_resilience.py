@@ -98,6 +98,30 @@ class DashboardResilienceTest(unittest.TestCase):
         self.assertIn("nutrition_today", payload)
         self.assertIn("latest_workout", payload)
         self.assertEqual(payload["strength_trend_summary"]["label"], "deferred")
+        self.assertTrue(payload["core_ready"])
+        self.assertEqual(payload["debug"]["dashboard_status"], "ok")
+
+    def test_dashboard_core_marks_required_block_failure_as_not_ready(self):
+        with (
+            patch.dict(os.environ, {"APP_PASSWORD": TEST_APP_PASSWORD, "SESSION_SECRET": TEST_SESSION_SECRET}, clear=True),
+            patch("backend.main.load_recent_nutrition_log", side_effect=SyntaxError("bad json in nutrition payload")),
+            patch("backend.main.load_body_metrics", return_value=pd.DataFrame(columns=BODY_METRICS_COLUMNS)),
+            patch("backend.main.load_recent_training_log", return_value=pd.DataFrame(columns=TRAINING_COLUMNS)),
+        ):
+            self.client.cookies.set(ACCESS_COOKIE, create_session_token(TEST_SESSION_SECRET))
+            response = self.client.get("/api/dashboard/core")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["ok"])
+        self.assertFalse(payload["core_ready"])
+        self.assertEqual(payload["debug"]["dashboard_status"], "failed")
+        self.assertIn("load_nutrition", payload["debug"]["required_blocks_failed"])
+        error = next(block for block in payload["debug"]["errors"] if block["block"] == "load_nutrition")
+        self.assertEqual(error["error_type"], "SyntaxError")
+        self.assertIn("bad json in nutrition payload", error["message"])
+        self.assertEqual(error["endpoint"], "/api/dashboard/core")
+        self.assertIn("trace_excerpt", error)
 
     def test_dashboard_malformed_rows_do_not_500(self):
         nutrition_row = {column: None for column in NUTRITION_COLUMNS}
