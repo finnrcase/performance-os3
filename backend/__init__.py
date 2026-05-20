@@ -1,1 +1,2 @@
-"""FastAPI backend package for the future Performance OS production app."""
+"""Performance OS backend package."""
+

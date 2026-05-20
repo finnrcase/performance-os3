@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-base_url="${BACKEND_V2_LOCAL_URL:-http://127.0.0.1:8001}"
+base_url="${BACKEND_LOCAL_URL:-http://127.0.0.1:8001}"
 paths=(
   "/health"
   "/api/settings"
   "/api/goals"
   "/api/dashboard/core"
+  "/api/nutrition/today"
+  "/api/training/history?limit=25&days=180"
   "/api/debug/startup"
 )
 
