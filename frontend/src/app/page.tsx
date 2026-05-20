@@ -10435,7 +10435,7 @@ export default function Home() {
                   <div>
                     <p className="font-medium text-red-100">Action needs attention</p>
                     <p className="mt-2 text-sm text-red-100/80">{apiError}</p>
-                    <p className="mt-2 text-sm text-red-100/70">If this is a connection issue, start FastAPI with: uvicorn backend.main:app --reload</p>
+                    <p className="mt-2 text-sm text-red-100/70">If this is a connection issue, start FastAPI with: uvicorn backend_new.main:app --reload</p>
                   </div>
                   <button
                     onClick={() => {

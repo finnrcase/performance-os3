@@ -1,0 +1,68 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, Request
+
+from backend_new.config import SERVICE_NAME, environment, storage_name
+from backend_new.db import SUPPORTED_JSONB_TABLES, count_rows, ping
+from backend_new.utils import env_presence, timed, utc_now_iso
+
+
+router = APIRouter(tags=["debug"])
+
+DEBUG_ENV_VARS = [
+    "APP_ENV",
+    "ENVIRONMENT",
+    "DATABASE_URL",
+    "CORS_ALLOW_ORIGINS",
+    "FRONTEND_ORIGIN",
+    "NEXT_PUBLIC_APP_URL",
+    "VERCEL_URL",
+    "OPENAI_API_KEY",
+    "HEVY_API_KEY",
+    "STRAVA_CLIENT_ID",
+    "STRAVA_CLIENT_SECRET",
+    "WITHINGS_CLIENT_ID",
+    "WITHINGS_CLIENT_SECRET",
+    "APP_PASSWORD",
+    "SESSION_SECRET",
+]
+
+
+def _route_list(request: Request) -> list[dict]:
+    routes = []
+    for route in request.app.routes:
+        path = getattr(route, "path", "")
+        methods = sorted(method for method in getattr(route, "methods", []) if method not in {"HEAD", "OPTIONS"})
+        if path and methods:
+            routes.append({"path": path, "methods": methods})
+    return sorted(routes, key=lambda item: (item["path"], ",".join(item["methods"])))
+
+
+@router.get("/api/debug/startup")
+def debug_startup(request: Request) -> dict:
+    db_result, db_check = timed("db_ping", ping)
+    row_counts = {table: count_rows(table) for table in sorted(SUPPORTED_JSONB_TABLES)}
+    count_checks = [
+        {
+            "name": f"count_rows:{table}",
+            "status": result.get("status", "unknown"),
+            "duration_ms": result.get("duration_ms", 0),
+        }
+        for table, result in row_counts.items()
+    ]
+    checks = [db_check, *count_checks]
+    return {
+        "status": "ok" if all(check["status"] in {"ok", "not_configured"} for check in checks) and db_check["status"] == "ok" else "degraded",
+        "service": SERVICE_NAME,
+        "environment": environment(),
+        "storage": storage_name(),
+        "database": db_result,
+        "row_counts": row_counts,
+        "checks": checks,
+        "env": env_presence(DEBUG_ENV_VARS),
+        "routes": _route_list(request),
+        "background_workers": False,
+        "startup_syncs": False,
+        "integration_syncs_on_startup": False,
+        "generated_at": utc_now_iso(),
+    }

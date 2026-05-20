@@ -1,0 +1,553 @@
+from __future__ import annotations
+
+from collections import defaultdict
+from datetime import date, timedelta
+import csv
+import io
+import os
+import time
+from typing import Any
+
+from fastapi import APIRouter
+from fastapi.responses import Response
+
+from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row
+from backend_new.utils import json_safe, utc_now_iso
+
+
+router = APIRouter(tags=["training"])
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _int(value: Any, default: int = 0) -> int:
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _bounded_int(value: int | str | None, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value or default)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(parsed, maximum))
+
+
+def _date_cutoff(days: int) -> str:
+    return (date.today() - timedelta(days=days)).isoformat()
+
+
+def _valid_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+
+
+def _volume(row: dict[str, Any]) -> float:
+    return _number(row.get("sets"), 0) * _number(row.get("reps"), 0) * _number(row.get("weight"), 0)
+
+
+def _workout_title(rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        notes = str(row.get("notes") or "")
+        if "workout_title=" in notes:
+            return notes.split("workout_title=", 1)[1].split("|", 1)[0].strip()
+    for row in rows:
+        title = str(row.get("workout_type") or row.get("title") or "").strip()
+        if title:
+            return title
+    return "Workout"
+
+
+def _group_workouts(rows: list[dict[str, Any]], *, cutoff: str) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        row_date = str(row.get("date") or "")
+        if not row_date or row_date < cutoff:
+            continue
+        workout_id = str(row.get("workout_id") or row.get("hevy_workout_id") or f"{row_date}:unknown")
+        grouped[(row_date, workout_id)].append(row)
+
+    items: list[dict[str, Any]] = []
+    for (workout_date, workout_id), workout_rows in grouped.items():
+        exercises = list(dict.fromkeys(str(row.get("exercise") or "").strip() for row in workout_rows if str(row.get("exercise") or "").strip()))
+        muscle_groups = sorted({str(row.get("muscle_group") or "").strip() for row in workout_rows if str(row.get("muscle_group") or "").strip()})
+        sources = sorted({str(row.get("source") or "manual").strip() for row in workout_rows})
+        items.append(
+            {
+                "date": workout_date,
+                "workout_id": workout_id,
+                "workout_type": _workout_title(workout_rows),
+                "muscle_groups": muscle_groups,
+                "exercise_names": exercises,
+                "total_sets": int(sum(max(0, _int(row.get("sets"), 0)) for row in workout_rows)),
+                "total_volume": round(sum(_volume(row) for row in workout_rows), 1),
+                "duration_minutes": round(max([_number(row.get("duration_minutes"), 0) for row in workout_rows] or [0]), 1),
+                "source": ", ".join(sources) if sources else "manual",
+                "details": sorted(workout_rows, key=lambda row: (str(row.get("exercise") or ""), _int(row.get("set_number"), 0))),
+            }
+        )
+    return sorted(items, key=lambda item: (str(item.get("date") or ""), str(item.get("workout_id") or "")), reverse=True)
+
+
+def _history_payload(limit: int = 25, days: int = 180) -> dict[str, Any]:
+    started = time.perf_counter()
+    bounded_limit = _bounded_int(limit, 25, 1, 200)
+    bounded_days = _bounded_int(days, 180, 7, 3650)
+    raw_limit = min(max(bounded_limit * 120, 1000), 5000)
+    rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=raw_limit))
+    cutoff = _date_cutoff(bounded_days)
+    workouts = _group_workouts(rows, cutoff=cutoff)
+    items = workouts[:bounded_limit]
+    older_summaries = _valid_rows(fetch_latest_json_rows("weekly_training_summary", limit=500)) if bounded_days > 365 else []
+    hevy_rows = [row for row in rows if str(row.get("source") or "").lower() == "hevy" or row.get("hevy_workout_id")]
+    return {
+        "items": items,
+        "older_summaries": older_summaries,
+        "limit": bounded_limit,
+        "days": bounded_days,
+        "raw_window_days": bounded_days,
+        "has_more_recent": len(workouts) > len(items),
+        "message": f"Showing latest {len(items)} local cached workouts from the last {bounded_days} days.",
+        "debug": {
+            "source": "local_cache",
+            "raw_rows_read": len(rows),
+            "read_limit": raw_limit,
+            "grouped_workouts": len(workouts),
+            "hevy_rows": len(hevy_rows),
+            "hevy_workouts": len({str(row.get("workout_id") or row.get("hevy_workout_id") or "") for row in hevy_rows if row.get("workout_id") or row.get("hevy_workout_id")}),
+            "full_raw_hevy_scan": False,
+            "older_history_source": "weekly_training_summary" if older_summaries else "none",
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        },
+    }
+
+
+def _trend_payload(weeks: int = 12, exercise_name: str | None = None, muscle_group: str | None = None) -> dict[str, Any]:
+    started = time.perf_counter()
+    bounded_weeks = _bounded_int(weeks, 12, 1, 52)
+    cutoff = _date_cutoff(bounded_weeks * 7)
+    rows = [
+        row for row in _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
+        if str(row.get("date") or "") >= cutoff
+    ]
+    if exercise_name:
+        rows = [row for row in rows if str(row.get("exercise") or "").lower() == exercise_name.lower()]
+    if muscle_group:
+        rows = [row for row in rows if str(row.get("muscle_group") or "").lower() == muscle_group.lower()]
+
+    by_exercise: dict[str, dict[str, Any]] = {}
+    by_week: dict[tuple[str, str], dict[str, Any]] = defaultdict(lambda: {"sets": 0, "reps": 0, "volume": 0.0, "top_weight": 0.0})
+    for row in rows:
+        exercise = str(row.get("exercise") or "Unknown")
+        row_date = str(row.get("date") or "")
+        week = row_date[:10]
+        sets = max(0, _int(row.get("sets"), 0))
+        reps = max(0, _int(row.get("reps"), 0))
+        weight = _number(row.get("weight"), 0)
+        volume = _volume(row)
+        current = by_exercise.setdefault(exercise, {"exercise": exercise, "sets": 0, "reps": 0, "volume": 0.0, "top_weight": 0.0, "last_date": ""})
+        current["sets"] += sets
+        current["reps"] += reps
+        current["volume"] += volume
+        current["top_weight"] = max(current["top_weight"], weight)
+        current["last_date"] = max(str(current["last_date"]), row_date)
+        bucket = by_week[(exercise, week)]
+        bucket["exercise"] = exercise
+        bucket["week"] = week
+        bucket["sets"] += sets
+        bucket["reps"] += reps
+        bucket["volume"] += volume
+        bucket["top_weight"] = max(bucket["top_weight"], weight)
+
+    exercises = sorted(by_exercise.values(), key=lambda item: (item["last_date"], item["volume"]), reverse=True)
+    selected = exercise_name or (exercises[0]["exercise"] if exercises else "")
+    selected_points = [value for (exercise, _), value in by_week.items() if exercise == selected]
+    selected_points.sort(key=lambda item: item["week"])
+    return {
+        "status": "ok",
+        "weeks": bounded_weeks,
+        "selected_exercise": selected,
+        "exercise_options": [item["exercise"] for item in exercises[:50]],
+        "items": [
+            {**item, "volume": round(item["volume"], 1), "top_weight": round(item["top_weight"], 1)}
+            for item in exercises[:50]
+        ],
+        "trend": [
+            {**item, "volume": round(item["volume"], 1), "top_weight": round(item["top_weight"], 1)}
+            for item in selected_points
+        ],
+        "summary": {
+            "rows_read": len(rows),
+            "read_limit": 5000,
+            "full_raw_hevy_scan": False,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+        },
+    }
+
+
+def _jsonable_result(result: dict[str, Any]) -> dict[str, Any]:
+    cleaned = {}
+    for key, value in result.items():
+        if key == "training_log":
+            try:
+                cleaned["training_log_rows"] = int(len(value))
+            except Exception:
+                cleaned["training_log_rows"] = None
+            continue
+        cleaned[key] = json_safe(value)
+    return cleaned
+
+
+def _hevy_configured() -> bool:
+    return bool(os.getenv("HEVY_API_KEY", "").strip())
+
+
+def _sync_state() -> dict[str, Any]:
+    state = fetch_latest_document("integration_sync_state", {})
+    return state if isinstance(state, dict) else {}
+
+
+def _content_disposition(filename: str) -> dict[str, str]:
+    return {"Content-Disposition": f'attachment; filename="{filename}"'}
+
+
+def _csv_response(rows: list[dict[str, Any]], filename: str) -> Response:
+    output = io.StringIO()
+    fields = sorted({key for row in rows for key in row.keys()}) or ["status", "message"]
+    writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow({field: json_safe(row.get(field, "")) for field in fields})
+    return Response(output.getvalue(), media_type="text/csv", headers=_content_disposition(filename))
+
+
+def _excel_response(sheets: dict[str, list[dict[str, Any]]], filename: str, fallback_rows: list[dict[str, Any]]) -> Response:
+    try:
+        import pandas as pd
+
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            for sheet_name, rows in sheets.items():
+                pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name[:31], index=False)
+        return Response(
+            buffer.getvalue(),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers=_content_disposition(filename),
+        )
+    except Exception:
+        return _csv_response(fallback_rows, filename.replace(".xlsx", ".csv"))
+
+
+def _summary_state() -> dict[str, Any]:
+    state = fetch_latest_document("training_summary_state", {})
+    return state if isinstance(state, dict) else {}
+
+
+def _latest_date(rows: list[dict[str, Any]], *fields: str) -> str:
+    values = []
+    for row in rows:
+        for field in fields:
+            value = str(row.get(field) or "").strip()
+            if value:
+                values.append(value[:10])
+    return max(values, default="")
+
+
+@router.get("/api/training/history")
+def training_history(limit: int = 25, days: int = 180) -> dict[str, Any]:
+    return _history_payload(limit=limit, days=days)
+
+
+@router.get("/api/training/strength-trends")
+def strength_trends(weeks: int = 12, exercise_name: str | None = None, muscle_group: str | None = None) -> dict[str, Any]:
+    return _trend_payload(weeks=weeks, exercise_name=exercise_name, muscle_group=muscle_group)
+
+
+@router.get("/api/training/summary")
+def training_summary(window: str = "weekly", period: str = "all") -> dict[str, Any]:
+    history = _history_payload(limit=100, days=365)
+    items = []
+    for workout in history.get("items", []):
+        workout_date = str(workout.get("date") or "")
+        if not workout_date:
+            continue
+        items.append(
+            {
+                "period_start": workout_date,
+                "period_label": workout_date,
+                "workout_count": 1,
+                "total_sets": workout.get("total_sets", 0),
+                "total_reps": 0,
+                "total_volume": workout.get("total_volume", 0),
+                "duration_minutes": workout.get("duration_minutes", 0),
+                "latest_workout_date": workout_date,
+            }
+        )
+    return {
+        "window": window,
+        "period": period,
+        "items": items,
+        "muscle_groups": [],
+        "raw_window_days": 365,
+        "message": "Lightweight summary from local cached workout rows.",
+    }
+
+
+@router.get("/api/training/summary/status")
+def training_summary_status() -> dict[str, Any]:
+    training_count = count_rows("workout_logs")
+    raw_workouts = count_rows("raw_hevy_workouts")
+    raw_sets = count_rows("raw_hevy_sets")
+    weekly = count_rows("weekly_training_summary")
+    monthly = count_rows("monthly_training_summary")
+    sync_state = _sync_state()
+    summary_state = _summary_state()
+    latest_rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=1000))
+    raw_latest_rows = _valid_rows(fetch_latest_json_rows("raw_hevy_workouts", limit=500))
+    latest_workout_date = _latest_date(latest_rows, "date")
+    latest_hevy_date = _latest_date(raw_latest_rows, "date", "start_time", "created_at") or latest_workout_date
+    return {
+        "raw_window_days": 180,
+        "total_raw_rows": training_count.get("count_estimate", 0),
+        "recent_raw_rows": training_count.get("count_estimate", 0),
+        "older_raw_rows": 0,
+        "raw_hevy_workouts": raw_workouts.get("count_estimate", 0),
+        "raw_hevy_sets": raw_sets.get("count_estimate", 0),
+        "normalized_workouts": training_count.get("count_estimate", 0),
+        "normalized_sets": training_count.get("count_estimate", 0),
+        "cache_health": "ready",
+        "weekly_summaries": weekly.get("count_estimate", 0) or summary_state.get("weekly_summaries", 0),
+        "monthly_summaries": monthly.get("count_estimate", 0) or summary_state.get("monthly_summaries", 0),
+        "exercise_prs": 0,
+        "muscle_group_periods": 0,
+        "latest_sync_date": sync_state.get("last_sync_at") or sync_state.get("last_synced_at") or "",
+        "last_summary_rebuild_at": summary_state.get("rebuilt_at", ""),
+        "last_summary_rebuild_status": summary_state.get("status", "not_run"),
+        "last_summary_rebuild_message": summary_state.get("message", ""),
+        "latest_hevy_workout_date": latest_hevy_date,
+        "latest_hevy_workout_title": "",
+        "last_hevy_result": sync_state.get("last_result", {}),
+        "last_hevy_error": sync_state.get("last_error", ""),
+        "last_hevy_failures": sync_state.get("failures", []),
+        "row_counts": {
+            "workout_logs": training_count,
+            "raw_hevy_workouts": raw_workouts,
+            "raw_hevy_sets": raw_sets,
+            "weekly_training_summary": weekly,
+            "monthly_training_summary": monthly,
+        },
+        "architecture": {
+            "hevy_role": "manual_sync_to_local_cache",
+            "hevy_sync_mode": "manual",
+            "startup_source": "local_cache",
+            "live_raw_window_days": 180,
+            "historical_source": "bounded_local_rows",
+        },
+    }
+
+
+@router.get("/api/training/sync/hevy/status")
+def hevy_sync_status() -> dict[str, Any]:
+    history = _history_payload(limit=1, days=3650)
+    latest = history["items"][0] if history.get("items") else {}
+    state = _sync_state()
+    raw_workouts = count_rows("raw_hevy_workouts")
+    raw_sets = count_rows("raw_hevy_sets")
+    return {
+        "status": "ready" if _hevy_configured() else "not_configured",
+        "configured": _hevy_configured(),
+        "last_synced_at": state.get("last_sync_at", ""),
+        "last_error": state.get("last_error", ""),
+        "last_result": state.get("last_result", {}),
+        "safe_mode": False,
+        "hevy_rows": history.get("debug", {}).get("hevy_rows", 0),
+        "hevy_workouts": history.get("debug", {}).get("hevy_workouts", 0),
+        "latest_workout_date": latest.get("date", ""),
+        "latest_workout_title": latest.get("workout_type", ""),
+        "raw_hevy_workouts": raw_workouts.get("count_estimate", 0),
+        "raw_hevy_sets": raw_sets.get("count_estimate", 0),
+        "startup_sync": False,
+    }
+
+
+@router.post("/api/training/sync/hevy")
+def sync_hevy() -> dict[str, Any]:
+    if not _hevy_configured():
+        return {"status": "not_configured", "message": "HEVY_API_KEY is not configured.", "checked_hevy": False}
+    try:
+        from src.integrations.hevy_client import HevyIntegrationError, import_hevy_workouts, sync_hevy_events
+
+        try:
+            result = sync_hevy_events()
+        except HevyIntegrationError:
+            result = import_hevy_workouts(page_size=10, pages=1)
+        return {"status": "ok", "checked_hevy": True, **_jsonable_result(result)}
+    except Exception as exc:
+        return {"status": "error", "checked_hevy": True, "error_type": type(exc).__name__, "message": str(exc)}
+
+
+@router.post("/api/training/import/hevy/preview")
+def preview_hevy_import(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not _hevy_configured():
+        return {"status": "not_configured", "message": "HEVY_API_KEY is not configured.", "workouts": [], "warnings": []}
+    payload = payload or {}
+    page_size = _bounded_int(payload.get("page_size"), 10, 1, 10)
+    pages = _bounded_int(payload.get("pages"), 1, 1, 3)
+    try:
+        from src.integrations.hevy_client import preview_hevy_import as preview
+
+        return _jsonable_result(preview(page_size=page_size, pages=pages))
+    except Exception as exc:
+        return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "workouts": [], "warnings": [str(exc)]}
+
+
+@router.post("/api/training/import/hevy")
+def import_hevy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not _hevy_configured():
+        return {"status": "not_configured", "message": "HEVY_API_KEY is not configured.", "imported_workouts": 0, "imported_rows": 0}
+    payload = payload or {}
+    page_size = _bounded_int(payload.get("page_size"), 10, 1, 10)
+    pages = _bounded_int(payload.get("pages"), 1, 1, 3)
+    try:
+        from src.integrations.hevy_client import import_hevy_workouts
+
+        result = import_hevy_workouts(page_size=page_size, pages=pages)
+        return {"status": "ok", **_jsonable_result(result)}
+    except Exception as exc:
+        return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "imported_workouts": 0, "imported_rows": 0}
+
+
+@router.get("/api/training/export/hevy-raw")
+def export_hevy_raw(limit: int = 5000) -> Response:
+    bounded = _bounded_int(limit, 5000, 1, 5000)
+    workouts = _valid_rows(fetch_latest_json_rows("raw_hevy_workouts", limit=bounded))
+    sets = _valid_rows(fetch_latest_json_rows("raw_hevy_sets", limit=bounded))
+    normalized = [
+        row for row in _valid_rows(fetch_latest_json_rows("workout_logs", limit=bounded))
+        if str(row.get("source") or "").lower() == "hevy" or row.get("hevy_workout_id")
+    ]
+    metadata = [{**training_summary_status(), "generated_at": utc_now_iso(), "limit": bounded}]
+    return _excel_response(
+        {
+            "raw_workouts": workouts,
+            "raw_sets": sets,
+            "normalized_hevy": normalized,
+            "metadata": metadata,
+        },
+        f"hevy_raw_export_{date.today().isoformat()}.xlsx",
+        sets or normalized or workouts or metadata,
+    )
+
+
+@router.get("/api/training/export/normalized")
+def export_normalized(limit: int = 5000) -> Response:
+    bounded = _bounded_int(limit, 5000, 1, 5000)
+    rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=bounded))
+    weekly = _valid_rows(fetch_latest_json_rows("weekly_training_summary", limit=bounded))
+    monthly = _valid_rows(fetch_latest_json_rows("monthly_training_summary", limit=bounded))
+    metadata = [{**training_summary_status(), "generated_at": utc_now_iso(), "limit": bounded}]
+    return _excel_response(
+        {
+            "normalized_sets": rows,
+            "weekly_summary": weekly,
+            "monthly_summary": monthly,
+            "metadata": metadata,
+        },
+        f"training_normalized_export_{date.today().isoformat()}.xlsx",
+        rows or metadata,
+    )
+
+
+@router.post("/api/training/rebuild-summaries")
+def rebuild_summaries() -> dict[str, Any]:
+    history = _history_payload(limit=200, days=365)
+    workouts = history.get("items", [])
+    weekly: dict[str, dict[str, Any]] = defaultdict(lambda: {"workout_count": 0, "total_sets": 0, "total_volume": 0.0, "duration_minutes": 0.0})
+    for workout in workouts:
+        week = str(workout.get("date") or "")[:10]
+        bucket = weekly[week]
+        bucket["period_start"] = week
+        bucket["workout_count"] += 1
+        bucket["total_sets"] += _int(workout.get("total_sets"), 0)
+        bucket["total_volume"] += _number(workout.get("total_volume"), 0)
+        bucket["duration_minutes"] += _number(workout.get("duration_minutes"), 0)
+    result = {
+        "status": "ok",
+        "message": "Lightweight summaries rebuilt from bounded local cached workout rows.",
+        "raw_rows_summarized": len(workouts),
+        "weekly_summaries": len(weekly),
+        "monthly_summaries": 0,
+        "items": [dict(value) for value in weekly.values()],
+        "generated_at": utc_now_iso(),
+    }
+    insert_json_row(
+        "training_summary_state",
+        {
+            "status": result["status"],
+            "message": result["message"],
+            "raw_rows_summarized": result["raw_rows_summarized"],
+            "weekly_summaries": result["weekly_summaries"],
+            "monthly_summaries": result["monthly_summaries"],
+            "rebuilt_at": result["generated_at"],
+        },
+    )
+    return result
+
+
+@router.get("/api/training/pr-history")
+def pr_history(exercise: str = "", limit: int = 200) -> dict[str, Any]:
+    bounded = _bounded_int(limit, 200, 1, 1000)
+    rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
+    best_by_exercise_date: dict[tuple[str, str], dict[str, Any]] = {}
+    exercises: set[str] = set()
+    for row in rows:
+        name = str(row.get("exercise") or "").strip()
+        if not name:
+            continue
+        if exercise and name.lower() != exercise.lower():
+            continue
+        exercises.add(name)
+        reps = max(1, _int(row.get("reps"), 1))
+        weight = _number(row.get("weight"), 0)
+        estimated_1rm = weight * (1 + reps / 30)
+        row_date = str(row.get("date") or "")[:10]
+        key = (name, row_date)
+        current = best_by_exercise_date.get(key)
+        if current is None or estimated_1rm > current.get("estimated_1rm", 0):
+            best_by_exercise_date[key] = {
+                "exercise": name,
+                "date": row_date,
+                "weight": weight,
+                "reps": reps,
+                "estimated_1rm": round(estimated_1rm, 1),
+                "workout_id": row.get("workout_id") or row.get("hevy_workout_id") or "",
+                "source": row.get("source") or "local_cache",
+            }
+    items = sorted(best_by_exercise_date.values(), key=lambda item: (item["exercise"], item["date"]), reverse=True)[:bounded]
+    all_exercise_rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
+    exercise_options = sorted({str(row.get("exercise") or "").strip() for row in all_exercise_rows if str(row.get("exercise") or "").strip()})
+    return {
+        "exercise": exercise,
+        "exercise_options": exercise_options,
+        "items": items,
+        "raw_window_days": 180,
+        "debug": {"rows_read": len(rows), "full_raw_hevy_scan": False},
+    }
+
+
+@router.post("/api/training/consolidate-history")
+def consolidate_history() -> dict[str, Any]:
+    result = rebuild_summaries()
+    return {
+        "status": result["status"],
+        "raw_rows_summarized": len(result.get("items", [])),
+        "weekly_summaries": result.get("weekly_summaries", 0),
+        "monthly_summaries": result.get("monthly_summaries", 0),
+        "message": result.get("message", ""),
+    }

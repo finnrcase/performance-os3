@@ -1,7 +1,7 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
-    "startCommand": "uvicorn backend_v2.main:app --host 0.0.0.0 --port $PORT",
+    "startCommand": "uvicorn backend_new.main:app --host 0.0.0.0 --port $PORT",
     "healthcheckPath": "/health",
     "healthcheckTimeout": 300
   }

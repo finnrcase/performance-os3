@@ -43,7 +43,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `python3 -m uvicorn backend.main:app --host 127.0.0.1 --port ${backendPort}`,
+      command: `python3 -m uvicorn backend_new.main:app --host 127.0.0.1 --port ${backendPort}`,
       url: `${backendUrl}/health`,
       timeout: 120_000,
       reuseExistingServer: !process.env.CI,

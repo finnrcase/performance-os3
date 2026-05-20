@@ -42,7 +42,7 @@ Next.js frontend -> FastAPI backend -> shared Python modeling engine in src/
 Run the FastAPI backend:
 
 ```bash
-uvicorn backend.main:app --reload --port 8001
+uvicorn backend_new.main:app --reload --port 8001
 ```
 
 Health check:
@@ -136,7 +136,7 @@ Deploy the repository root as a Python web service.
 Start command:
 
 ```bash
-uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+uvicorn backend_new.main:app --host 0.0.0.0 --port $PORT
 ```
 
 Set backend environment variables as needed:
