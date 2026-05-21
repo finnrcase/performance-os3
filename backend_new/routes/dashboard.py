@@ -578,6 +578,8 @@ def dashboard_core() -> dict[str, Any]:
             "error_type": bundle.get("error_type"),
         }
     ]
+    if isinstance(bundle.get("blocks"), list):
+        blocks.extend(bundle.get("blocks") or [])
     if not bundle_ready:
         return _fallback_payload(today, blocks, started=started)
 
@@ -682,6 +684,7 @@ def dashboard_core() -> dict[str, Any]:
         "debug": {
             "dashboard_status": "ok",
             "blocks": blocks,
+            "warnings": bundle.get("warnings", []) if isinstance(bundle.get("warnings"), list) else [],
             "errors": [],
             "required_blocks": sorted(REQUIRED_BLOCKS),
             "required_blocks_failed": [],

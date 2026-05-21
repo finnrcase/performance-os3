@@ -92,6 +92,11 @@ def canonical_daily_bodyweights(body_metrics_df) -> pd.DataFrame:
     df = pd.DataFrame(body_metrics_df).copy()
     if df.empty or "date" not in df.columns or "bodyweight" not in df.columns:
         return pd.DataFrame(columns=list(df.columns) if not df.empty else BODY_METRICS_COLUMNS)
+    if "excluded_from_analytics" in df.columns:
+        excluded = df["excluded_from_analytics"].fillna(False).astype(str).str.lower().isin({"true", "1", "yes"})
+        df = df[~excluded].copy()
+        if df.empty:
+            return pd.DataFrame(columns=list(body_metrics_df.columns) if hasattr(body_metrics_df, "columns") else BODY_METRICS_COLUMNS)
 
     original_date = pd.to_datetime(df["date"], errors="coerce")
     df["_date_ts"] = original_date
@@ -144,6 +149,11 @@ def canonical_bodyweight_debug(body_metrics_df) -> dict:
             "rule": "lowest_weight_per_day",
         }
     prepared = raw.copy()
+    excluded_count = 0
+    if "excluded_from_analytics" in prepared.columns:
+        excluded = prepared["excluded_from_analytics"].fillna(False).astype(str).str.lower().isin({"true", "1", "yes"})
+        excluded_count = int(excluded.sum())
+        prepared = prepared[~excluded].copy()
     prepared["date"] = pd.to_datetime(prepared["date"], errors="coerce").dt.normalize()
     prepared["bodyweight"] = pd.to_numeric(prepared["bodyweight"], errors="coerce")
     prepared = prepared.dropna(subset=["date", "bodyweight"])
@@ -156,6 +166,7 @@ def canonical_bodyweight_debug(body_metrics_df) -> dict:
         "canonical_daily_weight_count": int(len(canonical)),
         "dates_with_multiple_weigh_ins": int((counts > 1).sum()),
         "rule": "lowest_weight_per_day",
+        "excluded_from_analytics_count": excluded_count,
     }
 
 

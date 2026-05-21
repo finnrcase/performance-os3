@@ -54,6 +54,10 @@ def _metric_id(item: dict[str, Any]) -> str:
     return str(item.get("date") or uuid4())
 
 
+def _is_excluded(item: dict[str, Any]) -> bool:
+    return item.get("excluded_from_analytics") is True or str(item.get("excluded_from_analytics") or "").lower() in {"true", "1", "yes"}
+
+
 def _normalize_metric(payload: dict[str, Any], *, body_metric_id: str | None = None, partial: bool = False) -> dict[str, Any]:
     now = utc_now_iso()
     item = dict(payload)
@@ -121,12 +125,14 @@ def get_body_metrics(limit: int = 1000) -> dict[str, Any]:
     rows = fetch_json_rows("body_metric_logs", limit=limit, date_field="date")
     if rows and "_db_error" in rows[0]:
         return {"items": [], "status": "error", "error": rows[0]["_db_error"]}
-    raw_items = _sort_by_date([_public_metric(row) for row in rows])
-    canonical_items = _canonical_public_metrics(rows)
+    analytics_rows = [row for row in rows if not _is_excluded(row)]
+    raw_items = _sort_by_date([_public_metric(row) for row in analytics_rows])
+    canonical_items = _canonical_public_metrics(analytics_rows)
     return {
         "items": canonical_items,
         "canonical_items": canonical_items,
         "raw_items": raw_items,
+        "excluded_raw_count": len(rows) - len(analytics_rows),
         "status": "ok",
         "debug": canonical_bodyweight_debug(rows),
     }

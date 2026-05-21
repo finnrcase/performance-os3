@@ -33,6 +33,10 @@ def _clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
 
 
+def _analytics_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in _clean_rows(rows) if str(row.get("excluded_from_analytics") or "").lower() not in {"true", "1", "yes"} and row.get("excluded_from_analytics") is not True]
+
+
 def _frame(rows: list[dict[str, Any]]) -> Any:
     import pandas as pd
 
@@ -135,7 +139,7 @@ def _load_engine_inputs(selected_date: str, finalized_summary: dict[str, Any] | 
         "training_rows": _clean_rows(fetch_json_rows("workout_logs", limit=RAW_ROW_LIMIT, date_field="date", since_date=_since(RAW_TRAINING_DAYS))),
         "weekly_training_summaries": _clean_rows(fetch_json_rows("weekly_training_summary", limit=SUMMARY_LIMIT, date_field="week_start")),
         "monthly_training_summaries": _clean_rows(fetch_json_rows("monthly_training_summary", limit=SUMMARY_LIMIT, date_field="month")),
-        "body_rows": _clean_rows(fetch_json_rows("body_metric_logs", limit=1000, date_field="date", since_date=_since(RAW_TRAINING_DAYS))),
+        "body_rows": _analytics_rows(fetch_json_rows("body_metric_logs", limit=1000, date_field="date", since_date=_since(RAW_TRAINING_DAYS))),
         "recovery_rows": _clean_rows(fetch_json_rows("recovery_logs", limit=1000, date_field="date", since_date=_since(RAW_TRAINING_DAYS))),
         "sleep_rows": _clean_rows(fetch_json_rows("sleep_logs", limit=1000, date_field="date", since_date=_since(RAW_TRAINING_DAYS))),
         "selected_date": selected_date,

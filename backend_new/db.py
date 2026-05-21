@@ -154,18 +154,56 @@ def get_connection() -> Any:
 
 @contextmanager
 def cursor(*, timeout_ms: int | str | None = None) -> Iterator[Any]:
-    conn = get_connection()
+    global _connection
+    with _connection_lock:
+        conn = get_connection()
+        try:
+            # Clear any previously aborted transaction on the reusable connection
+            # before setting the per-query timeout. This keeps one failed optional
+            # query from poisoning later dashboard blocks.
+            conn.rollback()
+            with conn.cursor() as cur:
+                cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{_clamp_timeout_ms(timeout_ms)}ms",))
+                yield cur
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            if getattr(conn, "closed", False):
+                _connection = None
+            raise
+
+
+def table_exists(table: str) -> bool:
     try:
-        with conn.cursor() as cur:
-            cur.execute("SELECT set_config('statement_timeout', %s, true)", (f"{_clamp_timeout_ms(timeout_ms)}ms",))
-            yield cur
-        conn.commit()
+        safe_table = _safe_table(table)
+        with cursor(timeout_ms=750) as cur:
+            cur.execute("SELECT to_regclass(%s) IS NOT NULL", (safe_table,))
+            row = cur.fetchone()
+        return bool(row and row[0])
+    except Exception as exc:
+        logger.exception("[db] table existence check failed table=%s", table)
+        return False
+
+
+def existing_tables(tables: list[str] | tuple[str, ...] | set[str]) -> set[str]:
+    safe_tables = sorted({_safe_table(table) for table in tables})
+    if not safe_tables:
+        return set()
+    try:
+        placeholders = ", ".join(["(%s)"] * len(safe_tables))
+        with cursor(timeout_ms=1000) as cur:
+            cur.execute(
+                f"""
+                SELECT requested.name
+                FROM (VALUES {placeholders}) AS requested(name)
+                WHERE to_regclass(requested.name) IS NOT NULL
+                """,
+                tuple(safe_tables),
+            )
+            return {str(row[0]) for row in cur.fetchall()}
     except Exception:
-        conn.rollback()
-        global _connection
-        if getattr(conn, "closed", False):
-            _connection = None
-        raise
+        logger.exception("[db] existing table check failed")
+        return set()
 
 
 def ping() -> dict[str, Any]:
@@ -769,10 +807,20 @@ def count_rows(table: str) -> dict[str, Any]:
     try:
         safe_table = _safe_table(table)
         with cursor(timeout_ms=750) as cur:
-            cur.execute("SELECT COALESCE(reltuples::bigint, 0) FROM pg_class WHERE oid = %s::regclass", (safe_table,))
+            cur.execute(
+                """
+                SELECT COALESCE((
+                    SELECT reltuples::bigint
+                    FROM pg_class
+                    WHERE oid = to_regclass(%s)
+                ), 0)
+                """,
+                (safe_table,),
+            )
             row = cur.fetchone()
+        exists = table_exists(safe_table)
         return {
-            "status": "ok",
+            "status": "ok" if exists else "missing",
             "table": safe_table,
             "count_estimate": max(0, int(row[0] if row else 0)),
             "exact": False,
@@ -823,114 +871,7 @@ def fetch_dashboard_core_bundle(
         "full_raw_hevy_scan": False,
         "duration_ms": 0,
     }
-    try:
-        with cursor(timeout_ms=2000) as cur:
-            cur.execute(
-                """
-                SELECT
-                  COALESCE((SELECT data FROM user_goal_settings ORDER BY updated_at DESC, id DESC LIMIT 1), '{}'::jsonb) AS goals,
-                  COALESCE((SELECT data FROM macro_targets ORDER BY updated_at DESC, id DESC LIMIT 1), '{}'::jsonb) AS targets,
-                  COALESCE((
-                    SELECT jsonb_agg(data)
-                    FROM (
-                      SELECT data
-                      FROM food_logs
-                      WHERE COALESCE(data->>'date', '') = %s
-                        AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
-                      ORDER BY row_order DESC, id DESC
-                      LIMIT %s
-                    ) rows
-                  ), '[]'::jsonb) AS food_rows,
-                  COALESCE((
-                    SELECT jsonb_agg(data)
-                    FROM (
-                      SELECT data
-                      FROM body_metric_logs
-                      ORDER BY id DESC
-                      LIMIT %s
-                    ) rows
-                  ), '[]'::jsonb) AS body_rows,
-                  COALESCE((
-                    SELECT data
-                    FROM training_cache_metadata
-                    WHERE COALESCE(data->>'metadata_key', '') = %s
-                    ORDER BY updated_at DESC, id DESC
-                    LIMIT 1
-                  ), '{}'::jsonb) AS training_cache_metadata,
-                  COALESCE((
-                    SELECT jsonb_agg(data)
-                    FROM (
-                      SELECT data
-                      FROM recovery_logs
-                      ORDER BY data->>'date' DESC, row_order DESC, id DESC
-                      LIMIT %s
-                    ) rows
-                  ), '[]'::jsonb) AS recovery_rows,
-                  COALESCE((
-                    SELECT jsonb_agg(data)
-                    FROM (
-                      SELECT data
-                      FROM sleep_logs
-                      ORDER BY data->>'date' DESC, row_order DESC, id DESC
-                      LIMIT %s
-                    ) rows
-                  ), '[]'::jsonb) AS sleep_rows,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'food_logs'::regclass), 0) AS food_count,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'body_metric_logs'::regclass), 0) AS body_count,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'workout_logs'::regclass), 0) AS training_count,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'recovery_logs'::regclass), 0) AS recovery_count,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'sleep_logs'::regclass), 0) AS sleep_count
-                """,
-                (
-                    today,
-                    _bounded_limit(food_limit),
-                    _bounded_limit(body_limit),
-                    CORE_TRAINING_CACHE_KEY,
-                    _bounded_limit(recovery_limit),
-                    _bounded_limit(sleep_limit),
-                ),
-            )
-            row = cur.fetchone()
-        cached_training_metadata = sanitize_json(dict(row[4] or {})) if row else {}
-        training_summary = (
-            load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
-            if include_training_summary
-            else empty_training_summary
-        )
-        if not row:
-            return {
-                "status": "ok",
-                "goals": {},
-                "targets": {},
-                "food_rows": [],
-                "body_rows": [],
-                "recovery_rows": [],
-                "sleep_rows": [],
-                "training_rows": [],
-                "training_summary": training_summary,
-                "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
-                "duration_ms": _duration_ms(started),
-            }
-        return {
-            "status": "ok",
-            "goals": sanitize_json(dict(row[0] or {})),
-            "targets": sanitize_json(dict(row[1] or {})),
-            "food_rows": sanitize_json(list(row[2] or [])),
-            "body_rows": sanitize_json(list(row[3] or [])),
-            "recovery_rows": sanitize_json(list(row[5] or [])),
-            "sleep_rows": sanitize_json(list(row[6] or [])),
-            "training_rows": [],
-            "training_summary": training_summary,
-            "counts": {
-                "nutrition": max(0, int(row[7] or 0)),
-                "body_metrics": max(0, int(row[8] or 0)),
-                "training": max(0, int(row[9] or 0)),
-                "recovery": max(0, int(row[10] or 0)),
-                "sleep": max(0, int(row[11] or 0)),
-            },
-            "duration_ms": _duration_ms(started),
-        }
-    except DatabaseNotConfigured:
+    if not database_url():
         return {
             "status": "not_configured",
             "goals": {},
@@ -942,19 +883,228 @@ def fetch_dashboard_core_bundle(
             "training_rows": [],
             "training_summary": empty_training_summary,
             "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
+            "blocks": [],
+            "warnings": [],
             "duration_ms": _duration_ms(started),
         }
+
+    blocks: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    core_tables = existing_tables(
+        {
+            "user_goal_settings",
+            "macro_targets",
+            "food_logs",
+            "body_metric_logs",
+            "training_cache_metadata",
+            "recovery_logs",
+            "sleep_logs",
+        }
+    )
+
+    def read_block(block_name: str, table: str, default: Any, query: Any) -> Any:
+        block_started = time.perf_counter()
+        if table not in core_tables:
+            warning = {
+                "block": block_name,
+                "name": block_name,
+                "table": table,
+                "status": "warning",
+                "message": f"Optional table {table} is missing; using empty/default data.",
+                "duration_ms": _duration_ms(block_started),
+            }
+            blocks.append(warning)
+            warnings.append(warning)
+            return default
+        try:
+            value = query()
+            blocks.append(
+                {
+                    "block": block_name,
+                    "name": block_name,
+                    "table": table,
+                    "status": "ok",
+                    "duration_ms": _duration_ms(block_started),
+                }
+            )
+            return value
+        except Exception as exc:
+            logger.exception("[dashboard_core] block failed block=%s table=%s", block_name, table)
+            warning = {
+                **structured_error(exc, operation=block_name),
+                "block": block_name,
+                "name": block_name,
+                "table": table,
+                "status": "warning",
+                "duration_ms": _duration_ms(block_started),
+            }
+            blocks.append(warning)
+            warnings.append(warning)
+            return default
+
+    def latest_document_block(table: str, block_name: str) -> dict[str, Any]:
+        def query() -> dict[str, Any]:
+            with cursor(timeout_ms=1000) as cur:
+                cur.execute(f"SELECT data FROM {table} ORDER BY updated_at DESC, id DESC LIMIT 1")
+                row = cur.fetchone()
+            return sanitize_json(dict(row[0])) if row else {}
+
+        return read_block(block_name, table, {}, query)
+
+    def rows_block(table: str, block_name: str, sql: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
+        def query() -> list[dict[str, Any]]:
+            with cursor(timeout_ms=1500) as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+            return sanitize_json(list(row[0] or [])) if row else []
+
+        return read_block(block_name, table, [], query)
+
+    goals = latest_document_block("user_goal_settings", "goals")
+    targets = latest_document_block("macro_targets", "targets")
+    food_rows = rows_block(
+        "food_logs",
+        "today_food_rows",
+        """
+        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+        FROM (
+          SELECT data
+          FROM food_logs
+          WHERE COALESCE(data->>'date', '') = %s
+            AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+          ORDER BY row_order DESC, id DESC
+          LIMIT %s
+        ) rows
+        """,
+        (today, _bounded_limit(food_limit)),
+    )
+    body_rows = rows_block(
+        "body_metric_logs",
+        "body_metric_rows",
+        """
+        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+        FROM (
+          SELECT data
+          FROM body_metric_logs
+          WHERE COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+          ORDER BY id DESC
+          LIMIT %s
+        ) rows
+        """,
+        (_bounded_limit(body_limit),),
+    )
+    cached_training_metadata = latest_document_block("training_cache_metadata", "training_cache_metadata")
+    recovery_rows = rows_block(
+        "recovery_logs",
+        "recovery_rows",
+        """
+        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+        FROM (
+          SELECT data
+          FROM recovery_logs
+          ORDER BY data->>'date' DESC, row_order DESC, id DESC
+          LIMIT %s
+        ) rows
+        """,
+        (_bounded_limit(recovery_limit),),
+    )
+    sleep_rows = rows_block(
+        "sleep_logs",
+        "sleep_rows",
+        """
+        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+        FROM (
+          SELECT data
+          FROM sleep_logs
+          ORDER BY data->>'date' DESC, row_order DESC, id DESC
+          LIMIT %s
+        ) rows
+        """,
+        (_bounded_limit(sleep_limit),),
+    )
+
+    training_summary = empty_training_summary
+    if include_training_summary:
+        block_started = time.perf_counter()
+        training_summary = load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
+        blocks.append(
+            {
+                "block": "training_summary_cache",
+                "name": "training_summary_cache",
+                "table": "training_cache_metadata",
+                "status": "ok" if str(training_summary.get("status") or "") in {"ok", "not_configured"} else "warning",
+                "duration_ms": _duration_ms(block_started),
+                "message": training_summary.get("message", ""),
+                "error_type": training_summary.get("error_type"),
+            }
+        )
+
+    count_tables = {
+        "nutrition": "food_logs",
+        "body_metrics": "body_metric_logs",
+        "training": "workout_logs",
+        "recovery": "recovery_logs",
+        "sleep": "sleep_logs",
+    }
+    counts = {key: 0 for key in count_tables}
+    count_started = time.perf_counter()
+    try:
+        safe_count_tables = {key: _safe_table(table) for key, table in count_tables.items()}
+        placeholders = ", ".join(["(%s, %s)"] * len(safe_count_tables))
+        params: list[str] = []
+        for key, table in safe_count_tables.items():
+            params.extend([key, table])
+        with cursor(timeout_ms=1000) as cur:
+            cur.execute(
+                f"""
+                SELECT requested.metric, requested.table_name, to_regclass(requested.table_name) IS NOT NULL AS exists,
+                       COALESCE((
+                         SELECT reltuples::bigint
+                         FROM pg_class
+                         WHERE oid = to_regclass(requested.table_name)
+                       ), 0) AS estimate
+                FROM (VALUES {placeholders}) AS requested(metric, table_name)
+                """,
+                tuple(params),
+            )
+            count_rows_result = cur.fetchall()
+        for metric, table, exists, estimate in count_rows_result:
+            counts[str(metric)] = max(0, int(estimate or 0))
+            if not exists:
+                warnings.append(
+                    {
+                        "block": f"count_{metric}",
+                        "name": f"count_{metric}",
+                        "table": str(table),
+                        "status": "missing",
+                        "count_estimate": 0,
+                        "duration_ms": _duration_ms(count_started),
+                    }
+                )
     except Exception as exc:
-        return {
-            **structured_error(exc, operation="fetch_dashboard_core_bundle"),
-            "goals": {},
-            "targets": {},
-            "food_rows": [],
-            "body_rows": [],
-            "recovery_rows": [],
-            "sleep_rows": [],
-            "training_rows": [],
-            "training_summary": empty_training_summary,
-            "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
-            "duration_ms": _duration_ms(started),
-        }
+        logger.exception("[dashboard_core] count block failed")
+        warnings.append(
+            {
+                **structured_error(exc, operation="dashboard_core_counts"),
+                "block": "dashboard_core_counts",
+                "name": "dashboard_core_counts",
+                "status": "warning",
+                "duration_ms": _duration_ms(count_started),
+            }
+        )
+
+    return {
+        "status": "ok",
+        "goals": goals,
+        "targets": targets,
+        "food_rows": food_rows,
+        "body_rows": body_rows,
+        "recovery_rows": recovery_rows,
+        "sleep_rows": sleep_rows,
+        "training_rows": [],
+        "training_summary": training_summary,
+        "counts": counts,
+        "blocks": blocks,
+        "warnings": warnings,
+        "duration_ms": _duration_ms(started),
+    }

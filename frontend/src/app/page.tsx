@@ -50,9 +50,9 @@ function apiUrl(path: string) {
 const navigation = [
   { id: "dashboard", label: "Dashboard", icon: Gauge },
   { id: "food", label: "Food", icon: Utensils },
-  { id: "goals", label: "Goals & Targets", icon: Target },
-  { id: "recovery", label: "Weight & Recovery", icon: HeartPulse },
   { id: "training", label: "Training", icon: Dumbbell },
+  { id: "recovery", label: "Weight & Recovery", icon: HeartPulse },
+  { id: "goals", label: "Goals & Targets", icon: Target },
   { id: "history", label: "Data & History", icon: BarChart3 },
   { id: "settings", label: "Integrations / Settings", icon: Settings },
   { id: "debug", label: "Startup Debug", icon: AlertTriangle },
@@ -7461,8 +7461,11 @@ function HistoryPage({
               </button>
               {dailyNutritionHistoryExpanded ? (
                 <div id="daily-nutrition-history-panel" className="border-t border-white/10 p-3">
+                  {excludeNutritionError ? (
+                    <p className="mb-3 rounded-lg border border-red-300/20 bg-red-300/10 px-3 py-2 text-sm text-red-100">{excludeNutritionError}</p>
+                  ) : null}
                   {nutritionHistory.length ? (
-                    <DataTable rows={nutritionHistory.slice().reverse()} />
+                    <DailyNutritionHistoryTable rows={nutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} />
                   ) : (
                     <div className="rounded-lg border border-dashed border-white/15 bg-black/10 p-4">
                       <p className="font-medium text-white">No nutrition history yet</p>
@@ -9047,6 +9050,61 @@ function DataTable({ rows }: Readonly<{ rows: Array<Record<string, unknown>> }>)
   );
 }
 
+function DailyNutritionHistoryTable({
+  rows,
+  excludingDate,
+  onExcludeDay,
+}: Readonly<{
+  rows: DailyNutritionSummary[];
+  excludingDate: string;
+  onExcludeDay: (date: string) => void;
+}>) {
+  const columns = Object.keys(rows[0] ?? {});
+  return (
+    <div className="min-w-0 overflow-x-auto rounded-lg border border-white/10">
+      <table className="min-w-full divide-y divide-white/10 text-sm">
+        <thead className="sticky top-0 bg-white/[0.04] text-left text-zinc-400">
+          <tr>
+            {columns.map((column) => (
+              <th key={column} className="px-3 py-2 font-medium">
+                {column.replaceAll("_", " ")}
+              </th>
+            ))}
+            <th className="px-3 py-2 font-medium">action</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/10">
+          {rows.map((row, index) => {
+            const rowDate = String(row.date || "").slice(0, 10);
+            return (
+              <tr key={`${rowDate}-${index}`} className="text-zinc-200">
+                {columns.map((column) => {
+                  const value = (row as unknown as Record<string, unknown>)[column];
+                  return (
+                    <td key={column} className="px-3 py-2">
+                      {value === null || value === undefined || value === "" ? "—" : String(value)}
+                    </td>
+                  );
+                })}
+                <td className="px-3 py-2">
+                  <button
+                    type="button"
+                    onClick={() => onExcludeDay(rowDate)}
+                    disabled={!rowDate || excludingDate === rowDate}
+                    className="rounded-lg border border-red-300/20 px-2.5 py-1 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {excludingDate === rowDate ? "Excluding..." : "Exclude"}
+                  </button>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function formatSleepDuration(minutes?: number | null) {
   if (!minutes || minutes <= 0) return "No data";
   const hours = Math.floor(minutes / 60);
@@ -9650,6 +9708,29 @@ export default function Home() {
       await refreshAll();
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not move the workout.";
+      setApiError(message);
+      throw new Error(message);
+    }
+  }, [refreshAll]);
+
+  const excludeNutritionDay = useCallback(async (date: string) => {
+    const selectedDate = String(date || "").slice(0, 10);
+    if (!selectedDate) return;
+    setMessage(null);
+    setApiError(null);
+    try {
+      const result = await apiSend<{ status?: string; message?: string; date?: string; updated_rows?: number }>(
+        `/api/nutrition/history/${encodeURIComponent(selectedDate)}/exclude`,
+        "POST",
+        {},
+      );
+      if (result.status && result.status !== "ok") {
+        throw new Error(result.message || "Could not exclude nutrition day.");
+      }
+      setMessage(`Nutrition day ${result.date ?? selectedDate} excluded from analytics.`);
+      await refreshAll();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not exclude nutrition day.";
       setApiError(message);
       throw new Error(message);
     }
@@ -10588,6 +10669,7 @@ export default function Home() {
         trainingDataAction={trainingDataAction}
         workoutHistory={workoutHistory}
         onMoveWorkout={moveWorkoutDate}
+        onExcludeNutritionDay={excludeNutritionDay}
         strength={strengthTrends}
         selectedExercise={selectedExercise}
         setSelectedExercise={updateSelectedExercise}
