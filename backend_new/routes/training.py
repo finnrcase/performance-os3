@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi.responses import Response
 
-from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row
+from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row, load_recent_training_summary
 from backend_new.utils import json_safe, utc_now_iso
 
 
@@ -387,7 +387,7 @@ def sync_hevy() -> dict[str, Any]:
             result = sync_hevy_events()
         except HevyIntegrationError:
             result = import_hevy_workouts(page_size=10, pages=1)
-        return {"status": "ok", "checked_hevy": True, **_jsonable_result(result)}
+        return {"status": "ok", "checked_hevy": True, "core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
     except Exception as exc:
         return {"status": "error", "checked_hevy": True, "error_type": type(exc).__name__, "message": str(exc)}
 
@@ -418,7 +418,7 @@ def import_hevy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         from src.integrations.hevy_client import import_hevy_workouts
 
         result = import_hevy_workouts(page_size=page_size, pages=pages)
-        return {"status": "ok", **_jsonable_result(result)}
+        return {"status": "ok", "core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
     except Exception as exc:
         return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "imported_workouts": 0, "imported_rows": 0}
 
@@ -497,6 +497,7 @@ def rebuild_summaries() -> dict[str, Any]:
             "rebuilt_at": result["generated_at"],
         },
     )
+    result["core_training_summary"] = load_recent_training_summary(force_refresh=True)
     return result
 
 

@@ -7,7 +7,8 @@ data. It does not create schema, import data, or run integration syncs.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import logging
 import math
 import threading
 import time
@@ -41,6 +42,13 @@ SUPPORTED_JSONB_TABLES = {
     "user_goal_settings",
     "api_connections",
 }
+
+MAX_CORE_TRAINING_ROWS = 250
+CORE_TRAINING_DAYS = 90
+CORE_TRAINING_WORKOUTS = 5
+CORE_TRAINING_CACHE_KEY = "core_training_summary"
+
+logger = logging.getLogger(__name__)
 
 
 class DatabaseNotConfigured(RuntimeError):
@@ -98,6 +106,14 @@ def _bounded_limit(limit: int | str | None = 500) -> int:
     except (TypeError, ValueError):
         value = 500
     return max(1, min(value, 5000))
+
+
+def _core_training_limit(limit: int | str | None = MAX_CORE_TRAINING_ROWS) -> int:
+    try:
+        value = int(limit or MAX_CORE_TRAINING_ROWS)
+    except (TypeError, ValueError):
+        value = MAX_CORE_TRAINING_ROWS
+    return max(1, min(value, MAX_CORE_TRAINING_ROWS))
 
 
 def _safe_table(table: str) -> str:
@@ -296,6 +312,208 @@ def fetch_latest_json_rows(table: str, *, limit: int = 500) -> list[dict[str, An
         return [{"_db_error": {**structured_error(exc, operation="fetch_latest_json_rows"), "duration_ms": _duration_ms(started)}}]
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _training_row_volume(row: dict[str, Any]) -> float:
+    return _number(row.get("sets"), 0) * _number(row.get("reps"), 0) * _number(row.get("weight"), 0)
+
+
+def _cache_age_seconds(cached: dict[str, Any]) -> float | None:
+    timestamp = str(cached.get("core_cached_at") or cached.get("updated_at") or "")
+    if not timestamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        return max(0.0, (datetime.now(parsed.tzinfo) - parsed).total_seconds())
+    return max(0.0, (datetime.now() - parsed).total_seconds())
+
+
+def _summarize_training_rows(rows: list[dict[str, Any]], *, limit_workouts: int, days: int, total_rows: int, started: float, source: str) -> dict[str, Any]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in rows:
+        workout_date = str(row.get("date") or "")[:10]
+        if not workout_date:
+            continue
+        workout_id = str(row.get("workout_id") or row.get("hevy_workout_id") or row.get("source_id") or f"{workout_date}:unknown")
+        grouped.setdefault((workout_date, workout_id), []).append(row)
+
+    workouts: list[dict[str, Any]] = []
+    for (workout_date, workout_id), workout_rows in grouped.items():
+        first = workout_rows[0] if workout_rows else {}
+        workout_type = str(first.get("workout_type") or first.get("title") or first.get("name") or "Workout")
+        sources = sorted({str(row.get("source") or "manual") for row in workout_rows if row.get("source")})
+        has_run = any("run" in str(row.get("workout_type") or row.get("exercise") or "").lower() or str(row.get("source") or "").lower() == "strava" for row in workout_rows)
+        has_lift = any(not ("run" in str(row.get("workout_type") or row.get("exercise") or "").lower()) for row in workout_rows)
+        workouts.append(
+            {
+                "date": workout_date,
+                "workout_id": workout_id,
+                "workout_type": workout_type,
+                "total_sets": int(sum(max(0, int(_number(row.get("sets"), 0))) for row in workout_rows)),
+                "total_volume": round(sum(_training_row_volume(row) for row in workout_rows), 1),
+                "duration_minutes": round(max([_number(row.get("duration_minutes"), 0) for row in workout_rows] or [0]), 1),
+                "source": ", ".join(sources) if sources else "manual",
+                "has_run": has_run,
+                "has_lift": has_lift,
+            }
+        )
+
+    workouts.sort(key=lambda item: (str(item.get("date") or ""), str(item.get("workout_id") or "")), reverse=True)
+    latest = workouts[0] if workouts else None
+    recent = workouts[: max(1, int(limit_workouts or CORE_TRAINING_WORKOUTS))]
+    return {
+        "status": "ok",
+        "source": source,
+        "latest_workout": latest,
+        "latest_workout_date": latest.get("date") if latest else "",
+        "latest_workout_type": latest.get("workout_type") if latest else "",
+        "recent_workout_count": len(recent),
+        "workout_count": len(workouts),
+        "recent_rows": len(rows),
+        "total_rows": total_rows,
+        "days": days,
+        "limit_workouts": limit_workouts,
+        "max_core_training_rows": MAX_CORE_TRAINING_ROWS,
+        "recent_volume_summary": {
+            "total_volume": round(sum(_number(item.get("total_volume"), 0) for item in recent), 1),
+            "total_sets": int(sum(_number(item.get("total_sets"), 0) for item in recent)),
+            "duration_minutes": round(sum(_number(item.get("duration_minutes"), 0) for item in recent), 1),
+        },
+        "latest_flags": {
+            "has_run": bool(latest and latest.get("has_run")),
+            "has_lift": bool(latest and latest.get("has_lift")),
+        },
+        "items": recent,
+        "full_raw_hevy_scan": False,
+        "duration_ms": _duration_ms(started),
+    }
+
+
+def load_recent_training_summary(
+    limit_workouts: int = CORE_TRAINING_WORKOUTS,
+    days: int = CORE_TRAINING_DAYS,
+    cached_metadata: dict[str, Any] | None = None,
+    force_refresh: bool = False,
+) -> dict[str, Any]:
+    """Return a cache-first lightweight dashboard training summary.
+
+    This helper intentionally avoids pandas, strength trends, PRs, muscle
+    balance, workload analysis, and full Hevy/raw history scans.
+    """
+    started = time.perf_counter()
+    bounded_workouts = max(1, min(int(limit_workouts or CORE_TRAINING_WORKOUTS), CORE_TRAINING_WORKOUTS))
+    bounded_days = max(1, min(int(days or CORE_TRAINING_DAYS), CORE_TRAINING_DAYS))
+    cutoff = (date.today() - timedelta(days=bounded_days)).isoformat()
+
+    try:
+        cached = cached_metadata if isinstance(cached_metadata, dict) else {}
+        if not cached:
+            cached_rows = fetch_json_rows_for_value("training_cache_metadata", "metadata_key", CORE_TRAINING_CACHE_KEY, limit=1)
+            cached = cached_rows[0] if cached_rows and "_db_error" not in cached_rows[0] else {}
+        cached_summary = cached.get("core_summary") if isinstance(cached.get("core_summary"), dict) else {}
+        if not force_refresh and cached_summary and _cache_age_seconds(cached) is not None and (_cache_age_seconds(cached) or 0) <= 900:
+            logger.info(
+                "[dashboard_core] training rows recent=%s total=%s",
+                cached_summary.get("recent_rows", 0),
+                cached_summary.get("total_rows", 0),
+            )
+            return {
+                **cached_summary,
+                "status": "ok",
+                "source": "training_cache_metadata",
+                "duration_ms": _duration_ms(started),
+            }
+
+        with cursor(timeout_ms=2000) as cur:
+            cur.execute(
+                """
+                SELECT
+                  COALESCE((
+                    SELECT jsonb_agg(data)
+                    FROM (
+                      SELECT data
+                      FROM workout_logs
+                      WHERE COALESCE(data->>'date', '') >= %s
+                      ORDER BY data->>'date' DESC, row_order DESC, id DESC
+                      LIMIT %s
+                    ) rows
+                  ), '[]'::jsonb) AS rows,
+                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'workout_logs'::regclass), 0) AS total_rows
+                """,
+                (cutoff, _core_training_limit(MAX_CORE_TRAINING_ROWS)),
+            )
+            row = cur.fetchone()
+        rows = sanitize_json(list(row[0] or [])) if row else []
+        total_rows = max(0, int(row[1] or 0)) if row else 0
+        summary = _summarize_training_rows(rows, limit_workouts=bounded_workouts, days=bounded_days, total_rows=total_rows, started=started, source="bounded_workout_logs")
+        upsert_json_row(
+            "training_cache_metadata",
+            "metadata_key",
+            CORE_TRAINING_CACHE_KEY,
+            {
+                "metadata_key": CORE_TRAINING_CACHE_KEY,
+                "core_summary": summary,
+                "latest_workout_summary": summary.get("latest_workout"),
+                "recent_workout_count": summary.get("recent_workout_count", 0),
+                "latest_training_date": summary.get("latest_workout_date", ""),
+                "latest_volume_summary": summary.get("recent_volume_summary", {}),
+                "core_cached_at": datetime.now().isoformat(),
+            },
+        )
+        logger.info("[dashboard_core] training rows recent=%s total=%s", summary.get("recent_rows", 0), summary.get("total_rows", 0))
+        return summary
+    except DatabaseNotConfigured:
+        logger.info("[dashboard_core] training rows recent=%s total=%s", 0, 0)
+        return {
+            "status": "not_configured",
+            "source": "not_configured",
+            "latest_workout": None,
+            "latest_workout_date": "",
+            "latest_workout_type": "",
+            "recent_workout_count": 0,
+            "workout_count": 0,
+            "recent_rows": 0,
+            "total_rows": 0,
+            "days": bounded_days,
+            "limit_workouts": bounded_workouts,
+            "max_core_training_rows": MAX_CORE_TRAINING_ROWS,
+            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "duration_minutes": 0},
+            "latest_flags": {"has_run": False, "has_lift": False},
+            "items": [],
+            "full_raw_hevy_scan": False,
+            "duration_ms": _duration_ms(started),
+        }
+    except Exception as exc:
+        logger.info("[dashboard_core] training rows recent=%s total=%s", 0, 0)
+        return {
+            **structured_error(exc, operation="load_recent_training_summary"),
+            "source": "error",
+            "latest_workout": None,
+            "latest_workout_date": "",
+            "latest_workout_type": "",
+            "recent_workout_count": 0,
+            "workout_count": 0,
+            "recent_rows": 0,
+            "total_rows": 0,
+            "days": bounded_days,
+            "limit_workouts": bounded_workouts,
+            "max_core_training_rows": MAX_CORE_TRAINING_ROWS,
+            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "duration_minutes": 0},
+            "latest_flags": {"has_run": False, "has_lift": False},
+            "items": [],
+            "full_raw_hevy_scan": False,
+            "duration_ms": _duration_ms(started),
+        }
+
+
 def insert_json_row(table: str, data: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     payload = sanitize_json(dict(data))
@@ -416,8 +634,20 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
     Hevy history scans while still giving the dashboard a recent workout card.
     """
     started = time.perf_counter()
+    empty_training_summary = {
+        "status": "not_loaded",
+        "latest_workout": None,
+        "latest_workout_date": "",
+        "latest_workout_type": "",
+        "recent_workout_count": 0,
+        "recent_rows": 0,
+        "total_rows": 0,
+        "items": [],
+        "full_raw_hevy_scan": False,
+        "duration_ms": 0,
+    }
     try:
-        with cursor(timeout_ms=1800) as cur:
+        with cursor(timeout_ms=2000) as cur:
             cur.execute(
                 """
                 SELECT
@@ -443,21 +673,21 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
                     ) rows
                   ), '[]'::jsonb) AS body_rows,
                   COALESCE((
-                    SELECT jsonb_agg(data)
-                    FROM (
-                      SELECT data
-                      FROM workout_logs
-                      ORDER BY id DESC
-                      LIMIT %s
-                    ) rows
-                  ), '[]'::jsonb) AS training_rows,
+                    SELECT data
+                    FROM training_cache_metadata
+                    WHERE COALESCE(data->>'metadata_key', '') = %s
+                    ORDER BY updated_at DESC, id DESC
+                    LIMIT 1
+                  ), '{}'::jsonb) AS training_cache_metadata,
                   COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'food_logs'::regclass), 0) AS food_count,
                   COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'body_metric_logs'::regclass), 0) AS body_count,
                   COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'workout_logs'::regclass), 0) AS training_count
                 """,
-                (today, _bounded_limit(food_limit), _bounded_limit(body_limit), _bounded_limit(training_limit)),
+                (today, _bounded_limit(food_limit), _bounded_limit(body_limit), CORE_TRAINING_CACHE_KEY),
             )
             row = cur.fetchone()
+        cached_training_metadata = sanitize_json(dict(row[4] or {})) if row else {}
+        training_summary = load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
         if not row:
             return {
                 "status": "ok",
@@ -466,6 +696,7 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
                 "food_rows": [],
                 "body_rows": [],
                 "training_rows": [],
+                "training_summary": training_summary,
                 "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
                 "duration_ms": _duration_ms(started),
             }
@@ -475,7 +706,8 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "targets": sanitize_json(dict(row[1] or {})),
             "food_rows": sanitize_json(list(row[2] or [])),
             "body_rows": sanitize_json(list(row[3] or [])),
-            "training_rows": sanitize_json(list(row[4] or [])),
+            "training_rows": [],
+            "training_summary": training_summary,
             "counts": {
                 "nutrition": max(0, int(row[5] or 0)),
                 "body_metrics": max(0, int(row[6] or 0)),
@@ -491,6 +723,7 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "food_rows": [],
             "body_rows": [],
             "training_rows": [],
+            "training_summary": empty_training_summary,
             "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
             "duration_ms": _duration_ms(started),
         }
@@ -502,6 +735,7 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "food_rows": [],
             "body_rows": [],
             "training_rows": [],
+            "training_summary": empty_training_summary,
             "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
             "duration_ms": _duration_ms(started),
         }

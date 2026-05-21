@@ -366,11 +366,14 @@ def dashboard_core() -> dict[str, Any]:
     food_rows = bundle.get("food_rows") if isinstance(bundle.get("food_rows"), list) else []
     body_rows = bundle.get("body_rows") if isinstance(bundle.get("body_rows"), list) else []
     training_rows = bundle.get("training_rows") if isinstance(bundle.get("training_rows"), list) else []
+    training_summary = bundle.get("training_summary") if isinstance(bundle.get("training_summary"), dict) else {}
     goals = {**fallback_goals(), **(bundle.get("goals") if isinstance(bundle.get("goals"), dict) else {})}
     targets = _simple_targets(goals, bundle.get("targets") if isinstance(bundle.get("targets"), dict) else {})
     nutrition_today = _totals(food_rows)
     latest_bodyweight, bodyweight_trend, weight = _weight_tile(body_rows, today)
-    latest_workout = _latest_workout(training_rows)
+    latest_workout = training_summary.get("latest_workout") if isinstance(training_summary.get("latest_workout"), dict) else _latest_workout(training_rows)
+    training_status = str(training_summary.get("status") or "ok")
+    training_available = training_status in {"ok", "not_configured", "not_loaded"}
     counts = {**(bundle.get("counts") if isinstance(bundle.get("counts"), dict) else {}), "recovery": 0, "sleep": 0}
     adaptive_recommendation = _adaptive_placeholder(targets)
     lean_bulk_decision = _lean_bulk_placeholder(targets)
@@ -379,9 +382,28 @@ def dashboard_core() -> dict[str, Any]:
         [
             {"block": "today_food_summary", "name": "today_food_summary", "status": "ok", "rows": len(food_rows), "duration_ms": 0},
             {"block": "weight_summary", "name": "weight_summary", "status": "ok", "rows": len(body_rows), "duration_ms": 0},
-            {"block": "latest_workout", "name": "latest_workout", "status": "ok", "rows": len(training_rows), "duration_ms": 0},
+            {
+                "block": "load_training",
+                "name": "load_training",
+                "status": "ok" if training_available else "degraded",
+                "rows": training_summary.get("recent_rows", len(training_rows)),
+                "total_rows": training_summary.get("total_rows", counts.get("training", 0)),
+                "duration_ms": training_summary.get("duration_ms", 0),
+                "source": training_summary.get("source", "unknown"),
+                "message": training_summary.get("message", ""),
+                "full_raw_hevy_scan": False,
+            },
+            {
+                "block": "latest_workout",
+                "name": "latest_workout",
+                "status": "ok",
+                "rows": training_summary.get("recent_rows", len(training_rows)),
+                "duration_ms": 0,
+            },
         ]
     )
+    training_unavailable = not training_available and not latest_workout
+    training_summary_text = "Training summary temporarily unavailable" if training_unavailable else latest_workout.get("workout_type") if latest_workout else "Workout not logged yet"
     return {
         "ok": True,
         "core_ready": True,
@@ -396,8 +418,8 @@ def dashboard_core() -> dict[str, Any]:
         "bodyweight_trend": bodyweight_trend,
         "latest_workout": latest_workout,
         "lift_performance": {
-            "status": f"Latest: {latest_workout.get('workout_type')}" if latest_workout else "Workout not logged yet",
-            "summary": latest_workout.get("workout_type") if latest_workout else "Workout not logged yet",
+            "status": f"Latest: {latest_workout.get('workout_type')}" if latest_workout else training_summary_text,
+            "summary": training_summary_text,
             "comparison": None,
             "today_volume": latest_workout.get("total_volume") if latest_workout and latest_workout.get("date") == today else None,
             "percent_vs_average": None,
@@ -442,7 +464,12 @@ def dashboard_core() -> dict[str, Any]:
             "required_blocks_failed": [],
             "generated_at": utc_now_iso(),
             "total_duration_ms": total_duration_ms,
-            "training_read_limit": 500,
+            "training_read_limit": training_summary.get("max_core_training_rows", 250),
+            "training_core_limit": training_summary.get("max_core_training_rows", 250),
+            "training_core_days": training_summary.get("days", 90),
+            "training_recent_rows": training_summary.get("recent_rows", 0),
+            "training_total_rows": training_summary.get("total_rows", counts.get("training", 0)),
+            "training_summary_source": training_summary.get("source", "unknown"),
             "full_training_history_scanned": False,
             "external_api_checks": False,
             "syncs": False,
