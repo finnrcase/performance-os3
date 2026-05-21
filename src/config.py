@@ -15,6 +15,7 @@ INTEGRATION_FIELDS = {
     "hevy_api_key": "",
     "strava_client_id": "",
     "strava_client_secret": "",
+    "strava_redirect_uri": "",
     "fitbit_client_id": "",
     "fitbit_client_secret": "",
     "withings_client_id": "",
@@ -175,10 +176,10 @@ def integration_status(key: str, settings: dict) -> str:
         return "Local upload only"
     if key == "strava_connection":
         tokens = settings.get("metadata", {}).get("strava_tokens", {})
-        if tokens.get("access_token") and tokens.get("refresh_token"):
+        if tokens.get("refresh_token"):
             return "Connected"
         if integrations.get("strava_client_id") and integrations.get("strava_client_secret"):
-            return "Ready to connect"
+            return "Disconnected"
         return "Not configured"
     if key == "withings_connection":
         tokens = settings.get("metadata", {}).get("withings_tokens", {})

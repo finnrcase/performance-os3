@@ -539,6 +539,62 @@ def import_hevy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "imported_workouts": 0, "imported_rows": 0}
 
 
+@router.post("/api/training/import/strava")
+def import_strava(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    per_page = _bounded_int(payload.get("per_page"), 30, 1, 100)
+    try:
+        from src.integrations.strava_client import (
+            StravaIntegrationError,
+            StravaReconnectRequired,
+            import_recent_runs,
+        )
+
+        result = import_recent_runs(per_page=per_page)
+        return {
+            "status": "ok",
+            "message": "Strava activities imported.",
+            "core_training_summary": load_recent_training_summary(force_refresh=True),
+            **_jsonable_result(result),
+        }
+    except StravaReconnectRequired as exc:
+        logger.warning("Strava import requires reconnect: %s", exc)
+        return {
+            "status": "reconnect_required",
+            "message": str(exc),
+            "reconnect_required": True,
+            "fetched_activities": 0,
+            "imported_runs": 0,
+            "updated_runs": 0,
+            "skipped_duplicates": 0,
+            "latest_activity_date": "",
+        }
+    except StravaIntegrationError as exc:
+        logger.warning("Strava import failed: %s", exc)
+        return {
+            "status": "error",
+            "message": str(exc),
+            "error_type": type(exc).__name__,
+            "fetched_activities": 0,
+            "imported_runs": 0,
+            "updated_runs": 0,
+            "skipped_duplicates": 0,
+            "latest_activity_date": "",
+        }
+    except Exception as exc:
+        logger.exception("Unexpected Strava import failure.")
+        return {
+            "status": "error",
+            "message": str(exc),
+            "error_type": type(exc).__name__,
+            "fetched_activities": 0,
+            "imported_runs": 0,
+            "updated_runs": 0,
+            "skipped_duplicates": 0,
+            "latest_activity_date": "",
+        }
+
+
 @router.get("/api/training/export/hevy-raw")
 def export_hevy_raw(limit: int = 5000) -> Response:
     bounded = _bounded_int(limit, 5000, 1, 5000)

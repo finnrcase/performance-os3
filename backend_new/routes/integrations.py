@@ -168,22 +168,37 @@ def _strava_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     tokens = _strava_tokens(settings)
     sync = _strava_sync(settings)
     client_id, client_secret = _strava_credentials(settings)
-    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    access_token_present = bool(tokens.get("access_token"))
+    refresh_token_present = bool(tokens.get("refresh_token"))
+    connected = refresh_token_present
     expires_at = int(tokens.get("expires_at") or 0)
-    expired = bool(connected and expires_at and expires_at <= int(time.time()))
-    needs_reconnect = bool(sync.get("needs_reconnect") or expired)
+    access_expired = bool(access_token_present and expires_at and expires_at <= int(time.time()))
+    needs_reconnect = bool(sync.get("needs_reconnect") and (access_token_present or refresh_token_present))
     if needs_reconnect:
-        status = "Disconnected"
+        status = "Expired/Reauth required"
     elif connected:
         status = "Connected"
     elif client_id and client_secret:
-        status = "Ready to connect"
+        status = "Disconnected"
     else:
         status = "Not configured"
+    if needs_reconnect:
+        token_status = "reconnect_required"
+    elif refresh_token_present and access_expired:
+        token_status = "access_expired_refresh_available"
+    elif refresh_token_present and access_token_present:
+        token_status = "valid"
+    elif refresh_token_present:
+        token_status = "refresh_available"
+    else:
+        token_status = "missing"
     return status, {
         "connected": connected and not needs_reconnect,
+        "access_token_present": access_token_present,
+        "refresh_token_present": refresh_token_present,
         "athlete_id": str(tokens.get("athlete_id") or ""),
-        "token_status": "expired" if expired else "valid" if connected else "missing",
+        "expires_at": expires_at or None,
+        "token_status": token_status,
         "scopes": str(tokens.get("scopes") or ""),
         "last_imported_count": sync.get("last_imported_count", 0),
         "last_updated_count": sync.get("last_updated_count", 0),
@@ -233,19 +248,24 @@ def _withings_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 
 def _status_color(status: str) -> str:
-    return "green" if status == "Connected" else "yellow" if status == "Ready to connect" else "red" if status == "Disconnected" else "gray"
+    return "green" if status == "Connected" else "yellow" if status in {"Disconnected", "Expired/Reauth required"} else "gray"
+
+
+def _status_slug(status: str) -> str:
+    return status.lower().replace("/", "_").replace(" ", "_").replace("__", "_")
 
 
 def _health_card(provider: str, title: str, status: str, metadata: dict[str, Any]) -> dict[str, Any]:
     connected = status == "Connected"
+    action = f"{provider}_sync" if connected else f"{provider}_reconnect" if status == "Expired/Reauth required" else f"{provider}_connect"
     return {
         "id": provider,
         "title": title,
-        "status": "connected" if connected else "warning" if status in {"Ready to connect", "Disconnected"} else "error",
+        "status": "connected" if connected else "warning" if status in {"Disconnected", "Expired/Reauth required"} else "error",
         "label": status,
         "detail": f"{title} is {status.lower()}.",
         "last_synced_at": metadata.get("last_synced_at", ""),
-        "action": f"{provider}_sync" if connected else f"{provider}_connect",
+        "action": action,
         "metadata": metadata,
     }
 
@@ -286,7 +306,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
                 required_env_vars=["HEVY_API_KEY"],
             ),
             "strava": _component(
-                configured=strava_status in {"Connected", "Ready to connect", "Disconnected"},
+                configured=strava_status in {"Connected", "Disconnected", "Expired/Reauth required"},
                 status=_status_color(strava_status),
                 message=f"Strava is {strava_status.lower()}. Startup never calls Strava.",
                 required_env_vars=["STRAVA_CLIENT_ID", "STRAVA_CLIENT_SECRET"],
@@ -320,7 +340,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
         **base.get("services", {}),
         "openai": {"configured": openai_configured, "status": "ok" if openai_configured else "missing_api_key", "message": base["openai"]["message"]},
         "hevy": {"configured": hevy_configured, "status": "ok" if hevy_configured else "missing_api_key", "message": base["hevy"]["message"]},
-        "strava": {"configured": base["strava"]["configured"], "status": "ok" if strava_status == "Connected" else strava_status.lower().replace(" ", "_"), "message": base["strava"]["message"], "last_synced_at": strava_meta.get("last_synced_at", ""), "latest_record": strava_meta.get("latest_activity_date", ""), "reconnect_required": strava_meta.get("needs_reconnect", False)},
+        "strava": {"configured": base["strava"]["configured"], "status": "ok" if strava_status == "Connected" else _status_slug(strava_status), "message": base["strava"]["message"], "last_synced_at": strava_meta.get("last_synced_at", ""), "latest_record": strava_meta.get("latest_activity_date", ""), "reconnect_required": strava_meta.get("needs_reconnect", False), "token_status": strava_meta.get("token_status", "missing")},
         "withings": {"configured": base["withings"]["configured"], "status": "ok" if withings_status == "Connected" else withings_status.lower().replace(" ", "_"), "message": base["withings"]["message"], "last_synced_at": withings_meta.get("last_synced_at", ""), "latest_record": withings_meta.get("latest_measurement_date", ""), "reconnect_required": withings_meta.get("needs_reconnect", False)},
     }
     base["health"] = [
@@ -343,6 +363,9 @@ def _strava_redirect_uri(request: Request) -> str:
     configured = os.getenv("STRAVA_REDIRECT_URI", "").strip()
     if configured:
         return configured.replace("/api/Strava/callback", "/api/strava/callback")
+    saved = str(_integrations(_settings_document()).get("strava_redirect_uri") or "").strip()
+    if saved:
+        return saved.replace("/api/Strava/callback", "/api/strava/callback")
     return str(request.url_for("strava_callback"))
 
 
@@ -421,7 +444,12 @@ def get_strava_auth_url(request: Request, reconnect: bool = Query(default=False)
             "state": "performance-os",
         }
     )
-    return {"status": "ok", "auth_url": f"{STRAVA_AUTH_URL}?{query}", "redirect_uri": redirect_uri}
+    return {
+        "status": "ok",
+        "auth_url": f"{STRAVA_AUTH_URL}?{query}",
+        "redirect_uri": redirect_uri,
+        "scope": os.getenv("STRAVA_SCOPES", "").strip() or STRAVA_SCOPES,
+    }
 
 
 @router.get("/api/strava/callback", name="strava_callback")
@@ -448,6 +476,36 @@ def strava_callback(
 def disconnect_strava() -> dict[str, Any]:
     _clear_strava_connection(mark_error=False, reason="Strava disconnected from backend_new settings.")
     return _integration_payload(external_checks=False)
+
+
+@router.get("/api/debug/strava")
+def debug_strava() -> dict[str, Any]:
+    settings = _settings_document()
+    client_id, client_secret = _strava_credentials(settings)
+    redirect_uri = os.getenv("STRAVA_REDIRECT_URI", "").strip() or str(_integrations(settings).get("strava_redirect_uri") or "").strip()
+    tokens = _strava_tokens(settings)
+    status, metadata = _strava_status(settings)
+    if status == "Connected":
+        next_action = "import_strava"
+    elif status == "Expired/Reauth required":
+        next_action = "reconnect_strava"
+    else:
+        next_action = "connect_strava" if client_id and client_secret else "configure_strava_credentials"
+    return {
+        "client_id_configured": bool(client_id),
+        "client_secret_configured": bool(client_secret),
+        "redirect_uri_configured": bool(redirect_uri),
+        "access_token_present": bool(tokens.get("access_token")),
+        "refresh_token_present": bool(tokens.get("refresh_token")),
+        "expires_at": tokens.get("expires_at") or None,
+        "athlete_id": str(tokens.get("athlete_id") or "") or None,
+        "status": _status_slug(status),
+        "display_status": status,
+        "token_status": metadata.get("token_status", "missing"),
+        "last_import_date": metadata.get("last_synced_at", ""),
+        "latest_activity_date": metadata.get("latest_activity_date", ""),
+        "next_action": next_action,
+    }
 
 
 @router.get("/api/integrations/withings/auth-url")

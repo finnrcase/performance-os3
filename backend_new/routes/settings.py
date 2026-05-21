@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from fastapi import APIRouter
@@ -77,6 +78,55 @@ def _withings_status(settings: dict[str, Any], integrations: dict[str, Any]) -> 
     return "Ready to connect" if has_credentials else "Not configured"
 
 
+def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    tokens = metadata.get("strava_tokens") if isinstance(metadata.get("strava_tokens"), dict) else {}
+    sync = metadata.get("strava_sync") if isinstance(metadata.get("strava_sync"), dict) else {}
+    access_token = os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or str(tokens.get("access_token") or "").strip()
+    refresh_token = os.getenv("STRAVA_REFRESH_TOKEN", "").strip() or str(tokens.get("refresh_token") or "").strip()
+    try:
+        expires_at = int(os.getenv("STRAVA_EXPIRES_AT", "").strip() or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip() or tokens.get("expires_at") or 0)
+    except ValueError:
+        expires_at = 0
+    has_credentials = (
+        integrations.get("strava_client_id")
+        and integrations.get("strava_client_secret")
+    ) or (
+        _configured_from_env("strava_client_id")
+        and _configured_from_env("strava_client_secret")
+    )
+    access_expired = bool(access_token and expires_at and expires_at <= int(time.time()))
+    has_tokens = bool(access_token or refresh_token)
+    if sync.get("needs_reconnect") and has_tokens:
+        status = "Expired/Reauth required"
+        token_status = "reconnect_required"
+    elif refresh_token:
+        status = "Connected"
+        token_status = "access_expired_refresh_available" if access_expired else "valid" if access_token else "refresh_available"
+    elif has_credentials:
+        status = "Disconnected"
+        token_status = "missing"
+    else:
+        status = "Not configured"
+        token_status = "missing"
+    return status, {
+        "connected": status == "Connected",
+        "configured": bool(has_credentials),
+        "token_status": token_status,
+        "access_token_present": bool(access_token),
+        "refresh_token_present": bool(refresh_token),
+        "athlete_id": str(os.getenv("STRAVA_ATHLETE_ID", "").strip() or tokens.get("athlete_id") or ""),
+        "expires_at": expires_at or None,
+        "last_synced_at": sync.get("last_synced_at", ""),
+        "latest_record": sync.get("latest_activity_date", ""),
+        "last_error": sync.get("last_error", ""),
+        "reconnect_required": bool(sync.get("needs_reconnect") and has_tokens),
+        "imported_runs": sync.get("last_imported_count", 0),
+        "updated_runs": sync.get("last_updated_count", 0),
+        "fetched_activities": sync.get("last_fetched_count", 0),
+    }
+
+
 def _saved_settings() -> dict[str, Any]:
     stored = fetch_latest_document("api_connections", _default_settings())
     if not isinstance(stored, dict):
@@ -97,9 +147,10 @@ def settings_payload() -> dict[str, Any]:
     withings_sync = metadata.get("withings_sync") if isinstance(metadata.get("withings_sync"), dict) else {}
     statuses = {field: _status_for_field(field, integrations) for field in INTEGRATION_FIELDS}
     withings_status = _withings_status(settings, integrations)
+    strava_status, strava_service = _strava_connection(settings, integrations)
     statuses.update(
         {
-            "strava": "Configured" if statuses["strava_client_id"] == "Configured" and statuses["strava_client_secret"] == "Configured" else "Not configured",
+            "strava": strava_status,
             "withings": withings_status,
             "fitbit_google_health": "Prepared",
         }
@@ -117,11 +168,34 @@ def settings_payload() -> dict[str, Any]:
     }
     services = {
         "hevy": {"configured": statuses["hevy_api_key"] == "Configured", "status": "disabled", "message": "Hevy sync is disabled in backend_new."},
-        "strava": {"configured": statuses["strava"] == "Configured", "status": "disabled", "message": "Strava sync is disabled in backend_new."},
+        "strava": {
+            "configured": strava_service["configured"],
+            "status": "connected" if strava_status == "Connected" else "needs_reconnect" if strava_status == "Expired/Reauth required" else "disconnected" if strava_status == "Disconnected" else "not_configured",
+            "message": "Strava import is manual in backend_new. Startup never calls the Strava API.",
+            **strava_service,
+        },
         "withings": withings_service,
         "openai": {"configured": statuses["openai_api_key"] == "Configured", "status": "disabled", "message": "AI enrichment is disabled in backend_new."},
     }
     health = [
+        {
+            "id": "strava",
+            "name": "Strava",
+            "status": "green" if strava_status == "Connected" else "yellow" if strava_status in {"Disconnected", "Expired/Reauth required"} else "gray",
+            "message": services["strava"]["message"],
+            "last_synced_at": strava_service["last_synced_at"],
+            "latest_record": strava_service["latest_record"],
+            "action": "strava_import" if strava_status == "Connected" else "strava_reconnect" if strava_status == "Expired/Reauth required" else "strava_connect",
+            "metadata": {
+                "connection": strava_status,
+                "configured": strava_service["configured"],
+                "reconnect_required": strava_service["reconnect_required"],
+                "token_status": strava_service["token_status"],
+                "imported_runs": strava_service["imported_runs"],
+                "updated_runs": strava_service["updated_runs"],
+                "fetched_activities": strava_service["fetched_activities"],
+            },
+        },
         {
             "id": "withings",
             "name": "Withings",

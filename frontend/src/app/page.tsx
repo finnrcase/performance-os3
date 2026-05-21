@@ -2741,6 +2741,7 @@ function FoodPresetIconPicker({
 
 function PresetFoodTile({
   shortcut,
+  toneIndex,
   pending,
   disabled,
   editing,
@@ -2748,21 +2749,24 @@ function PresetFoodTile({
   onClick,
 }: Readonly<{
   shortcut: PresetFoodShortcut;
+  toneIndex: number;
   pending: boolean;
   disabled?: boolean;
   editing: boolean;
   editMode: boolean;
   onClick: () => void;
 }>) {
+  const tone = FOOD_PRESET_TILE_TONES[toneIndex % FOOD_PRESET_TILE_TONES.length];
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={pending || disabled}
       className={cx(
-        "group relative aspect-square min-w-0 rounded-lg border bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60",
+        "group relative aspect-square min-w-0 rounded-lg border p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
         editing ? "accent-outline" : "border-white/10",
       )}
+      style={{ backgroundColor: tone.backgroundColor, borderColor: tone.borderColor }}
       title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
     >
       {editMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
@@ -2775,6 +2779,15 @@ function PresetFoodTile({
     </button>
   );
 }
+
+const FOOD_PRESET_TILE_TONES = [
+  { backgroundColor: "rgba(74, 222, 128, 0.08)", borderColor: "rgba(74, 222, 128, 0.28)" },
+  { backgroundColor: "rgba(56, 189, 248, 0.08)", borderColor: "rgba(56, 189, 248, 0.28)" },
+  { backgroundColor: "rgba(168, 85, 247, 0.08)", borderColor: "rgba(168, 85, 247, 0.28)" },
+  { backgroundColor: "rgba(251, 146, 60, 0.08)", borderColor: "rgba(251, 146, 60, 0.28)" },
+  { backgroundColor: "rgba(244, 114, 182, 0.08)", borderColor: "rgba(244, 114, 182, 0.28)" },
+  { backgroundColor: "rgba(45, 212, 191, 0.08)", borderColor: "rgba(45, 212, 191, 0.28)" },
+] as const;
 
 function PresetFoodEditor({
   shortcut,
@@ -4740,13 +4753,14 @@ function FoodPage({
               filteredShortcuts.length ? (
               <div className="space-y-4">
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
-                  {filteredShortcuts.map((shortcut) => {
+                  {filteredShortcuts.map((shortcut, index) => {
                     const pending = pendingPresetAction === `shortcut:${shortcut.shortcut_id}`;
                     const editing = presetEditMode && editingShortcut?.shortcut_id === shortcut.shortcut_id;
                     return (
                       <PresetFoodTile
                         key={shortcut.shortcut_id}
                         shortcut={shortcut}
+                        toneIndex={index}
                         pending={pending}
                         disabled={Boolean(pendingPresetAction?.startsWith("edit:"))}
                         editing={editing}
@@ -10481,8 +10495,8 @@ export default function Home() {
           void submitAndRefresh(
             { preventDefault: () => undefined } as FormEvent,
             async () => {
-              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string }>("/api/training/import/strava", "POST", { per_page: 30 });
-              if (result.status === "error") {
+              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string; reconnect_required?: boolean }>("/api/training/import/strava", "POST", { per_page: 30 });
+              if (result.status !== "ok") {
                 throw new Error(result.message ?? "Strava import failed.");
               }
               setMessage(`Synced ${result.fetched_activities ?? result.imported_runs} Strava runs. Imported ${result.imported_runs}, updated ${result.updated_runs ?? 0}.`);
@@ -10545,8 +10559,8 @@ export default function Home() {
           void submitAndRefresh(
             { preventDefault: () => undefined } as FormEvent,
             async () => {
-              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string }>("/api/training/import/strava", "POST", { per_page: 30 });
-              if (result.status === "error") {
+              const result = await apiSend<{ status: string; message?: string; fetched_activities?: number; imported_runs: number; updated_runs?: number; skipped_duplicates: number; latest_activity_date?: string; reconnect_required?: boolean }>("/api/training/import/strava", "POST", { per_page: 30 });
+              if (result.status !== "ok") {
                 throw new Error(result.message ?? "Strava import failed.");
               }
               setMessage(`Synced ${result.fetched_activities ?? result.imported_runs} Strava runs. Imported ${result.imported_runs}, updated ${result.updated_runs ?? 0}.`);

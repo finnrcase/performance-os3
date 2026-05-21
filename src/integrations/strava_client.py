@@ -28,6 +28,20 @@ STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITY_MARKER = "strava_activity_id="
 RUN_SPORT_TYPES = {"Run", "TrailRun", "VirtualRun"}
+CARDIO_SPORT_TYPES = {
+    "Run",
+    "TrailRun",
+    "VirtualRun",
+    "Ride",
+    "MountainBikeRide",
+    "VirtualRide",
+    "Walk",
+    "Hike",
+    "Elliptical",
+    "StairStepper",
+    "Rowing",
+    "Swim",
+}
 METERS_PER_MILE = 1609.344
 logger = logging.getLogger(__name__)
 
@@ -120,10 +134,11 @@ def get_strava_connection_status() -> str:
     sync_state = settings.get("metadata", {}).get("strava_sync", {})
     env_tokens = _env_strava_tokens()
     has_env_tokens = bool(env_tokens.get("access_token") and env_tokens.get("refresh_token"))
-    if sync_state.get("needs_reconnect") and not has_env_tokens:
-        return "Disconnected"
+    has_token = bool(tokens.get("access_token") or tokens.get("refresh_token"))
+    if sync_state.get("needs_reconnect") and has_token and not has_env_tokens:
+        return "Expired/Reauth required"
     integrations = settings.get("integrations", {})
-    if tokens.get("access_token") and tokens.get("refresh_token"):
+    if tokens.get("refresh_token"):
         return "Connected"
     client_id = (
         integrations.get("strava_client_id", "").strip()
@@ -136,7 +151,7 @@ def get_strava_connection_status() -> str:
         or _read_dotenv_value("STRAVA_CLIENT_SECRET").strip()
     )
     if client_id and client_secret:
-        return "Ready to connect"
+        return "Disconnected"
     return "Not configured"
 
 
@@ -146,7 +161,7 @@ def get_strava_safe_token_metadata() -> dict:
     tokens = _effective_strava_tokens(settings)
     expires_at = int(tokens.get("expires_at") or 0)
     now = int(time.time())
-    connected = bool(tokens.get("access_token") and tokens.get("refresh_token"))
+    connected = bool(tokens.get("refresh_token"))
     token_expired = bool(connected and expires_at and expires_at <= now)
     token_expiring = bool(connected and expires_at and not token_expired and expires_at <= now + 300)
     return {
@@ -357,7 +372,7 @@ def _fetch_recent_activities_with_token(token: str, per_page: int) -> list[dict]
 
 
 def fetch_recent_runs(access_token: str | None = None, per_page: int = 30) -> list[dict]:
-    """Fetch recent Strava activities and keep run-like sport types."""
+    """Fetch recent Strava activities and keep run/cardio sport types."""
     token = _get_access_token(access_token)
 
     try:
@@ -411,9 +426,9 @@ def fetch_recent_runs(access_token: str | None = None, per_page: int = 30) -> li
     runs = [
         activity
         for activity in activities
-        if activity.get("sport_type") in RUN_SPORT_TYPES or activity.get("type") == "Run"
+        if activity.get("sport_type") in CARDIO_SPORT_TYPES or activity.get("type") in CARDIO_SPORT_TYPES
     ]
-    logger.info("Fetched %s Strava activities; %s run activities after filtering.", len(activities), len(runs))
+    logger.info("Fetched %s Strava activities; %s run/cardio activities after filtering.", len(activities), len(runs))
     return runs
 
 
@@ -432,11 +447,12 @@ def normalize_strava_run(activity: dict) -> dict:
     )
     name = str(activity.get("name") or "Strava Run").strip()
     sport_type = str(activity.get("sport_type") or activity.get("type") or "Run")
+    workout_type = "Run" if sport_type in RUN_SPORT_TYPES or str(activity.get("type") or "") == "Run" else "Cardio"
 
     return {
         "workout_id": activity_id,
         "date": _parse_date(activity.get("start_date_local") or activity.get("start_date")),
-        "workout_type": "Run",
+        "workout_type": workout_type,
         "muscle_group": "Cardio",
         "exercise": name,
         "set_number": 1,
