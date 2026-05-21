@@ -4,19 +4,21 @@ from collections import defaultdict
 from datetime import date, timedelta
 import csv
 import io
+import logging
 import os
 import time
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row, load_recent_training_summary
+from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row, load_recent_training_summary, move_workout_date_rows
 from backend_new.utils import json_safe, utc_now_iso
 from src.training_schedule import classify_workout
 
 
 router = APIRouter(tags=["training"])
+logger = logging.getLogger(__name__)
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -284,6 +286,53 @@ def _latest_date(rows: list[dict[str, Any]], *fields: str) -> str:
 @router.get("/api/training/history")
 def training_history(limit: int = 25, days: int = 180) -> dict[str, Any]:
     return _history_payload(limit=limit, days=days)
+
+
+@router.post("/api/training/workout-date")
+def update_workout_date(payload: dict[str, Any]) -> dict[str, Any]:
+    workout_id = str((payload or {}).get("workout_id") or "").strip()
+    new_date = str((payload or {}).get("new_date") or "").strip()[:10]
+    if not workout_id:
+        raise HTTPException(status_code=400, detail="workout_id is required.")
+    if not new_date:
+        raise HTTPException(status_code=400, detail="new_date is required.")
+
+    normalized = move_workout_date_rows("workout_logs", workout_id, new_date, annotate_notes=True)
+    if normalized.get("status") != "ok":
+        status = str(normalized.get("status") or "error")
+        raise HTTPException(
+            status_code=503 if status == "not_configured" else 500,
+            detail=normalized.get("message") or f"Could not move workout: {status}.",
+        )
+    if int(normalized.get("updated_rows") or 0) <= 0:
+        raise HTTPException(status_code=404, detail=f"No workout found with id {workout_id}.")
+
+    raw_workouts = move_workout_date_rows("raw_hevy_workouts", workout_id, new_date, match_fields=("hevy_workout_id", "workout_id", "id"))
+    raw_sets = move_workout_date_rows("raw_hevy_sets", workout_id, new_date, match_fields=("hevy_workout_id", "workout_id"))
+    cache_summary = load_recent_training_summary(force_refresh=True)
+    old_date = str(normalized.get("old_date") or "")
+    updated_rows = int(normalized.get("updated_rows") or 0)
+    logger.info(
+        "[move_workout_date] workout_id=%s old_date=%s new_date=%s updated_rows=%s",
+        workout_id,
+        old_date,
+        normalized.get("new_date"),
+        updated_rows,
+    )
+    return {
+        "status": "ok",
+        "workout_id": workout_id,
+        "old_date": old_date,
+        "new_date": normalized.get("new_date"),
+        "updated_rows": updated_rows,
+        "raw_updated_rows": int(raw_workouts.get("updated_rows") or 0) + int(raw_sets.get("updated_rows") or 0),
+        "cache_summary": cache_summary,
+        "debug": {
+            "workout_logs": normalized,
+            "raw_hevy_workouts": raw_workouts,
+            "raw_hevy_sets": raw_sets,
+        },
+    }
 
 
 @router.get("/api/training/strength-trends")

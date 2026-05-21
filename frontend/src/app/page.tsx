@@ -5755,6 +5755,7 @@ function WorkoutHistory({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [moveError, setMoveError] = useState<string | null>(null);
   const thisMonth = new Date().toISOString().slice(0, 7);
   const monthlyCount = workouts.filter((workout) => workout.date.startsWith(thisMonth)).length;
   const subtitle = [metadata, monthlyCount ? `${monthlyCount} workouts this month` : ""].filter(Boolean).join(" · ");
@@ -5763,9 +5764,12 @@ function WorkoutHistory({
   const handleMove = async (workoutId: string, newDate: string) => {
     if (!onMoveWorkout || !newDate || busy) return;
     setBusy(true);
+    setMoveError(null);
     try {
       await onMoveWorkout(workoutId, newDate);
       setEditingId(null);
+    } catch (error) {
+      setMoveError(`Could not move workout: ${error instanceof Error ? error.message : "Unknown error"}`);
     } finally {
       setBusy(false);
     }
@@ -5793,7 +5797,7 @@ function WorkoutHistory({
             </button>
             <button
               type="button"
-              onClick={() => setDismissedDate(suggestion.date)}
+              onClick={() => { setMoveError(null); setDismissedDate(suggestion.date); }}
               disabled={busy}
               className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:opacity-60"
             >
@@ -5801,13 +5805,16 @@ function WorkoutHistory({
             </button>
             <button
               type="button"
-              onClick={() => { setDismissedDate(suggestion.date); setExpanded(true); }}
+              onClick={() => { setMoveError(null); setDismissedDate(suggestion.date); setExpanded(true); }}
               disabled={busy}
               className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:opacity-60"
             >
               Review manually
             </button>
           </div>
+          {moveError ? (
+            <p className="mt-3 rounded-lg border border-red-300/25 bg-red-300/10 p-3 text-sm text-red-100">{moveError}</p>
+          ) : null}
         </div>
       ) : null}
       {workouts.map((workout) => (
@@ -9522,15 +9529,23 @@ export default function Home() {
     setMessage(null);
     setApiError(null);
     try {
-      const result = await apiSend<{ old_date?: string; new_date?: string }>(
+      const result = await apiSend<{ status?: string; message?: string; old_date?: string; new_date?: string; updated_rows?: number }>(
         "/api/training/workout-date",
         "POST",
         { workout_id: workoutId, new_date: newDate },
       );
+      if (result.status && result.status !== "ok") {
+        throw new Error(result.message || "Could not move the workout.");
+      }
+      if (typeof result.updated_rows === "number" && result.updated_rows <= 0) {
+        throw new Error("No workout rows were updated.");
+      }
       setMessage(`Workout moved to ${result.new_date ?? newDate}. Analytics refreshed.`);
       await refreshAll();
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Could not move the workout.");
+      const message = error instanceof Error ? error.message : "Could not move the workout.";
+      setApiError(message);
+      throw new Error(message);
     }
   }, [refreshAll]);
 

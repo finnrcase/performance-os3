@@ -7,7 +7,7 @@ data. It does not create schema, import data, or run integration syncs.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import logging
 import math
 import threading
@@ -574,6 +574,83 @@ def upsert_json_row(table: str, key_field: str, key_value: str, data: dict[str, 
         return payload
     except Exception as exc:
         return {**payload, "_db_error": {**structured_error(exc, operation="upsert_json_row"), "duration_ms": _duration_ms(started)}}
+
+
+def move_workout_date_rows(
+    table: str,
+    workout_id: str,
+    new_date: str,
+    *,
+    match_fields: tuple[str, ...] = ("workout_id", "hevy_workout_id", "external_id", "source_id"),
+    annotate_notes: bool = False,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    workout_id = str(workout_id or "").strip()
+    if not workout_id:
+        return {"status": "error", "message": "workout_id is required.", "updated_rows": 0, "duration_ms": _duration_ms(started)}
+    parsed_date = str(new_date or "").strip()[:10]
+    try:
+        normalized_date = date.fromisoformat(parsed_date).isoformat()
+    except ValueError:
+        return {"status": "error", "message": "new_date must be a valid YYYY-MM-DD date.", "updated_rows": 0, "duration_ms": _duration_ms(started)}
+
+    try:
+        safe_table = _safe_table(table)
+        safe_fields = tuple(field for field in (_safe_json_key(field) for field in match_fields) if field)
+        if not safe_fields:
+            raise ValueError("At least one match field is required.")
+        where_clause = " OR ".join(["data->>%s = %s" for _ in safe_fields])
+        params: list[str] = []
+        for field in safe_fields:
+            params.extend([field, workout_id])
+
+        updated_rows = 0
+        old_dates: list[str] = []
+        now = datetime.now(timezone.utc).isoformat()
+        with cursor(timeout_ms=2500) as cur:
+            cur.execute(f"SELECT id, data FROM {safe_table} WHERE {where_clause} ORDER BY id", params)
+            rows = cur.fetchall()
+            for row_id, data in rows:
+                payload = sanitize_json(dict(data or {}))
+                old_date = str(payload.get("date") or "")[:10]
+                if old_date:
+                    old_dates.append(old_date)
+                payload["date"] = normalized_date
+                payload["date_corrected_at"] = now
+                if annotate_notes:
+                    previous = str(payload.get("notes") or "").strip()
+                    if old_date and "date_corrected_from=" not in previous:
+                        marker = f"date_corrected_from={old_date}"
+                        payload["notes"] = f"{previous} | {marker}" if previous else marker
+                    payload["updated_at"] = now
+                cur.execute(
+                    f"UPDATE {safe_table} SET data = %s, updated_at = now() WHERE id = %s",
+                    (_jsonb(payload), row_id),
+                )
+                updated_rows += int(getattr(cur, "rowcount", 0) or 0)
+        return {
+            "status": "ok",
+            "table": safe_table,
+            "workout_id": workout_id,
+            "old_dates": sorted(set(old_dates)),
+            "old_date": sorted(set(old_dates))[0] if old_dates else "",
+            "new_date": normalized_date,
+            "updated_rows": updated_rows,
+            "duration_ms": _duration_ms(started),
+        }
+    except DatabaseNotConfigured:
+        return {
+            "status": "not_configured",
+            "message": "DATABASE_URL is not configured.",
+            "table": table,
+            "workout_id": workout_id,
+            "old_date": "",
+            "new_date": parsed_date,
+            "updated_rows": 0,
+            "duration_ms": _duration_ms(started),
+        }
+    except Exception as exc:
+        return {**structured_error(exc, operation="move_workout_date_rows"), "table": table, "workout_id": workout_id, "new_date": parsed_date, "updated_rows": 0, "duration_ms": _duration_ms(started)}
 
 
 def delete_json_row(table: str, key_field: str, key_value: str) -> dict[str, Any]:
