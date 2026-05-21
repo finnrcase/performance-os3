@@ -49,11 +49,114 @@ BODY_METRICS_NUMERIC_COLUMNS = [
 BODY_METRICS_STRING_COLUMNS = ["source", "source_id", "raw_payload", "notes"]
 
 BODY_METRICS_PATH = processed_data_path("body_metrics.csv")
+BODY_COMP_FIELDS = [
+    "waist",
+    "estimated_body_fat",
+    "body_fat_percent",
+    "lean_mass",
+    "fat_mass",
+    "muscle_mass",
+    "hydration",
+    "bone_mass",
+    "bmi",
+]
 
 
 def _empty_body_metrics() -> pd.DataFrame:
     """Return an empty body metrics table with the expected columns."""
     return pd.DataFrame(columns=BODY_METRICS_COLUMNS)
+
+
+def _measurement_timestamp(df: pd.DataFrame) -> pd.Series:
+    """Best-effort timestamp for tie-breaking same-day weigh-ins."""
+    candidates = ["measured_at", "measurement_time", "timestamp", "created_at", "updated_at", "_date_ts", "date"]
+    stamp = pd.Series(pd.NaT, index=df.index, dtype="datetime64[ns]")
+    for column in candidates:
+        if column in df.columns:
+            parsed = pd.to_datetime(df[column], errors="coerce").dt.tz_localize(None)
+            stamp = stamp.combine_first(parsed)
+    return stamp
+
+
+def canonical_daily_bodyweights(body_metrics_df) -> pd.DataFrame:
+    """
+    Return one row per date using the lowest valid bodyweight for each date.
+
+    Raw rows are not modified. If multiple entries tie for the lowest weight,
+    the earliest measurement timestamp wins. Body-composition fields are kept
+    from the selected row when present; missing composition fields are filled
+    from the closest same-day Withings/body-composition row when available.
+    """
+    if body_metrics_df is None:
+        return pd.DataFrame(columns=BODY_METRICS_COLUMNS)
+    df = pd.DataFrame(body_metrics_df).copy()
+    if df.empty or "date" not in df.columns or "bodyweight" not in df.columns:
+        return pd.DataFrame(columns=list(df.columns) if not df.empty else BODY_METRICS_COLUMNS)
+
+    original_date = pd.to_datetime(df["date"], errors="coerce")
+    df["_date_ts"] = original_date
+    df["date"] = original_date.dt.normalize()
+    df["bodyweight"] = pd.to_numeric(df["bodyweight"], errors="coerce")
+    df = df.dropna(subset=["date", "bodyweight"]).copy()
+    df = df[df["bodyweight"] > 0].copy()
+    if df.empty:
+        return pd.DataFrame(columns=list(body_metrics_df.columns) if hasattr(body_metrics_df, "columns") else BODY_METRICS_COLUMNS)
+
+    for column in BODY_COMP_FIELDS:
+        if column in df.columns:
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["_measurement_ts"] = _measurement_timestamp(df)
+    df["_source_rank"] = df.get("source", pd.Series("", index=df.index)).fillna("").astype(str).str.lower().str.contains("withings").map(lambda value: 0 if value else 1)
+    df = df.sort_values(["date", "bodyweight", "_measurement_ts"], kind="stable")
+
+    chosen_rows = []
+    for day, day_df in df.groupby("date", sort=True):
+        chosen = day_df.iloc[0].copy()
+        chosen_ts = chosen.get("_measurement_ts")
+        for field in BODY_COMP_FIELDS:
+            if field not in day_df.columns:
+                continue
+            if pd.notna(chosen.get(field)):
+                continue
+            candidates = day_df[day_df[field].notna()].copy()
+            if candidates.empty:
+                continue
+            if pd.notna(chosen_ts):
+                candidates["_distance"] = (candidates["_measurement_ts"] - chosen_ts).abs()
+            else:
+                candidates["_distance"] = pd.Timedelta.max
+            candidates = candidates.sort_values(["_source_rank", "_distance", "_measurement_ts"], kind="stable")
+            chosen[field] = candidates.iloc[0][field]
+        chosen_rows.append(chosen)
+
+    result = pd.DataFrame(chosen_rows).drop(columns=["_measurement_ts", "_source_rank", "_date_ts"], errors="ignore")
+    return result.sort_values("date", kind="stable").reset_index(drop=True)
+
+
+def canonical_bodyweight_debug(body_metrics_df) -> dict:
+    """Return counts explaining the lowest-weight-per-day analytics rule."""
+    raw = pd.DataFrame(body_metrics_df).copy() if body_metrics_df is not None else pd.DataFrame()
+    if raw.empty or "date" not in raw.columns or "bodyweight" not in raw.columns:
+        return {
+            "raw_body_metric_row_count": int(len(raw)),
+            "canonical_daily_weight_count": 0,
+            "dates_with_multiple_weigh_ins": 0,
+            "rule": "lowest_weight_per_day",
+        }
+    prepared = raw.copy()
+    prepared["date"] = pd.to_datetime(prepared["date"], errors="coerce").dt.normalize()
+    prepared["bodyweight"] = pd.to_numeric(prepared["bodyweight"], errors="coerce")
+    prepared = prepared.dropna(subset=["date", "bodyweight"])
+    prepared = prepared[prepared["bodyweight"] > 0]
+    counts = prepared.groupby("date").size() if not prepared.empty else pd.Series(dtype=int)
+    canonical = canonical_daily_bodyweights(prepared)
+    return {
+        "raw_body_metric_row_count": int(len(raw)),
+        "valid_bodyweight_row_count": int(len(prepared)),
+        "canonical_daily_weight_count": int(len(canonical)),
+        "dates_with_multiple_weigh_ins": int((counts > 1).sum()),
+        "rule": "lowest_weight_per_day",
+    }
 
 
 def load_body_metrics() -> pd.DataFrame:

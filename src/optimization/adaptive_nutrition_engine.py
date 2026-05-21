@@ -15,6 +15,7 @@ import pandas as pd
 
 from src.analytics.recovery_engine import analyze_recovery_signal
 from src.analytics.training_workload import analyze_hevy_performance_signal, analyze_training_workload
+from src.body_metrics import canonical_daily_bodyweights
 from src.nutrition_targets import align_macro_calories, calculate_bodyweight_trend_signal, calculate_macro_targets
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
@@ -159,9 +160,10 @@ def _nutrition_average(nutrition_df: pd.DataFrame | None, days: int = 14) -> dic
 
 
 def _clean_body_composition(body_metrics_df: pd.DataFrame | None, user_goals: dict) -> pd.DataFrame:
-    df = _date_clean(body_metrics_df)
+    df = canonical_daily_bodyweights(body_metrics_df)
     if df.empty:
         return pd.DataFrame(columns=["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass"])
+    df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
     df["bodyweight"] = pd.to_numeric(df.get("bodyweight"), errors="coerce")
     body_fat_column = _first_column(df, ["estimated_body_fat", "body_fat_percent", "bodyfat", "body_fat"])
     if body_fat_column:
@@ -650,6 +652,242 @@ def _data_quality_score(
     return {"score": int(min(100, max(0, score))), "confidence": label, "missingDataWarnings": warnings[:8]}
 
 
+def _confidence_label(points: int, high: int, medium: int) -> str:
+    if points >= high:
+        return "high"
+    if points >= medium:
+        return "medium"
+    return "low"
+
+
+def _structured_confidence(
+    *,
+    body_metrics_df: pd.DataFrame | None,
+    nutrition_df: pd.DataFrame | None,
+    training_df: pd.DataFrame | None,
+    recovery_df: pd.DataFrame | None,
+    sleep_df: pd.DataFrame | None,
+    user_goals: dict,
+    analysis_day: pd.Timestamp,
+    data_quality: dict,
+) -> dict:
+    nutrition = _daily_nutrition(nutrition_df)
+    body = _clean_body_composition(body_metrics_df, user_goals)
+    training = _date_clean(training_df)
+    recovery = _date_clean(recovery_df)
+    sleep = _date_clean(sleep_df)
+    missing: list[str] = list(data_quality.get("missingDataWarnings") or [])
+
+    recent_food = nutrition[nutrition["date"] >= analysis_day - pd.Timedelta(days=13)] if not nutrition.empty else pd.DataFrame()
+    food_days = int(recent_food[recent_food["calories"] > 0]["date"].nunique()) if not recent_food.empty else 0
+    nutrition_confidence = _confidence_label(food_days, high=10, medium=5)
+    if food_days < 10:
+        missing.append(f"Only {food_days}/14 recent finalized nutrition days are available.")
+
+    recent_body = body[body["date"] >= analysis_day - pd.Timedelta(days=27)] if not body.empty else pd.DataFrame()
+    body_days = int(recent_body["date"].nunique()) if not recent_body.empty else 0
+    body_comp_days = int(recent_body["body_fat_percent"].notna().sum()) if not recent_body.empty and "body_fat_percent" in recent_body.columns else 0
+    body_score = body_days + min(body_comp_days * 2, 10)
+    body_confidence = _confidence_label(body_score, high=24, medium=10)
+    if body_days < 10:
+        missing.append(f"Only {body_days}/28 recent canonical weigh-ins are available.")
+    if body_comp_days < 4:
+        missing.append("Body composition trend is sparse.")
+
+    recent_training = training[training["date"] >= analysis_day - pd.Timedelta(days=27)] if not training.empty else pd.DataFrame()
+    profile = load_training_schedule_profile()
+    lift_rows = recent_training[recent_training.apply(lambda row: _is_hevy_row(row, profile=profile), axis=1)] if not recent_training.empty else pd.DataFrame()
+    lift_days = int(lift_rows["date"].nunique()) if not lift_rows.empty and "date" in lift_rows.columns else 0
+    training_confidence = _confidence_label(lift_days, high=8, medium=3)
+    if lift_days < 3 and int(user_goals.get("training_frequency_per_week") or 0) > 0:
+        missing.append("Recent Hevy lifting history is limited.")
+
+    recent_recovery = recovery[recovery["date"] >= analysis_day - pd.Timedelta(days=13)] if not recovery.empty else pd.DataFrame()
+    recent_sleep = sleep[sleep["date"] >= analysis_day - pd.Timedelta(days=13)] if not sleep.empty else pd.DataFrame()
+    recovery_days = int(recent_recovery["date"].nunique()) if not recent_recovery.empty else 0
+    sleep_days = int(recent_sleep["date"].nunique()) if not recent_sleep.empty else 0
+    if sleep_days == 0 and not recent_recovery.empty and "sleep_hours" in recent_recovery.columns:
+        sleep_days = int(recent_recovery[pd.to_numeric(recent_recovery["sleep_hours"], errors="coerce").notna()]["date"].nunique())
+    recovery_confidence = _confidence_label(max(recovery_days, sleep_days), high=10, medium=4)
+    if recovery_confidence == "low":
+        missing.append("Recovery or sleep trend is sparse.")
+
+    labels = [nutrition_confidence, body_confidence, training_confidence, recovery_confidence]
+    high_count = labels.count("high")
+    low_count = labels.count("low")
+    overall = "high" if high_count >= 3 and low_count == 0 and data_quality.get("score", 0) >= 75 else "medium" if low_count <= 1 and data_quality.get("score", 0) >= 40 else "low"
+    return {
+        "nutrition": nutrition_confidence,
+        "body": body_confidence,
+        "training": training_confidence,
+        "recovery": recovery_confidence,
+        "overall": overall,
+        "missing_data": list(dict.fromkeys(missing))[:10],
+    }
+
+
+def _nutrition_signal(nutrition_average: dict, current: dict, analysis_day: pd.Timestamp, nutrition_df: pd.DataFrame | None) -> dict:
+    daily = _daily_nutrition(nutrition_df, days=14)
+    logged_days = int(nutrition_average.get("days") or 0)
+    target_calories = float(current.get("target_calories") or 0)
+    avg_calories = _to_float(nutrition_average.get("calories"))
+    avg_protein = _to_float(nutrition_average.get("protein"))
+    avg_carbs = _to_float(nutrition_average.get("carbs"))
+    avg_fat = _to_float(nutrition_average.get("fat"))
+    calorie_delta = round(avg_calories - target_calories, 0) if avg_calories is not None and target_calories else None
+    target_protein = float(current.get("protein_grams") or 0)
+    protein_hit_rate = None
+    if not daily.empty and target_protein:
+        protein_hit_rate = round(float((daily["protein"] >= target_protein * 0.9).mean()), 2)
+    missing_days = max(0, 14 - logged_days)
+    adherence = "unknown"
+    if calorie_delta is not None:
+        if abs(calorie_delta) <= 125 and (protein_hit_rate is None or protein_hit_rate >= 0.7):
+            adherence = "consistent"
+        elif abs(calorie_delta) <= 250:
+            adherence = "mixed"
+        else:
+            adherence = "inconsistent"
+    return {
+        "logged_days_14": logged_days,
+        "missing_days_14": missing_days,
+        "average_calories": avg_calories,
+        "average_protein": avg_protein,
+        "average_carbs": avg_carbs,
+        "average_fat": avg_fat,
+        "target_calories": current.get("target_calories"),
+        "target_protein": current.get("protein_grams"),
+        "target_carbs": current.get("carb_grams"),
+        "target_fat": current.get("fat_grams"),
+        "calorie_delta_vs_target": calorie_delta,
+        "protein_hit_rate": protein_hit_rate,
+        "adherence": adherence,
+        "source": "finalized_daily_nutrition_summaries",
+        "missing_days_are_zero": False,
+    }
+
+
+def _build_recommendation_trace(
+    *,
+    changes: dict,
+    reasoning: list[str],
+    body_composition: dict,
+    weight_signal: dict,
+    nutrition_signal: dict,
+    performance_signal: dict,
+    recovery_signal: dict,
+    running_load: dict,
+    confidence: dict,
+) -> dict:
+    calorie_change = int(changes.get("calories") or 0)
+    decision = "increase" if calorie_change > 0 else "decrease" if calorie_change < 0 else "hold"
+    what_would_change = []
+    if decision == "hold":
+        what_would_change.append("More consistent nutrition, weigh-ins, body-comp, training, and recovery data would raise confidence for a target change.")
+        what_would_change.append("A sustained lean-mass gain with stable fat mass supports holding; rising fat mass without performance payoff would trigger a reduction.")
+    elif decision == "increase":
+        what_would_change.append("Rising body fat/fat mass or poor recovery without performance improvement would stop the calorie increase.")
+    else:
+        what_would_change.append("Stable/down body fat with improving lean mass and performance would move the system back toward holding calories.")
+    if confidence.get("overall") == "low":
+        what_would_change.insert(0, "Higher confidence would require enough finalized food days, canonical weigh-ins, recent Hevy data, and recovery/sleep logs.")
+    return {
+        "decision": decision,
+        "calorie_change": calorie_change,
+        "main_reasons": reasoning[:5],
+        "body_comp_signal": body_composition,
+        "weight_signal": weight_signal,
+        "nutrition_signal": nutrition_signal,
+        "training_signal": performance_signal,
+        "recovery_signal": recovery_signal,
+        "cardio_signal": running_load,
+        "what_would_change_decision": what_would_change[:5],
+    }
+
+
+def _workout_recovery_suggestions(
+    *,
+    performance_signal: dict,
+    recovery_signal: dict,
+    running_load: dict,
+    fat_gain_rising: bool,
+    calorie_delta: int,
+) -> list[dict]:
+    suggestions: list[dict] = []
+    recovery_status = str(recovery_signal.get("status") or "insufficient data")
+    performance_label = str(performance_signal.get("label") or "insufficient data")
+    if recovery_status in {"poor", "strained"}:
+        suggestions.append(
+            {
+                "type": "recovery",
+                "priority": "high",
+                "title": "Reduce recovery debt before pushing volume",
+                "detail": "Recovery is strained, so hold aggressive load increases and prioritize sleep/readiness before chasing heavier sessions.",
+            }
+        )
+    if running_load.get("interference_risk") == "elevated":
+        suggestions.append(
+            {
+                "type": "cardio_load",
+                "priority": "medium",
+                "title": "Separate harder runs from key lifts",
+                "detail": "Running load is elevated while lifting output is soft; keep long or hard runs away from lower-body strength sessions when possible.",
+            }
+        )
+    if fat_gain_rising and calorie_delta >= 0:
+        suggestions.append(
+            {
+                "type": "nutrition_guardrail",
+                "priority": "high",
+                "title": "Do not add calories yet",
+                "detail": "Fat gain is rising without a clear performance payoff, so the engine is guarding body composition first.",
+            }
+        )
+    elif performance_label in {"declining", "fatigue/performance stagnation"} and not fat_gain_rising:
+        suggestions.append(
+            {
+                "type": "training_fuel",
+                "priority": "medium",
+                "title": "Bias carbs around hard sessions",
+                "detail": "Performance is soft without a fat-gain signal; place more carbs before and after lifting instead of making a large calorie jump.",
+            }
+        )
+    for driver in (performance_signal.get("drivers") or [])[:4]:
+        name = str(driver.get("name") or "Key lift")
+        signal = str(driver.get("signal") or "")
+        e1rm = _to_float(driver.get("estimated_1rm_change_pct"), 0) or 0
+        reps_delta = _to_float(driver.get("reps_at_same_weight_delta"), 0) or 0
+        if signal in {"improving", "strong"} or e1rm >= 1.5 or reps_delta >= 1:
+            if recovery_status not in {"poor", "strained"} and not fat_gain_rising:
+                suggestions.append(
+                    {
+                        "type": "go_heavier",
+                        "priority": "medium",
+                        "title": f"{name}: consider a small load increase",
+                        "detail": "Recent performance is improving; add 5 lb, 5-10 lb on machines, or 1-2 reps next session if warmups feel good.",
+                    }
+                )
+        elif signal in {"declining", "stalled"} or e1rm <= -2:
+            suggestions.append(
+                {
+                    "type": "hold_load",
+                    "priority": "medium",
+                    "title": f"{name}: hold load for now",
+                    "detail": "Recent performance is not consistently improving, so keep the load stable and rebuild reps before adding weight.",
+                }
+            )
+    if not suggestions:
+        suggestions.append(
+            {
+                "type": "maintain",
+                "priority": "low",
+                "title": "Keep the current plan steady",
+                "detail": "No strong body-composition, performance, or recovery signal justifies a bigger change today.",
+            }
+        )
+    return suggestions[:8]
+
+
 def _build_targets_from_calories(
     calories: int,
     bodyweight: float,
@@ -837,6 +1075,17 @@ def build_adaptive_nutrition_recommendation(
         user_goals=user_goals,
         analysis_day=analysis_day,
     )
+    confidence_info = _structured_confidence(
+        body_metrics_df=body_metrics_df,
+        nutrition_df=nutrition_df,
+        training_df=training_df,
+        recovery_df=recovery_df,
+        sleep_df=sleep_df,
+        user_goals=user_goals,
+        analysis_day=analysis_day,
+        data_quality=data_quality,
+    )
+    nutrition_signal = _nutrition_signal(nutrition_average, current, analysis_day, nutrition_df)
     historical_trends = _historical_learning(nutrition_df, body_metrics_df, training_df, recovery_df, sleep_df, user_goals, analysis_day)
     detected_trends = [*weekday_trends, *historical_trends]
 
@@ -855,13 +1104,14 @@ def build_adaptive_nutrition_recommendation(
     recovery_good = recovery_status in {"good", "normal", "insufficient data"}
     recovery_poor = recovery_status in {"poor", "strained"}
     performance_soft = performance_label in {"declining", "fatigue/performance stagnation", "stable"}
-    confidence = data_quality["confidence"]
-    if recovery_status == "poor" and confidence == "high":
-        confidence = "medium"
-    if body_composition["body_fat_data_points"] < 4 and confidence == "high":
-        confidence = "medium"
+    confidence_level = str(confidence_info.get("overall") or data_quality["confidence"])
+    if recovery_status == "poor" and confidence_level == "high":
+        confidence_level = "medium"
+    if body_composition["body_fat_data_points"] < 4 and confidence_level == "high":
+        confidence_level = "medium"
+    confidence_info = {**confidence_info, "overall": confidence_level}
 
-    if confidence == "low":
+    if confidence_level == "low":
         calorie_delta = 0
         reasoning.append("Recommendation confidence is low, so active baseline targets stay stable while data quality improves.")
         warnings.append("Log more weight, food, lifting, recovery, and body fat data before larger calorie changes.")
@@ -912,11 +1162,11 @@ def build_adaptive_nutrition_recommendation(
 
     if running_load.get("interference_risk") == "elevated":
         warnings.append("Running load may be interfering with lifting; watch long runs near lower-body sessions.")
-        if not fat_gain_rising and weight_status != "gaining too fast" and confidence != "low":
+        if not fat_gain_rising and weight_status != "gaining too fast" and confidence_level != "low":
             calorie_delta = max(calorie_delta, 75)
             carb_bias_grams += 20
             reasoning.append("Elevated running load with softer lifting adds a carb bias instead of a large surplus.")
-    if training_load["status"] in {"high", "unusually high"} and recovery_status not in {"poor"} and confidence != "low":
+    if training_load["status"] in {"high", "unusually high"} and recovery_status not in {"poor"} and confidence_level != "low":
         carb_bias_grams += 10
         reasoning.append("Recent Hevy workload is high enough to favor carbohydrate availability.")
     if body_composition["body_fat_data_points"] < 4:
@@ -974,18 +1224,36 @@ def build_adaptive_nutrition_recommendation(
         "recovery": recovery_signal,
         "trainingLoad": training_load,
         "runningLoad": running_load,
-        "nutrition": nutrition_average,
+        "nutrition": nutrition_signal,
         "dataQuality": data_quality,
         "dayType": day_type,
         "historicalLearning": {"detectedTrends": detected_trends},
     }
     next_review = (analysis_day + timedelta(days=7)).date().isoformat()
     confidence_message = (
-        f"Recommendation confidence: {confidence.capitalize()}. "
-        + (" ".join(data_quality["missingDataWarnings"][:2]) if data_quality["missingDataWarnings"] else "Core bodyweight, nutrition, training, and recovery inputs are available.")
+        f"Recommendation confidence: {confidence_level.capitalize()}. "
+        + (" ".join(confidence_info["missing_data"][:2]) if confidence_info["missing_data"] else "Core bodyweight, nutrition, training, and recovery inputs are available.")
     )
     if confidence_message not in reasoning:
         reasoning.append(confidence_message)
+    trace = _build_recommendation_trace(
+        changes=changes,
+        reasoning=reasoning,
+        body_composition=body_composition,
+        weight_signal=weight_signal,
+        nutrition_signal=nutrition_signal,
+        performance_signal=performance_signal,
+        recovery_signal=recovery_signal,
+        running_load=running_load,
+        confidence=confidence_info,
+    )
+    structured_suggestions = _workout_recovery_suggestions(
+        performance_signal=performance_signal,
+        recovery_signal=recovery_signal,
+        running_load=running_load,
+        fat_gain_rising=fat_gain_rising,
+        calorie_delta=changes["calories"],
+    )
 
     return {
         "recommendedCalories": recommended["target_calories"],
@@ -1003,13 +1271,17 @@ def build_adaptive_nutrition_recommendation(
         "dayTypeAdjustment": day_type,
         "dayOfWeekAdjustment": day_of_week_adjustment,
         "carbTimingRecommendation": carb_timing,
-        "confidence": confidence,
+        "confidence": confidence_info,
+        "confidenceLevel": confidence_level,
         "dataQualityScore": data_quality["score"],
         "reasoning": reasoning[:8],
         "signals": signals,
+        "recommendation_trace": trace,
+        "structured_suggestions": structured_suggestions,
+        "workout_recovery_suggestions": structured_suggestions,
         "warnings": warnings[:6],
         "detectedTrends": detected_trends[:8],
-        "missingDataWarnings": data_quality["missingDataWarnings"][:8],
+        "missingDataWarnings": confidence_info["missing_data"][:8],
         "nextReviewDate": next_review,
         "currentTarget": {
             "calories": current["target_calories"],

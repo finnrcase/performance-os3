@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
+from src.body_metrics import canonical_daily_bodyweights
 from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile
 
 
@@ -73,7 +74,7 @@ def _source_mask(df: pd.DataFrame, source_name: str) -> pd.Series:
 
 
 def _weight_summary(body_metrics_df: pd.DataFrame, end: pd.Timestamp) -> tuple[dict, float | None]:
-    df = _clean_dates(body_metrics_df)
+    df = _clean_dates(canonical_daily_bodyweights(body_metrics_df))
     if df.empty or "bodyweight" not in df.columns:
         return {"label": "Weight", "value": "Need data", "detail": "No weigh-ins this week."}, None
     df["bodyweight"] = _num(df["bodyweight"])

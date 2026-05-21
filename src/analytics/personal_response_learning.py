@@ -6,6 +6,7 @@ import pandas as pd
 
 from src.analytics.recovery_engine import calculate_recovery_score
 from src.analytics.strength_trends import calculate_estimated_1rm
+from src.body_metrics import canonical_daily_bodyweights
 
 
 def _empty(status: str = "insufficient data", reason: str = "Keep logging nutrition, training, bodyweight, and recovery to unlock personal response insights.") -> dict:
@@ -69,7 +70,7 @@ def _weekly_nutrition(nutrition_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _weekly_bodyweight(body_df: pd.DataFrame) -> pd.DataFrame:
-    df = _date_week(body_df)
+    df = _date_week(canonical_daily_bodyweights(body_df))
     if df.empty or "bodyweight" not in df.columns:
         return pd.DataFrame(columns=["week", "bodyweight", "weekly_gain_lb"])
     df["bodyweight"] = pd.to_numeric(df["bodyweight"], errors="coerce")

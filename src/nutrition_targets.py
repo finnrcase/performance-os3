@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from src.analytics.recovery_engine import analyze_recovery_signal
+from src.body_metrics import canonical_daily_bodyweights
 from src.goals import calculate_goal_feasibility
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
@@ -29,7 +30,7 @@ LEAN_BULK_RATE_RANGES = {
     "Aggressive": (0.5, 0.8),
 }
 
-LEAN_BULK_BASELINE_CALORIES = 2500
+LEAN_BULK_FALLBACK_CALORIES = 2500
 
 CUT_RATE_RANGES = {
     "Conservative": (-0.5, -0.75),
@@ -116,12 +117,7 @@ def _latest_recovery_average(recovery_df: pd.DataFrame | None) -> float | None:
 
 
 def _weekly_weight_pct(body_metrics_df: pd.DataFrame | None) -> float | None:
-    if body_metrics_df is None or body_metrics_df.empty:
-        return None
-    df = body_metrics_df.copy()
-    df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
-    df["bodyweight"] = pd.to_numeric(df.get("bodyweight"), errors="coerce")
-    df = df.dropna(subset=["date", "bodyweight"]).sort_values("date")
+    df = canonical_daily_bodyweights(body_metrics_df)
     if len(df) < 2:
         return None
     weekly_pct_14 = _weekly_rate_from_window(df, 14)
@@ -129,15 +125,10 @@ def _weekly_weight_pct(body_metrics_df: pd.DataFrame | None) -> float | None:
 
 
 def _clean_bodyweight_trend(body_metrics_df: pd.DataFrame | None) -> pd.DataFrame:
-    if body_metrics_df is None or body_metrics_df.empty:
-        return pd.DataFrame(columns=["date", "bodyweight"])
-    df = body_metrics_df.copy()
-    df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
-    df["bodyweight"] = pd.to_numeric(df.get("bodyweight"), errors="coerce")
-    df = df.dropna(subset=["date", "bodyweight"]).sort_values("date")
+    df = canonical_daily_bodyweights(body_metrics_df)
     if df.empty:
         return pd.DataFrame(columns=["date", "bodyweight"])
-    return df.groupby("date", as_index=False)["bodyweight"].mean().sort_values("date")
+    return df[["date", "bodyweight"]].sort_values("date")
 
 
 def calculate_bodyweight_trend_signal(body_metrics_df: pd.DataFrame | None, user_goals: dict) -> dict:
@@ -316,7 +307,7 @@ def calculate_macro_targets(
         target_low, target_high = LEAN_BULK_RATE_RANGES.get(aggressiveness, LEAN_BULK_RATE_RANGES["Conservative"])
         target_weekly_change_pct = round((target_low + target_high) / 2, 2)
         target_description = (
-            "Protein-first lean bulk with a 2500 kcal conservative baseline, tighter surplus control, and carb support only when workload/recovery data justifies it."
+            "Protein-first lean bulk from adaptive maintenance, tight surplus control, and carb support only when workload/recovery data justifies it."
         )
         if training_frequency >= 5:
             calorie_adjustment += 50
@@ -368,14 +359,8 @@ def calculate_macro_targets(
             workload_carb_adjustment += 0
 
     target_calories = max(1200, maintenance + calorie_adjustment + historical_calorie_adjustment)
-    if normalized_goal == "lean bulk" and 145 <= bodyweight <= 175:
-        target_calories = LEAN_BULK_BASELINE_CALORIES
-        if weight_signal["status"] == "gaining too slowly":
-            target_calories += min(150, max(50, int(weight_signal["calorie_adjustment"])))
-        elif weight_signal["status"] == "gaining too fast":
-            target_calories += max(-200, min(-75, int(weight_signal["calorie_adjustment"])))
-        elif performance_label in {"declining", "fatigue/performance stagnation"} and recovery_demand == "high":
-            target_calories += 75
+    if normalized_goal == "lean bulk" and target_calories <= 1200 and bodyweight <= 0:
+        target_calories = LEAN_BULK_FALLBACK_CALORIES
     final_calorie_adjustment = target_calories - maintenance
 
     if normalized_goal == "cut":
@@ -410,9 +395,9 @@ def calculate_macro_targets(
     carb_emphasis = "Moderate carb baseline."
     if normalized_goal == "lean bulk":
         if training_frequency >= 5 or cardio_frequency >= 3 or weekly_mileage >= 12:
-            carb_emphasis = "Conservative 2500 kcal baseline with training-day carb support for frequent lifting/cardio."
+            carb_emphasis = "Adaptive lean-bulk baseline with training-day carb support for frequent lifting/cardio."
         else:
-            carb_emphasis = "Conservative 2500 kcal lean-bulk baseline with carbs filling the remaining performance fuel."
+            carb_emphasis = "Adaptive lean-bulk baseline with carbs filling the remaining performance fuel."
     elif normalized_goal == "cut":
         carb_emphasis = "Carbs fill remaining calories after protein and fat floors."
 

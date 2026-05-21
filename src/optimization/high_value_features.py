@@ -12,6 +12,7 @@ import pandas as pd
 
 from src.analytics.strength_trends import calculate_estimated_1rm
 from src.analytics.workout_quality import calculate_workout_quality
+from src.body_metrics import canonical_daily_bodyweights
 from src.recovery import calculate_recovery_score
 from src.training_schedule import is_run_row, load_training_schedule_profile
 
@@ -536,7 +537,7 @@ def _adherence_correlations(daily: list[dict], summary_df: pd.DataFrame, trainin
     else:
         strength_weekly = pd.DataFrame(columns=["week", "strength_index", "volume"])
 
-    body = _date_frame(body_metrics_df)
+    body = _date_frame(canonical_daily_bodyweights(body_metrics_df))
     if not body.empty:
         body["bodyweight"] = pd.to_numeric(body.get("bodyweight"), errors="coerce")
         body["week"] = body["date"].dt.to_period("W").apply(lambda period: period.start_time.date().isoformat())
@@ -706,7 +707,7 @@ def _weekly_baseline_frame(
         recovery_weekly = recovery.groupby("week", as_index=False).agg(recovery_score=("recovery_score", "mean"))
         weekly = recovery_weekly if weekly.empty else weekly.merge(recovery_weekly, on="week", how="outer")
 
-    body = _date_frame(body_metrics_df)
+    body = _date_frame(canonical_daily_bodyweights(body_metrics_df))
     if not body.empty:
         body["bodyweight"] = pd.to_numeric(body.get("bodyweight"), errors="coerce")
         body["week"] = body["date"].dt.to_period("W").apply(lambda period: period.start_time.date().isoformat())

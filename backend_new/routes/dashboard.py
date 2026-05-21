@@ -10,6 +10,7 @@ from fastapi import APIRouter
 from backend_new.db import fetch_dashboard_core_bundle
 from backend_new.routes.goals import calculate_targets, fallback_goals
 from backend_new.utils import utc_now_iso
+from src.body_metrics import canonical_daily_bodyweights
 
 
 router = APIRouter(tags=["dashboard"])
@@ -104,8 +105,15 @@ def _food_tile(totals: dict[str, Any], targets: dict[str, Any], *, has_food: boo
 
 
 def _weight_tile(rows: list[dict[str, Any]], today: str) -> tuple[float | None, list[dict[str, Any]], dict[str, Any]]:
-    usable = [row for row in rows if row.get("date") and row.get("bodyweight") not in {None, ""}]
-    usable.sort(key=lambda row: str(row.get("date") or ""))
+    canonical = canonical_daily_bodyweights(rows)
+    usable = []
+    for row in canonical.to_dict(orient="records") if not canonical.empty else []:
+        item = dict(row)
+        try:
+            item["date"] = row["date"].date().isoformat()
+        except Exception:
+            item["date"] = str(row.get("date") or "")
+        usable.append(item)
     if not usable:
         tile = {
             "today_weight": None,
@@ -114,6 +122,7 @@ def _weight_tile(rows: list[dict[str, Any]], today: str) -> tuple[float | None, 
             "trend_label": "insufficient data",
             "history": [],
             "message": "Enter today's weight",
+            "canonical_rule": "lowest_weight_per_day",
         }
         return None, [], tile
     latest = _round(_number(usable[-1].get("bodyweight"), 0))
@@ -129,6 +138,7 @@ def _weight_tile(rows: list[dict[str, Any]], today: str) -> tuple[float | None, 
         "trend_label": trend,
         "history": usable[-14:],
         "message": "Today's weight logged" if today_rows else "Enter today's weight",
+        "canonical_rule": "lowest_weight_per_day",
     }
     return latest, usable[-30:], tile
 

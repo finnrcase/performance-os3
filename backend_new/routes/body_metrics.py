@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
+import math
 from typing import Any
 from uuid import uuid4
 
@@ -14,6 +15,7 @@ from backend_new.db import (
     upsert_json_row,
 )
 from backend_new.utils import utc_now_iso
+from src.body_metrics import canonical_bodyweight_debug, canonical_daily_bodyweights
 
 router = APIRouter(tags=["body-metrics"])
 
@@ -38,9 +40,10 @@ def _number_or_none(value: Any) -> float | None:
     if value in {"", None}:
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _metric_id(item: dict[str, Any]) -> str:
@@ -88,6 +91,23 @@ def _sort_by_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda row: str(row.get("date") or ""))
 
 
+def _canonical_public_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    canonical = canonical_daily_bodyweights(rows)
+    if canonical.empty:
+        return []
+    records = canonical.to_dict(orient="records")
+    items = []
+    for row in records:
+        item = _public_metric(row)
+        try:
+            item["date"] = row["date"].date().isoformat()
+        except Exception:
+            item["date"] = str(row.get("date") or "")
+        item["canonical_rule"] = "lowest_weight_per_day"
+        items.append(item)
+    return _sort_by_date(items)
+
+
 def _find_metric(metric_id: str) -> dict[str, Any] | None:
     for field in ("body_metric_id", "id", "source_id"):
         rows = fetch_json_rows_for_value("body_metric_logs", field, metric_id, limit=1)
@@ -101,7 +121,15 @@ def get_body_metrics(limit: int = 1000) -> dict[str, Any]:
     rows = fetch_json_rows("body_metric_logs", limit=limit, date_field="date")
     if rows and "_db_error" in rows[0]:
         return {"items": [], "status": "error", "error": rows[0]["_db_error"]}
-    return {"items": _sort_by_date([_public_metric(row) for row in rows]), "status": "ok"}
+    raw_items = _sort_by_date([_public_metric(row) for row in rows])
+    canonical_items = _canonical_public_metrics(rows)
+    return {
+        "items": canonical_items,
+        "canonical_items": canonical_items,
+        "raw_items": raw_items,
+        "status": "ok",
+        "debug": canonical_bodyweight_debug(rows),
+    }
 
 
 @router.post("/api/body-metrics")

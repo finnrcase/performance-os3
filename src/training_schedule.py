@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from functools import lru_cache
+import re
 from typing import Any
 
 import pandas as pd
@@ -101,6 +102,71 @@ RUN_CARDIO_TERMS = (
     "rower",
     "rowing",
     "stairmaster",
+)
+
+RUN_TERMS = (
+    "run",
+    "running",
+    "jog",
+    "jogging",
+    "easy run",
+    "tempo run",
+    "interval run",
+    "outdoor run",
+    "treadmill run",
+    "5k",
+    "10k",
+)
+
+CARDIO_TERMS = (
+    "cardio",
+    "bike",
+    "cycling",
+    "spin",
+    "elliptical",
+    "stairmaster",
+    "stair master",
+    "rowing machine",
+    "rower",
+    "swim",
+    "treadmill walk",
+    "treadmill run",
+    "cardio machine",
+)
+
+LIFT_TERMS = (
+    "bench press",
+    "squat",
+    "deadlift",
+    "romanian deadlift",
+    "rdl",
+    "overhead press",
+    "shoulder press",
+    "press",
+    "curl",
+    "curls",
+    "skullcrusher",
+    "skull crusher",
+    "triceps",
+    "pushdown",
+    "leg extension",
+    "leg curl",
+    "calf raise",
+    "row",
+    "rows",
+    "pulldown",
+    "pull down",
+    "pullup",
+    "pull up",
+    "lateral raise",
+    "dumbbell",
+    "barbell",
+    "machine",
+    "shrug",
+    "shrugs",
+    "fly",
+    "extension",
+    "raise",
 )
 
 LOWER_BODY_TERMS = (
@@ -215,6 +281,64 @@ def _flatten_strings(value: Any) -> list[str]:
     return []
 
 
+def _as_rows(workout: Any) -> list[dict[str, Any]]:
+    if workout is None:
+        return []
+    if isinstance(workout, pd.DataFrame):
+        return workout.to_dict(orient="records")
+    if isinstance(workout, pd.Series):
+        return [workout.to_dict()]
+    if isinstance(workout, (list, tuple)):
+        return [dict(row) for row in workout if isinstance(row, (dict, pd.Series))]
+    if isinstance(workout, dict):
+        details = workout.get("details")
+        if isinstance(details, list) and details:
+            base = {key: value for key, value in workout.items() if key != "details"}
+            return [{**base, **dict(row)} for row in details if isinstance(row, dict)]
+        exercises = workout.get("exercises")
+        if isinstance(exercises, list) and exercises:
+            rows = []
+            base = {
+                "source": workout.get("source") or "hevy",
+                "workout_type": workout.get("workout_type") or workout.get("title") or workout.get("name") or "",
+                "title": workout.get("title") or workout.get("name") or "",
+                "notes": workout.get("description") or "",
+                "date": workout.get("start_time") or workout.get("created_at") or "",
+                "metadata": workout,
+            }
+            for exercise in exercises:
+                if not isinstance(exercise, dict):
+                    continue
+                sets = exercise.get("sets") if isinstance(exercise.get("sets"), list) else []
+                if sets:
+                    for set_item in sets:
+                        rows.append(
+                            {
+                                **base,
+                                "exercise": exercise.get("title") or exercise.get("name") or "",
+                                "exercise_notes": exercise.get("notes") or "",
+                                "sets": 1,
+                                "reps": (set_item or {}).get("reps"),
+                                "weight": (set_item or {}).get("weight") or (set_item or {}).get("weight_kg"),
+                                "rpe": (set_item or {}).get("rpe"),
+                            }
+                        )
+                else:
+                    rows.append({**base, "exercise": exercise.get("title") or exercise.get("name") or "", "exercise_notes": exercise.get("notes") or ""})
+            return rows
+        return [workout]
+    return []
+
+
+def _word_match(text: str, term: str) -> bool:
+    escaped = re.escape(term.lower()).replace(r"\ ", r"\s+")
+    return bool(re.search(rf"(?<![a-z0-9]){escaped}(?![a-z0-9])", str(text or "").lower()))
+
+
+def _matched_terms(text: str, terms: tuple[str, ...]) -> list[str]:
+    return [term for term in terms if _word_match(text, term)]
+
+
 def _numeric(value: Any) -> float:
     parsed = pd.to_numeric(value, errors="coerce")
     if pd.isna(parsed):
@@ -241,7 +365,7 @@ def _contains_metadata_key(value: Any) -> bool:
 
 def text_has_run_signal(text: str) -> bool:
     lower = str(text or "").lower()
-    return any(term in lower for term in RUN_CARDIO_TERMS)
+    return bool(_matched_terms(lower, RUN_TERMS) or _matched_terms(lower, CARDIO_TERMS))
 
 
 def row_training_text(row: pd.Series | dict) -> str:
@@ -251,48 +375,133 @@ def row_training_text(row: pd.Series | dict) -> str:
     ).lower()
 
 
-def is_run_row(row: pd.Series | dict, profile: dict | None = None) -> bool:
+def _row_has_lift_numbers(row: dict[str, Any]) -> bool:
+    sets = _numeric(row.get("sets"))
+    reps = _numeric(row.get("reps"))
+    weight = _numeric(row.get("weight"))
     source = str(row.get("source", "") or "").lower()
-    workout_type = str(row.get("workout_type", "") or "").lower()
     notes = str(row.get("notes", "") or "").lower()
-    if source == "strava" or "strava_activity_id=" in notes:
+    exercise_text = str(row.get("exercise", "") or "").lower()
+    cardio_exercise = bool(_matched_terms(exercise_text, RUN_TERMS) or _matched_terms(exercise_text, CARDIO_TERMS))
+    if weight <= 0 and (cardio_exercise or _has_distance_or_pace_metadata(row)):
+        return False
+    if weight > 0 and reps > 0:
         return True
-    if workout_type in {"run", "running", "cardio", "running/cardio", "run/cardio"}:
+    if sets > 0 and reps > 0 and (source == "hevy" or "hevy_workout_id=" in notes):
         return True
-    if "classification=running_cardio" in notes:
+    return False
+
+
+def _has_distance_or_pace_metadata(row: dict[str, Any]) -> bool:
+    text = " ".join(str(row.get(column, "") or "") for column in ["notes", "metadata", "external_id"]).lower()
+    if "distance_miles=" in text or "pace_min_per_mile=" in text or "strava_activity_id=" in text or "estimated_run_load=" in text:
         return True
-    if (source == "hevy" or "hevy_workout_id=" in notes) and _classification_plan(row, profile=profile).get("is_run_day"):
-        return True
-    return text_has_run_signal(row_training_text(row))
+    for key, value in row.items():
+        key_text = str(key).lower()
+        if key_text in TIMESTAMP_KEYS:
+            continue
+        if any(term in key_text for term in ("distance", "pace", "miles", "kilometers", "metres", "meters")) and _numeric(value) > 0:
+            return True
+    return False
+
+
+def classify_workout(workout: Any) -> dict:
+    """Classify a workout from explicit lift/run/cardio evidence.
+
+    Schedule labels and plain duration are intentionally not cardio evidence:
+    a Hevy lift logged on a planned run day is still a lift unless it contains
+    distance, pace, Strava, or cardio exercise signals.
+    """
+    rows = _as_rows(workout)
+    strings = _flatten_strings(workout)
+    title_text = " ".join(
+        str(row.get(column, "") or "")
+        for row in rows
+        for column in ["workout_type", "title", "name"]
+    )
+    exercise_text = " ".join(
+        str(row.get(column, "") or "")
+        for row in rows
+        for column in ["exercise", "exercise_name", "exercise_notes"]
+    )
+    lift_text = " ".join(
+        str(row.get(column, "") or "")
+        for row in rows
+        for column in ["exercise", "exercise_name", "exercise_notes", "muscle_group"]
+    )
+    notes_text = " ".join(str(row.get("notes", "") or "") for row in rows)
+    source_text = " ".join(str(row.get("source", "") or "") for row in rows).lower()
+    full_text = " ".join([title_text, lift_text, notes_text, " ".join(strings)]).lower()
+
+    matched_lift = _matched_terms(lift_text.lower(), LIFT_TERMS)
+    matched_run_title = _matched_terms(title_text.lower(), RUN_TERMS)
+    matched_run_exercise = _matched_terms(exercise_text.lower(), RUN_TERMS)
+    matched_cardio_title = _matched_terms(title_text.lower(), CARDIO_TERMS)
+    matched_cardio_exercise = _matched_terms(exercise_text.lower(), CARDIO_TERMS)
+    has_strava = "strava" in source_text or "strava_activity_id=" in notes_text.lower()
+    has_run_metadata = any(_has_distance_or_pace_metadata(row) for row in rows)
+    has_lift_numbers = any(_row_has_lift_numbers(row) for row in rows)
+    has_lift = bool(matched_lift or has_lift_numbers)
+    hevy_lift_without_cardio_metadata = "hevy" in source_text and has_lift and not has_run_metadata
+    matched_run = ([] if hevy_lift_without_cardio_metadata else matched_run_title) + matched_run_exercise
+    matched_cardio = ([] if hevy_lift_without_cardio_metadata else matched_cardio_title) + matched_cardio_exercise
+    has_run = bool(has_strava or has_run_metadata or matched_run)
+    has_cardio = bool(matched_cardio)
+
+    if has_lift and (has_run or has_cardio):
+        kind = "lift_cardio"
+    elif has_run:
+        kind = "run"
+    elif has_cardio:
+        kind = "cardio"
+    elif has_lift:
+        kind = "lift"
+    else:
+        kind = "unknown"
+
+    if has_lift and not (has_run or has_cardio):
+        reason = "Resistance exercises detected; no distance/pace/cardio metadata."
+    elif kind == "lift_cardio":
+        reason = "Resistance exercises and clear run/cardio evidence detected."
+    elif kind in {"run", "cardio"}:
+        reason = "Clear run/cardio evidence detected."
+    else:
+        reason = "No clear lift, run, or cardio evidence detected."
+
+    return {
+        "kind": kind,
+        "has_lift": has_lift,
+        "has_run": has_run,
+        "has_cardio": has_cardio,
+        "matched_lift_terms": list(dict.fromkeys(matched_lift))[:12],
+        "matched_cardio_terms": list(dict.fromkeys([*matched_run, *matched_cardio]))[:12],
+        "reason": reason,
+        "debug_text": full_text[:500],
+    }
+
+
+def is_run_row(row: pd.Series | dict, profile: dict | None = None) -> bool:
+    return classify_workout(row).get("kind") in {"run", "cardio", "lift_cardio"}
 
 
 def is_strength_row(row: pd.Series | dict, profile: dict | None = None) -> bool:
-    if is_run_row(row, profile=profile):
-        return False
-    source = str(row.get("source", "") or "").lower()
-    workout_type = str(row.get("workout_type", "") or "").lower()
-    notes = str(row.get("notes", "") or "").lower()
-    return source == "hevy" or "hevy_workout_id=" in notes or workout_type == "strength"
+    return bool(classify_workout(row).get("has_lift"))
 
 
 def classify_hevy_workout(workout: dict) -> dict:
-    """Classify a Hevy workout using text, metadata, and the recurring split."""
+    """Classify a Hevy workout using explicit lift/run/cardio evidence."""
     start = workout.get("start_time") or workout.get("created_at")
     plan = planned_training_for_date(start)
-    text = " ".join(_flatten_strings(workout)).lower()
-    reasons: list[str] = []
-    if plan["is_run_day"]:
-        reasons.append("planned_sunday_run" if plan["weekday"] == "Sunday" else "planned_run_day")
-    if text_has_run_signal(text):
-        reasons.append("run_cardio_text")
-    if _contains_metadata_key(workout):
-        reasons.append("distance_duration_metadata")
-    is_run = bool(reasons)
+    classification = classify_workout({**workout, "source": "hevy"})
+    kind = str(classification["kind"])
+    is_run = kind in {"run", "cardio"}
     return {
-        "workout_type": "Run" if is_run else "Strength",
-        "muscle_group": "Cardio" if is_run else "",
+        "workout_type": "Run" if kind == "run" else "Cardio" if kind == "cardio" else "Strength",
+        "muscle_group": "Cardio" if kind in {"run", "cardio"} else "",
         "is_run": is_run,
-        "reasons": reasons,
+        "kind": kind,
+        "reasons": classification["matched_cardio_terms"] or [classification["reason"]],
+        "classification_debug": classification,
         "planned": plan,
     }
 

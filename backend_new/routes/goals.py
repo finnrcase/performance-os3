@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from backend_new.db import fetch_latest_document, insert_json_row
 from backend_new.utils import utc_now_iso
+from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets
 
 router = APIRouter(tags=["goals"])
 
@@ -32,45 +33,42 @@ def fallback_goals() -> dict[str, Any]:
     }
 
 
-def _activity_multiplier(activity_level: str) -> float:
-    normalized = str(activity_level or "").strip().lower()
-    if normalized in {"low", "light", "sedentary"}:
-        return 14.0
-    if normalized in {"high", "very_active", "very active"}:
-        return 17.0
-    return 15.5
+def _title_option(value: Any, fallback: str) -> str:
+    normalized = str(value or fallback).replace("_", " ").strip().lower()
+    known = {
+        "lean bulk": "Lean Bulk",
+        "fat loss": "Cut",
+        "cut": "Cut",
+        "maintenance": "Maintain",
+        "maintain": "Maintain",
+        "recomposition": "Recomposition",
+        "performance / mile time": "Performance / Mile Time",
+        "performance": "Performance / Mile Time",
+        "low": "Low",
+        "light": "Low",
+        "moderate": "Moderate",
+        "high": "High",
+        "very high": "Very High",
+        "very active": "Very High",
+        "conservative": "Conservative",
+        "aggressive": "Aggressive",
+    }
+    return known.get(normalized, normalized.title() or fallback)
+
+
+def _canonical_goals(goals: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **goals,
+        "goal_type": _title_option(goals.get("goal_type"), "Lean Bulk"),
+        "activity_level": _title_option(goals.get("activity_level"), "Moderate"),
+        "aggressiveness": _title_option(goals.get("aggressiveness"), "Conservative"),
+    }
 
 
 def calculate_targets(goals: dict[str, Any]) -> dict[str, Any]:
-    bodyweight = max(80.0, _to_float(goals.get("current_bodyweight"), 180.0))
-    goal_type = str(goals.get("goal_type") or "lean_bulk").strip().lower()
-    maintenance = round(bodyweight * _activity_multiplier(str(goals.get("activity_level") or "moderate")))
-    if "cut" in goal_type or "fat_loss" in goal_type:
-        adjustment = -250
-        expected_change = -0.5
-    elif "maintain" in goal_type:
-        adjustment = 0
-        expected_change = 0
-    else:
-        adjustment = 150
-        expected_change = 0.25
-    calories = max(1600, round(maintenance + adjustment))
-    protein = round(min(max(bodyweight * 1.1, bodyweight), bodyweight * 1.2))
-    fat = round(max(bodyweight * 0.3, 50))
-    carbs = round(max(100, (calories - protein * 4 - fat * 9) / 4))
-    return {
-        "target_calories": calories,
-        "maintenance_calories": maintenance,
-        "calorie_adjustment": adjustment,
-        "protein_grams": protein,
-        "carb_grams": carbs,
-        "fat_grams": fat,
-        "expected_weekly_weight_change": expected_change,
-        "target_description": "Simple conservative target from current bodyweight and goal type.",
-        "timeline_status": "unknown",
-        "timeline_warning": "",
-        "updated_at": utc_now_iso(),
-    }
+    canonical = _canonical_goals({**fallback_goals(), **(goals or {})})
+    targets = calculate_macro_targets(canonical)
+    return {**targets, "updated_at": targets.get("updated_at") or utc_now_iso()}
 
 
 TARGET_FIELDS = {
@@ -107,6 +105,15 @@ def goals_payload() -> dict[str, Any]:
     goals = _saved_goals()
     stored_targets = fetch_latest_document("macro_targets", {})
     targets = _simple_targets(goals, stored_targets)
+    weight_feedback = analyze_weight_trend(None, _canonical_goals(goals))
+    confidence = {
+        "nutrition": "low",
+        "body": "low",
+        "training": "low",
+        "recovery": "low",
+        "overall": "low",
+        "missing_data": ["Run the recommendation engine to refresh structured confidence."],
+    }
     return {
         "goals": goals,
         "targets": targets,
@@ -116,20 +123,16 @@ def goals_payload() -> dict[str, Any]:
             "summary": "Training workload is not used in backend_new goals.",
             "current": {},
         },
-        "weight_feedback": {
-            "status": "deferred",
-            "suggested_adjustment": "hold",
-            "confidence": "low",
-            "message": "Weight feedback is deferred until lightweight trend endpoints are enabled.",
-        },
+        "weight_feedback": weight_feedback,
         "lean_bulk_decision": {
             "status": "deferred",
-            "message": "Lean bulk analysis is deferred; using simple conservative targets.",
+            "message": "Lean bulk analysis runs only from the explicit recommendation engine.",
             "recommended_target_calories": targets.get("target_calories"),
         },
         "adaptive_recommendation": {
-            "confidence": "deferred",
-            "reasoning": ["Heavy adaptive analytics are disabled in backend_new."],
+            "confidence": confidence,
+            "confidenceLevel": confidence["overall"],
+            "reasoning": ["Goals use the shared canonical target framework. Run the recommendation engine for the next suggested update."],
             "recommendedTargets": targets,
             "currentTarget": targets,
         },
@@ -155,3 +158,18 @@ def put_goals(payload: dict[str, Any]) -> dict[str, Any]:
     insert_json_row("user_goal_settings", goals)
     insert_json_row("macro_targets", targets)
     return goals_payload()
+
+
+@router.post("/api/goals/apply-suggested-macros")
+def apply_suggested_macros() -> dict[str, Any]:
+    latest = fetch_latest_document("nutrition_recommendation_history", {})
+    adaptive = latest.get("adaptive_recommendation") if isinstance(latest, dict) else None
+    recommended = adaptive.get("recommendedTargets") if isinstance(adaptive, dict) else None
+    targets = recommended if isinstance(recommended, dict) and recommended.get("target_calories") else calculate_targets(_saved_goals())
+    saved = insert_json_row("macro_targets", {**targets, "updated_at": utc_now_iso()})
+    return {
+        "status": "ok",
+        "message": "Canonical macro targets applied.",
+        "source": "latest_recommendation" if recommended else "canonical_goals",
+        "targets": saved if isinstance(saved, dict) and "_db_error" not in saved else targets,
+    }

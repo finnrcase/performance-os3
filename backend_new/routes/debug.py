@@ -3,8 +3,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Request
 
 from backend_new.config import SERVICE_NAME, environment, storage_name
-from backend_new.db import SUPPORTED_JSONB_TABLES, count_rows, ping
+from backend_new.db import SUPPORTED_JSONB_TABLES, count_rows, fetch_json_rows, ping
 from backend_new.utils import env_presence, timed, utc_now_iso
+from src.body_metrics import canonical_bodyweight_debug
 
 
 router = APIRouter(tags=["debug"])
@@ -42,6 +43,9 @@ def _route_list(request: Request) -> list[dict]:
 def debug_startup(request: Request) -> dict:
     db_result, db_check = timed("db_ping", ping)
     row_counts = {table: count_rows(table) for table in sorted(SUPPORTED_JSONB_TABLES)}
+    body_rows = fetch_json_rows("body_metric_logs", limit=5000, date_field="date")
+    body_rows = [row for row in body_rows if isinstance(row, dict) and "_db_error" not in row]
+    body_metric_debug = canonical_bodyweight_debug(body_rows)
     count_checks = [
         {
             "name": f"count_rows:{table}",
@@ -58,6 +62,7 @@ def debug_startup(request: Request) -> dict:
         "storage": storage_name(),
         "database": db_result,
         "row_counts": row_counts,
+        "body_metrics_debug": body_metric_debug,
         "checks": checks,
         "env": env_presence(DEBUG_ENV_VARS),
         "routes": _route_list(request),

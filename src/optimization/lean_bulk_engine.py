@@ -12,6 +12,7 @@ import pandas as pd
 from src.analytics.recovery_engine import analyze_recovery_signal
 from src.analytics.training_workload import analyze_hevy_performance_signal
 from src.analytics.strength_trends import calculate_strength_trend
+from src.body_metrics import canonical_daily_bodyweights
 from src.nutrition_targets import calculate_macro_targets
 
 
@@ -78,9 +79,9 @@ def _empty_response(target_calories: int, reason: str) -> dict:
 
 
 def _clean_bodyweight(body_metrics_df: pd.DataFrame) -> pd.DataFrame:
-    if body_metrics_df.empty:
+    if body_metrics_df is None or body_metrics_df.empty:
         return pd.DataFrame(columns=["date", "bodyweight", "waist", "estimated_body_fat"])
-    df = body_metrics_df.copy()
+    df = canonical_daily_bodyweights(body_metrics_df)
     for column in ["bodyweight", "waist", "estimated_body_fat"]:
         if column not in df.columns:
             df[column] = None

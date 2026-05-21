@@ -20,6 +20,7 @@ from backend_new.config import (
     MAX_STATEMENT_TIMEOUT_MS,
     database_url,
 )
+from src.training_schedule import classify_workout
 
 
 SUPPORTED_JSONB_TABLES = {
@@ -350,13 +351,22 @@ def _summarize_training_rows(rows: list[dict[str, Any]], *, limit_workouts: int,
         first = workout_rows[0] if workout_rows else {}
         workout_type = str(first.get("workout_type") or first.get("title") or first.get("name") or "Workout")
         sources = sorted({str(row.get("source") or "manual") for row in workout_rows if row.get("source")})
-        has_run = any("run" in str(row.get("workout_type") or row.get("exercise") or "").lower() or str(row.get("source") or "").lower() == "strava" for row in workout_rows)
-        has_lift = any(not ("run" in str(row.get("workout_type") or row.get("exercise") or "").lower()) for row in workout_rows)
+        classification = classify_workout(workout_rows)
+        has_run = bool(classification.get("kind") in {"run", "cardio", "lift_cardio"})
+        has_lift = bool(classification.get("has_lift"))
         workouts.append(
             {
                 "date": workout_date,
                 "workout_id": workout_id,
                 "workout_type": workout_type,
+                "classification": classification.get("kind", "unknown"),
+                "classification_debug": {
+                    "has_lift": has_lift,
+                    "has_cardio": bool(classification.get("has_cardio") or classification.get("has_run")),
+                    "matched_lift_terms": classification.get("matched_lift_terms") or [],
+                    "matched_cardio_terms": classification.get("matched_cardio_terms") or [],
+                    "reason": classification.get("reason") or "",
+                },
                 "total_sets": int(sum(max(0, int(_number(row.get("sets"), 0))) for row in workout_rows)),
                 "total_volume": round(sum(_training_row_volume(row) for row in workout_rows), 1),
                 "duration_minutes": round(max([_number(row.get("duration_minutes"), 0) for row in workout_rows] or [0]), 1),

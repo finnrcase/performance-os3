@@ -91,7 +91,8 @@ class TrainingWorkloadTest(unittest.TestCase):
         self.assertEqual(goals["aggressiveness"], "Conservative")
         self.assertGreater(goals["cardio_frequency_per_week"], 0)
         self.assertGreater(targets["workload_calorie_adjustment"], 0)
-        self.assertGreater(targets["carb_grams"], 300)
+        self.assertGreater(targets["carb_grams"], 240)
+        self.assertIn("Adaptive lean-bulk baseline", targets["carb_emphasis"])
 
     def test_hevy_run_counts_as_cardio_not_strength_workload(self):
         training = pd.DataFrame(

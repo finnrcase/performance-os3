@@ -130,7 +130,7 @@ class WorkoutQualityTest(unittest.TestCase):
                     "reps": 1,
                     "weight": 0,
                     "duration_minutes": 30,
-                    "notes": "Imported from Hevy | hevy_workout_id=hevy-run | workout_title=Sunday Run",
+                    "notes": "Imported from Hevy | hevy_workout_id=hevy-run | workout_title=Sunday Run | distance_miles=3.0 | pace_min_per_mile=10.0",
                     "source": "hevy",
                     "muscle_group": "",
                 }

@@ -20,6 +20,11 @@ GOALS = {
 CURRENT = {"target_calories": 2800, "protein_grams": 176, "carb_grams": 376, "fat_grams": 68}
 
 
+def _overall_confidence(recommendation: dict) -> str:
+    confidence = recommendation.get("confidence")
+    return confidence.get("overall", "low") if isinstance(confidence, dict) else str(confidence or "low")
+
+
 def _body(step: float) -> pd.DataFrame:
     dates = pd.date_range("2026-05-01", periods=14, freq="D")
     return pd.DataFrame({"date": dates.astype(str), "bodyweight": [160 + index * step for index in range(14)]})
@@ -223,9 +228,9 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
         recommendation = build_adaptive_nutrition_recommendation(
             user_goals=GOALS,
             body_metrics_df=_body(0.02),
-            nutrition_df=pd.DataFrame(),
+            nutrition_df=_nutrition(days=14, start="2026-05-01"),
             training_df=_training_series("declining"),
-            recovery_df=pd.DataFrame(),
+            recovery_df=_recovery(),
             current_targets=current,
         )
 
@@ -240,9 +245,9 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
         recommendation = build_adaptive_nutrition_recommendation(
             user_goals=GOALS,
             body_metrics_df=_body(0.18),
-            nutrition_df=pd.DataFrame(),
+            nutrition_df=_nutrition(days=14, start="2026-05-01"),
             training_df=_training_series("declining"),
-            recovery_df=pd.DataFrame(),
+            recovery_df=_recovery(),
             current_targets=current,
         )
 
@@ -288,7 +293,7 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
             current_targets=CURRENT,
         )
 
-        self.assertNotEqual(recommendation["confidence"], "high")
+        self.assertNotEqual(_overall_confidence(recommendation), "high")
         self.assertTrue(any("Body fat" in warning or "body fat" in warning for warning in recommendation["warnings"] + recommendation["missingDataWarnings"]))
 
     def test_isolated_bad_workout_does_not_trigger_major_change(self):
@@ -315,7 +320,7 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
             today="2026-05-14",
         )
 
-        self.assertIn(recommendation["confidence"], {"low", "medium"})
+        self.assertIn(_overall_confidence(recommendation), {"low", "medium"})
         self.assertLessEqual(recommendation["calorieAdjustment"], 0)
 
     def test_poor_recovery_slow_gain_can_suggest_small_carb_bump(self):
@@ -387,12 +392,31 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
             today="2026-05-14",
         )
 
-        self.assertEqual(recommendation["confidence"], "low")
+        self.assertEqual(_overall_confidence(recommendation), "low")
+        self.assertEqual(recommendation["confidence"]["nutrition"], "low")
         self.assertEqual(recommendation["calorieAdjustment"], 0)
         self.assertEqual(recommendation["caloriesTarget"], CURRENT["target_calories"])
         self.assertTrue(any("food" in warning.lower() for warning in recommendation["missingDataWarnings"]))
         self.assertTrue(any("sleep" in warning.lower() for warning in recommendation["missingDataWarnings"]))
         self.assertTrue(any("hevy" in warning.lower() or "lifting" in warning.lower() for warning in recommendation["missingDataWarnings"]))
+
+    def test_recommendation_includes_trace_confidence_and_suggestions(self):
+        recommendation = build_adaptive_nutrition_recommendation(
+            user_goals=GOALS,
+            body_metrics_df=_body_comp(0.06, 0),
+            nutrition_df=_nutrition(),
+            training_df=_training_series("improving"),
+            recovery_df=_recovery(),
+            current_targets=CURRENT,
+            today="2026-05-14",
+        )
+
+        self.assertIn("recommendation_trace", recommendation)
+        self.assertIn(recommendation["recommendation_trace"]["decision"], {"hold", "increase", "decrease"})
+        self.assertIn("nutrition_signal", recommendation["recommendation_trace"])
+        self.assertIn("missing_data", recommendation["confidence"])
+        self.assertIn("overall", recommendation["confidence"])
+        self.assertTrue(recommendation["structured_suggestions"])
 
 
 if __name__ == "__main__":

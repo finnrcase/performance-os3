@@ -2,6 +2,7 @@ import unittest
 
 import pandas as pd
 
+from src.body_metrics import canonical_daily_bodyweights
 from src.nutrition_targets import align_macro_calories, analyze_weight_trend, calculate_bodyweight_trend_signal, calculate_macro_targets
 
 
@@ -21,12 +22,13 @@ class NutritionTargetTest(unittest.TestCase):
 
         targets = calculate_macro_targets(goals)
 
-        self.assertEqual(targets["target_calories"], 2500)
+        self.assertEqual(targets["target_calories"], 2648)
+        self.assertNotEqual(targets["target_calories"], 2500)
         self.assertGreaterEqual(targets["protein_grams"], 175)
         self.assertLessEqual(targets["protein_grams"], 185)
         self.assertGreaterEqual(targets["fat_grams"], 64)
-        self.assertGreaterEqual(targets["carb_grams"], 290)
-        self.assertIn("2500 kcal", targets["carb_emphasis"])
+        self.assertGreaterEqual(targets["carb_grams"], 325)
+        self.assertIn("Adaptive lean-bulk baseline", targets["carb_emphasis"])
         macro_calories = (targets["protein_grams"] * 4) + (targets["carb_grams"] * 4) + (targets["fat_grams"] * 9)
         self.assertEqual(targets["macro_calories"], macro_calories)
         self.assertLessEqual(abs(targets["calorie_macro_delta"]), 2)
@@ -92,7 +94,32 @@ class NutritionTargetTest(unittest.TestCase):
 
         self.assertEqual(signal["status"], "gaining too fast")
         self.assertLess(signal["calorie_adjustment"], 0)
-        self.assertLess(targets["target_calories"], 2500)
+        self.assertLess(targets["target_calories"], targets["maintenance_calories"] + 188)
+
+    def test_weight_trend_uses_lightest_weigh_in_per_day(self):
+        rows = []
+        for index, day in enumerate(pd.date_range("2026-05-01", periods=14, freq="D")):
+            morning = 156.9 + index * 0.02
+            rows.append({"date": f"{day.date()}T07:00:00", "bodyweight": morning, "source": "manual"})
+            rows.append({"date": f"{day.date()}T21:00:00", "bodyweight": morning + 2.3, "source": "manual"})
+        body_metrics = pd.DataFrame(rows)
+        goals = {
+            "current_bodyweight": 157,
+            "goal_bodyweight": 165,
+            "timeline_weeks": 24,
+            "goal_type": "Lean Bulk",
+            "training_frequency_per_week": 4,
+            "cardio_frequency_per_week": 2,
+            "activity_level": "Moderate",
+            "aggressiveness": "Conservative",
+        }
+
+        canonical = canonical_daily_bodyweights(body_metrics)
+        signal = calculate_bodyweight_trend_signal(body_metrics, goals)
+
+        self.assertEqual(len(canonical), 14)
+        self.assertAlmostEqual(float(canonical.iloc[0]["bodyweight"]), 156.9)
+        self.assertLess(signal["current_7_day_avg"], 158)
 
 
 if __name__ == "__main__":

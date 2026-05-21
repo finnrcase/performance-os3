@@ -326,6 +326,15 @@ type WorkoutGroup = {
   date: string;
   workout_id: string;
   workout_type: string;
+  classification?: "lift" | "run" | "cardio" | "lift_cardio" | "unknown" | string;
+  classification_label?: string;
+  classification_debug?: {
+    has_lift?: boolean;
+    has_cardio?: boolean;
+    matched_lift_terms?: string[];
+    matched_cardio_terms?: string[];
+    reason?: string;
+  };
   muscle_groups: string[];
   exercise_names: string[];
   total_sets: number;
@@ -504,6 +513,15 @@ type AdaptiveDayTypeAdjustment = {
   adjusted_targets?: { calories: number; protein: number; carbs: number; fat: number };
 };
 
+type RecommendationConfidence = {
+  nutrition: "low" | "medium" | "high" | string;
+  body: "low" | "medium" | "high" | string;
+  training: "low" | "medium" | "high" | string;
+  recovery: "low" | "medium" | "high" | string;
+  overall: "low" | "medium" | "high" | string;
+  missing_data: string[];
+};
+
 type AdaptiveNutritionRecommendation = {
   recommendedCalories?: number;
   recommendedProtein?: number;
@@ -527,7 +545,8 @@ type AdaptiveNutritionRecommendation = {
     comparable_weeks: number;
   };
   carbTimingRecommendation?: string;
-  confidence: "low" | "medium" | "high" | string;
+  confidence: RecommendationConfidence | "low" | "medium" | "high" | string;
+  confidenceLevel?: "low" | "medium" | "high" | string;
   dataQualityScore?: number;
   reasoning: string[];
   warnings: string[];
@@ -575,11 +594,33 @@ type AdaptiveNutritionRecommendation = {
     recovery: RecoverySignal;
     trainingLoad: { status: string; summary: string; hard_sets_per_week?: number; weekly_training_minutes?: number };
     runningLoad: { status: string; summary: string; runs_per_week?: number; weekly_mileage?: number; interference_risk?: string };
-    nutrition: { days: number; calories: number | null; protein: number | null; carbs: number | null; fat: number | null };
+    nutrition: {
+      days?: number;
+      logged_days_14?: number;
+      missing_days_14?: number;
+      calories?: number | null;
+      protein?: number | null;
+      carbs?: number | null;
+      fat?: number | null;
+      average_calories?: number | null;
+      average_protein?: number | null;
+      average_carbs?: number | null;
+      average_fat?: number | null;
+      adherence?: string;
+      source?: string;
+    };
     dataQuality?: { score: number; confidence: string; missingDataWarnings: string[] };
     dayType?: AdaptiveDayTypeAdjustment;
     historicalLearning?: { detectedTrends: string[] };
   };
+  recommendation_trace?: {
+    decision: "hold" | "increase" | "decrease" | string;
+    calorie_change: number;
+    main_reasons: string[];
+    what_would_change_decision: string[];
+  };
+  structured_suggestions?: Array<{ type: string; priority: string; title: string; detail: string }>;
+  workout_recovery_suggestions?: Array<{ type: string; priority: string; title: string; detail: string }>;
 };
 
 type PersonalLearningInsight = {
@@ -1294,6 +1335,12 @@ const initialForms: FormState = {
 
 function cx(...classes: Array<string | false | null | undefined>) {
   return classes.filter(Boolean).join(" ");
+}
+
+function recommendationConfidenceLabel(confidence?: AdaptiveNutritionRecommendation["confidence"], fallback?: string) {
+  if (!confidence) return fallback ?? "low";
+  if (typeof confidence === "string") return confidence;
+  return confidence.overall || fallback || "low";
 }
 
 const ACCENT_THEME_STORAGE_KEY = "performance-os-accent-theme";
@@ -3420,7 +3467,7 @@ function Dashboard({
                 <p className="mt-1 text-xs leading-5 text-zinc-400">{adaptiveRecommendation.reasoning?.[0] ?? "Adaptive engine is learning from current data."}</p>
               </div>
               <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
-                {adaptiveRecommendation.confidence} · {adaptiveRecommendation.dataQualityScore ?? 0}/100
+                {recommendationConfidenceLabel(adaptiveRecommendation.confidence, adaptiveRecommendation.confidenceLevel)} · {adaptiveRecommendation.dataQualityScore ?? 0}/100
               </span>
             </div>
             {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
@@ -3570,7 +3617,7 @@ function GoalsPage({
             <div className="mt-4 grid gap-3 text-sm leading-6 text-zinc-300">
               <p><span className="text-zinc-500">Goal:</span> Slow muscle gain while minimizing fat gain.</p>
               <p><span className="text-zinc-500">Method:</span> Dynamic calorie and macro adjustment based on bodyweight, training, running, food logs, and recovery.</p>
-              <p><span className="text-zinc-500">Mode:</span> Conservative 2500 kcal baseline with training-day carb support when workload and recovery justify it.</p>
+              <p><span className="text-zinc-500">Mode:</span> Adaptive maintenance baseline with conservative training-day carb support when workload and recovery justify it.</p>
             </div>
           </div>
           <div className="accent-outline rounded-lg border p-4">
@@ -3609,7 +3656,7 @@ function GoalsPage({
                 </p>
               </div>
               <span className="accent-outline inline-flex w-fit rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em]">
-                {adaptiveRecommendation?.confidence ?? "low"} confidence
+                {recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel)} confidence
               </span>
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -4887,10 +4934,15 @@ function sourceLabel(source?: string | null) {
   return String(source ?? "").toLowerCase().includes("withings") ? "Withings" : source ? String(source) : "Manual";
 }
 
-function averageNullable(values: Array<number | null>) {
-  const clean = values.filter((value): value is number => Number.isFinite(Number(value)));
-  if (!clean.length) return null;
-  return Number((clean.reduce((sum, value) => sum + value, 0) / clean.length).toFixed(2));
+function closestSameDayMetric(values: WeightChartPoint[], selected: WeightChartPoint, key: keyof WeightChartPoint): number | null {
+  const candidates = values
+    .filter((item) => Number.isFinite(Number(item[key])))
+    .sort((a, b) => {
+      const sourceRank = Number(!String(a.source).toLowerCase().includes("withings")) - Number(!String(b.source).toLowerCase().includes("withings"));
+      if (sourceRank !== 0) return sourceRank;
+      return Math.abs(a.timestamp - selected.timestamp) - Math.abs(b.timestamp - selected.timestamp);
+    });
+  return candidates.length ? Number(candidates[0][key]) : null;
 }
 
 function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
@@ -4919,19 +4971,19 @@ function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
   });
 
   const daily = Array.from(grouped.entries()).map(([date, values]) => {
-    const average = values.reduce((sum, item) => sum + item.bodyweight, 0) / values.length;
-    const latest = values.sort((a, b) => a.timestamp - b.timestamp).at(-1)!;
-    const source = values.some((item) => item.source.toLowerCase().includes("withings")) ? "withings" : latest.source;
+    const sorted = values.slice().sort((a, b) => a.bodyweight - b.bodyweight || a.timestamp - b.timestamp);
+    const selected = sorted[0]!;
+    const source = values.some((item) => item.source.toLowerCase().includes("withings")) ? "withings" : selected.source;
     return {
-      ...latest,
+      ...selected,
       date,
-      bodyweight: Number(average.toFixed(2)),
-      bodyFat: averageNullable(values.map((item) => item.bodyFat)),
-      leanMass: averageNullable(values.map((item) => item.leanMass)),
-      fatMass: averageNullable(values.map((item) => item.fatMass)),
-      muscleMass: averageNullable(values.map((item) => item.muscleMass)),
-      hydration: averageNullable(values.map((item) => item.hydration)),
-      bmi: averageNullable(values.map((item) => item.bmi)),
+      bodyweight: Number(selected.bodyweight.toFixed(2)),
+      bodyFat: selected.bodyFat ?? closestSameDayMetric(values, selected, "bodyFat"),
+      leanMass: selected.leanMass ?? closestSameDayMetric(values, selected, "leanMass"),
+      fatMass: selected.fatMass ?? closestSameDayMetric(values, selected, "fatMass"),
+      muscleMass: selected.muscleMass ?? closestSameDayMetric(values, selected, "muscleMass"),
+      hydration: selected.hydration ?? closestSameDayMetric(values, selected, "hydration"),
+      bmi: selected.bmi ?? closestSameDayMetric(values, selected, "bmi"),
       source,
     };
   });
@@ -5274,9 +5326,10 @@ function RecoveryPage({
       </Card>
 
       <Card>
-        <SectionHeader eyebrow="History" title="Body Composition Trends" />
+            <SectionHeader eyebrow="History" title="Body Composition Trends" />
         {weightHistory.length ? (
           <div className="space-y-4">
+            <p className="text-xs text-zinc-500">Using lowest weigh-in per day to reduce night-weight noise.</p>
             <div className="flex flex-wrap gap-2">
               {bodyCompositionTabs.map((tab) => (
                 <button
@@ -5434,43 +5487,223 @@ type MislogSuggestion = {
   later: WorkoutGroup;
 };
 
-type WorkoutKind = "running" | "cardio" | "lifting" | "hybrid" | "unknown";
+type WorkoutKind = "run" | "cardio" | "lift" | "lift_cardio" | "unknown";
 
-const RUN_KEYWORDS = [
-  "run", "running", "jog", "easy run", "tempo", "interval", "sprint",
-  "mile", "zone 2", "zone2", "treadmill", "5k", "10k", "outdoor run",
+const RUN_KEYWORDS = ["run", "running", "jog", "easy run", "tempo run", "interval run", "outdoor run", "treadmill run", "5k", "10k"];
+const CARDIO_KEYWORDS = ["cardio", "bike", "cycling", "spin", "elliptical", "swim", "stairmaster", "stair master", "rowing machine", "rower", "treadmill walk"];
+const LIFT_KEYWORDS = [
+  "bench press", "squat", "deadlift", "overhead press", "shoulder press", "curl", "skullcrusher", "skull crusher",
+  "triceps", "pushdown", "leg extension", "leg curl", "calf raise", "row", "rows", "pulldown", "lateral raise",
+  "dumbbell", "barbell", "machine", "shrug", "press",
 ];
-const CARDIO_KEYWORDS = ["cardio", "bike", "cycling", "spin", "row", "elliptical", "swim", "stairmaster"];
 
-// Classify a workout as running / cardio / lifting / hybrid from its title,
-// exercises, muscle groups and source. Strava only imports runs here, so a
-// Strava-sourced workout is always a run.
+function textHasTerm(text: string, term: string): boolean {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, "i").test(text);
+}
+
 function classifyWorkout(group: WorkoutGroup): WorkoutKind {
-  const haystack = [group.workout_type || "", ...(group.exercise_names || []), ...(group.muscle_groups || [])]
-    .join(" ")
-    .toLowerCase();
+  const backendKind = String(group.classification || "").toLowerCase();
+  if (["run", "cardio", "lift", "lift_cardio", "unknown"].includes(backendKind)) return backendKind as WorkoutKind;
+  const titleText = group.workout_type || "";
+  const exerciseText = [...(group.exercise_names || [])].join(" ").toLowerCase();
+  const liftText = [exerciseText, ...(group.muscle_groups || [])].join(" ").toLowerCase();
   const source = (group.source || "").toLowerCase();
-  const isRun = source.includes("strava") || RUN_KEYWORDS.some((keyword) => haystack.includes(keyword));
-  const isCardio = CARDIO_KEYWORDS.some((keyword) => haystack.includes(keyword));
-  // A lift carries set/rep/weight volume; a pure run/cardio session does not.
-  const isLift = haystack.includes("strength") || haystack.includes("lift") || (Number(group.total_volume) || 0) > 0;
-  if (isRun && isLift) return "hybrid";
-  if (isRun) return "running";
-  if (isCardio && isLift) return "hybrid";
+  const notes = (group.details || []).map((row) => row.notes || "").join(" ").toLowerCase();
+  const hasRunMetadata = notes.includes("distance_miles=") || notes.includes("pace_min_per_mile=") || notes.includes("strava_activity_id=");
+  const isLift = (Number(group.total_volume) || 0) > 0 || (Number(group.total_sets) || 0) > 0 || LIFT_KEYWORDS.some((keyword) => textHasTerm(liftText, keyword));
+  const ignoreHevyTitleCardio = source.includes("hevy") && isLift && !hasRunMetadata;
+  const isRun = source.includes("strava") || hasRunMetadata || RUN_KEYWORDS.some((keyword) => textHasTerm(exerciseText, keyword) || (!ignoreHevyTitleCardio && textHasTerm(titleText, keyword)));
+  const isCardio = CARDIO_KEYWORDS.some((keyword) => textHasTerm(exerciseText, keyword) || (!ignoreHevyTitleCardio && textHasTerm(titleText, keyword)));
+  if (isRun && isLift) return "lift_cardio";
+  if (isRun) return "run";
+  if (isCardio && isLift) return "lift_cardio";
   if (isCardio) return "cardio";
-  if (isLift) return "lifting";
+  if (isLift) return "lift";
   return "unknown";
 }
 
 function workoutKindLabel(group: WorkoutGroup): string {
   const kind = classifyWorkout(group);
-  if (kind === "running") {
-    return (group.source || "").toLowerCase().includes("strava") ? "Strava run" : "Hevy run";
-  }
+  if (kind === "run") return "Run";
   if (kind === "cardio") return "Cardio";
-  if (kind === "hybrid") return "Lift + cardio";
-  if (kind === "lifting") return "Lift";
-  return "Workout";
+  if (kind === "lift_cardio") return "Lift + cardio";
+  if (kind === "lift") return "Lift";
+  return "Unknown";
+}
+
+function estimatedOneRepMax(weight: number, reps: number): number {
+  if (!weight || !reps) return 0;
+  return weight * (1 + reps / 30);
+}
+
+function exerciseTopSets(workout: WorkoutGroup): Record<string, TrainingEntry> {
+  const output: Record<string, TrainingEntry> = {};
+  for (const row of workout.details || []) {
+    const exercise = (row.exercise || "").trim();
+    if (!exercise || Number(row.weight) <= 0 || Number(row.reps) <= 0) continue;
+    const current = output[exercise];
+    if (!current || estimatedOneRepMax(Number(row.weight), Number(row.reps)) > estimatedOneRepMax(Number(current.weight), Number(current.reps))) {
+      output[exercise] = row;
+    }
+  }
+  return output;
+}
+
+function splitToken(workout: WorkoutGroup): string {
+  const text = `${workout.workout_type || ""} ${(workout.exercise_names || []).join(" ")}`.toLowerCase();
+  for (const token of ["push", "pull", "legs", "leg", "upper", "lower", "chest"]) {
+    if (textHasTerm(text, token)) return token === "leg" ? "legs" : token;
+  }
+  return "";
+}
+
+function similarLiftWorkouts(todayLift: WorkoutGroup, workouts: WorkoutGroup[]): WorkoutGroup[] {
+  const todayDate = (todayLift.date || "").slice(0, 10);
+  const todaySplit = splitToken(todayLift);
+  const todayExercises = new Set((todayLift.exercise_names || []).map((name) => name.toLowerCase()));
+  return workouts
+    .filter((workout) => workout.workout_id !== todayLift.workout_id && workout.date < todayDate && classifyWorkout(workout) === "lift")
+    .map((workout) => {
+      const titleMatch = todaySplit && splitToken(workout) === todaySplit ? 3 : 0;
+      const overlap = (workout.exercise_names || []).filter((name) => todayExercises.has(name.toLowerCase())).length;
+      return { workout, score: titleMatch + overlap };
+    })
+    .filter((item) => item.score > 0)
+    .sort((a, b) => b.score - a.score || b.workout.date.localeCompare(a.workout.date))
+    .slice(0, 8)
+    .map((item) => item.workout);
+}
+
+function todayLiftPerformance(todayLift: WorkoutGroup, workouts: WorkoutGroup[]) {
+  const similar = similarLiftWorkouts(todayLift, workouts);
+  if (!similar.length) {
+    return {
+      rating: "Average",
+      explanation: "Average session: not enough similar recent lifts yet, so this becomes the comparison baseline.",
+      suggestions: ["Keep loads steady until there are a few comparable sessions."],
+    };
+  }
+  const avg = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+  const avgVolume = avg(similar.map((workout) => Number(workout.total_volume) || 0));
+  const avgSets = avg(similar.map((workout) => Number(workout.total_sets) || 0));
+  const avgDuration = avg(similar.map((workout) => Number(workout.duration_minutes) || 0).filter(Boolean));
+  const volumeDelta = avgVolume ? ((Number(todayLift.total_volume) - avgVolume) / avgVolume) * 100 : 0;
+  const setsDelta = avgSets ? ((Number(todayLift.total_sets) - avgSets) / avgSets) * 100 : 0;
+  const durationDelta = avgDuration && todayLift.duration_minutes ? ((Number(todayLift.duration_minutes) - avgDuration) / avgDuration) * 100 : 0;
+  const todayTops = exerciseTopSets(todayLift);
+  let prs = 0;
+  let matchedTopSet = "";
+  for (const [exercise, topSet] of Object.entries(todayTops)) {
+    const bestPast = Math.max(
+      0,
+      ...similar.flatMap((workout) => Object.entries(exerciseTopSets(workout)).filter(([name]) => name.toLowerCase() === exercise.toLowerCase()).map(([, row]) => estimatedOneRepMax(Number(row.weight), Number(row.reps)))),
+    );
+    const todayOneRm = estimatedOneRepMax(Number(topSet.weight), Number(topSet.reps));
+    if (bestPast > 0 && todayOneRm >= bestPast * 0.995) {
+      prs += 1;
+      if (!matchedTopSet) matchedTopSet = exercise;
+    }
+  }
+  let score = 0;
+  if (volumeDelta >= 20) score += 2;
+  else if (volumeDelta >= 6) score += 1;
+  else if (volumeDelta <= -25) score -= 2;
+  else if (volumeDelta <= -12) score -= 1;
+  if (setsDelta >= 10) score += 1;
+  if (setsDelta <= -20) score -= 1;
+  if (prs >= 2) score += 2;
+  else if (prs === 1) score += 1;
+  if (durationDelta > 35 && volumeDelta < 0) score -= 1;
+  const rating = score >= 3 ? "Great" : score >= 1 ? "Solid" : score <= -2 ? "Needs review" : score <= -1 ? "Light" : "Average";
+  const split = splitToken(todayLift);
+  const comparisonName = split ? `${split[0].toUpperCase()}${split.slice(1)}` : "similar";
+  const explanationParts = [
+    `${rating} session: volume was ${Math.abs(Math.round(volumeDelta))}% ${volumeDelta >= 0 ? "above" : "below"} your recent ${comparisonName} average`,
+    prs ? `${prs} lift${prs > 1 ? "s" : ""} matched or beat recent top-set levels${matchedTopSet ? `, led by ${matchedTopSet}` : ""}` : "",
+  ].filter(Boolean);
+  return {
+    rating,
+    explanation: `${explanationParts.join(" and ")}.`,
+    suggestions: heavierSuggestions(todayLift, similar, volumeDelta),
+  };
+}
+
+function heavierSuggestions(todayLift: WorkoutGroup, similar: WorkoutGroup[], volumeDelta: number): string[] {
+  if (volumeDelta > 35) return ["Hold loads next time; today's volume jumped enough that recovery should prove itself first."];
+  const suggestions: string[] = [];
+  const todayTops = Object.entries(exerciseTopSets(todayLift)).slice(0, 5);
+  for (const [exercise, topSet] of todayTops) {
+    const pastRows = similar.flatMap((workout) => workout.details || []).filter((row) => (row.exercise || "").toLowerCase() === exercise.toLowerCase() && Number(row.weight) > 0 && Number(row.reps) > 0);
+    const bestPast = Math.max(0, ...pastRows.map((row) => estimatedOneRepMax(Number(row.weight), Number(row.reps))));
+    const todayOneRm = estimatedOneRepMax(Number(topSet.weight), Number(topSet.reps));
+    const rpe = Number(topSet.rpe) || 0;
+    const comfortable = !rpe || rpe <= 8.5;
+    if (bestPast > 0 && todayOneRm < bestPast * 0.97) {
+      suggestions.push(`${exercise}: hold weight; reps are not yet consistently improving.`);
+    } else if (Number(topSet.reps) >= 8 && comfortable) {
+      suggestions.push(`${exercise}: consider +5 lb next time if warmups feel good.`);
+    } else if (bestPast > 0 && todayOneRm >= bestPast * 0.995 && comfortable) {
+      suggestions.push(`${exercise}: add 5 lb or 1-2 reps next session.`);
+    }
+    if (suggestions.length >= 3) break;
+  }
+  return suggestions.length ? suggestions : ["No obvious load jump yet; keep the main lifts steady and chase cleaner reps."];
+}
+
+function TodaysLiftTile({ workouts }: Readonly<{ workouts: WorkoutGroup[] }>) {
+  const today = todayString();
+  const lifts = workouts.filter((workout) => classifyWorkout(workout) === "lift" || classifyWorkout(workout) === "lift_cardio");
+  const todayLift = lifts.find((workout) => (workout.date || "").slice(0, 10) === today);
+  const latestLift = lifts[0];
+  const performance = todayLift ? todayLiftPerformance(todayLift, workouts) : null;
+  return (
+    <Card>
+      <SectionHeader eyebrow="Training" title="Today’s Lift" />
+      {todayLift ? (
+        <div className="grid gap-4 xl:grid-cols-[1.1fr_0.9fr]">
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="rounded-full border border-emerald-300/30 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-200">{workoutKindLabel(todayLift)}</span>
+              <span className="rounded-full border border-white/10 px-3 py-1 text-xs text-zinc-300">{todayLift.source || "manual"}</span>
+            </div>
+            <p className="mt-3 text-2xl font-semibold text-white">{todayLift.workout_type || "Lift"}</p>
+            <p className="mt-1 text-sm text-zinc-400">{todayLift.date} · {todayLift.duration_minutes ? `${Math.round(todayLift.duration_minutes)} min` : "No duration"}</p>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
+              {[
+                ["Sets", todayLift.total_sets.toLocaleString(), "Logged today"],
+                ["Volume", Math.round(todayLift.total_volume).toLocaleString(), "lb total"],
+                ["Rating", performance?.rating ?? "Average", "Vs similar lifts"],
+                ["Exercises", todayLift.exercise_names.length.toString(), "Main movements"],
+              ].map(([title, value, detail]) => (
+                <div key={title} className="rounded-lg border border-white/10 bg-zinc-950/45 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{title}</p>
+                  <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+                  <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+                </div>
+              ))}
+            </div>
+            <p className="mt-4 text-sm leading-6 text-zinc-300">{performance?.explanation}</p>
+            <p className="mt-3 text-sm text-zinc-400">{todayLift.exercise_names.slice(0, 8).join(", ") || "No exercises listed"}</p>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-zinc-950/45 p-4">
+            <p className="text-sm font-semibold text-white">Go heavier?</p>
+            <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-300">
+              {(performance?.suggestions || []).map((suggestion) => <li key={suggestion}>{suggestion}</li>)}
+            </ul>
+            {todayLift.classification_debug ? (
+              <p className="mt-4 text-xs leading-5 text-zinc-500">{todayLift.classification_debug.reason}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : (
+        <div className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
+          <p className="text-xl font-semibold text-white">No lift logged today</p>
+          <p className="mt-2 text-sm text-zinc-400">{latestLift ? `Latest lift: ${latestLift.date} · ${latestLift.workout_type || "Lift"}` : "Hevy-synced lifting sessions will appear here after import."}</p>
+        </div>
+      )}
+    </Card>
+  );
 }
 
 // Detect a likely date mis-log: a day with 2+ *lifting* sessions whose previous
@@ -5492,7 +5725,7 @@ function detectMisloggedWorkout(workouts: WorkoutGroup[]): MislogSuggestion | nu
     if (!previousDay || byDate.has(previousDay)) continue;
     // Only same-day lifting sessions are mis-log candidates — a run + lift is
     // legitimate two-a-day training, not an accidental duplicate.
-    const lifts = group.filter((workout) => classifyWorkout(workout) === "lifting");
+    const lifts = group.filter((workout) => classifyWorkout(workout) === "lift");
     if (lifts.length < 2) continue;
     const earlier = lifts[0];
     const later = lifts[1];
@@ -5588,7 +5821,7 @@ function WorkoutHistory({
               <div className="grid grid-cols-2 gap-2 text-xs sm:flex sm:flex-wrap">
                 {(() => {
                   const kind = classifyWorkout(workout);
-                  const isRunLike = kind === "running" || kind === "cardio";
+                  const isRunLike = kind === "run" || kind === "cardio";
                   return (
                     <span className={cx(
                       "rounded-full border px-2 py-1 font-semibold",
@@ -5605,6 +5838,13 @@ function WorkoutHistory({
               </div>
             </div>
           </summary>
+          {workout.classification_debug ? (
+            <div className="mt-4 rounded-lg border border-white/10 bg-zinc-950/45 p-3 text-xs leading-5 text-zinc-400">
+              <span className="font-semibold text-zinc-300">Classification debug:</span> {workout.classification_debug.reason}
+              {workout.classification_debug.matched_lift_terms?.length ? ` Lift: ${workout.classification_debug.matched_lift_terms.join(", ")}.` : ""}
+              {workout.classification_debug.matched_cardio_terms?.length ? ` Cardio: ${workout.classification_debug.matched_cardio_terms.join(", ")}.` : ""}
+            </div>
+          ) : null}
           <div className="mt-4 overflow-x-auto rounded-lg border border-white/10">
             <table className="min-w-full divide-y divide-white/10 text-sm">
               <thead className="bg-white/[0.04] text-left text-zinc-400">
@@ -5994,6 +6234,7 @@ function TrainingPage({
     : "";
   return (
     <div className="space-y-4">
+      <TodaysLiftTile workouts={workoutHistory} />
       <div className="grid gap-4">
         <Card>
           <SectionHeader eyebrow="Imports" title="Hevy and Strava" />
@@ -6989,7 +7230,7 @@ function HistoryPage({
             </div>
             <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.055] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Confidence</p>
-              <p className="mt-2 text-lg font-semibold capitalize text-white">{adaptiveRecommendation.confidence}</p>
+              <p className="mt-2 text-lg font-semibold capitalize text-white">{recommendationConfidenceLabel(adaptiveRecommendation.confidence, adaptiveRecommendation.confidenceLevel)}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">Data quality {adaptiveRecommendation.dataQualityScore ?? 0}/100 · next review {adaptiveRecommendation.nextReviewDate ?? "pending"}</p>
             </div>
             <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.055] p-4">
@@ -8922,8 +9163,8 @@ export default function Home() {
         label: "Body metrics",
         path: "/api/body-metrics",
         run: async () => {
-          const data = await trackedApiGet<{ items: BodyMetricEntry[] }>({ key: "body_metrics", label: "Body metrics", path: "/api/body-metrics", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
-          setBodyMetrics(data.items);
+          const data = await trackedApiGet<{ items: BodyMetricEntry[]; canonical_items?: BodyMetricEntry[]; raw_items?: BodyMetricEntry[] }>({ key: "body_metrics", label: "Body metrics", path: "/api/body-metrics", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
+          setBodyMetrics(data.canonical_items ?? data.items);
         },
       },
       {

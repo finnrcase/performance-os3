@@ -10,6 +10,7 @@ from __future__ import annotations
 import pandas as pd
 
 from src.analytics.recovery_engine import calculate_recovery_score
+from src.body_metrics import canonical_daily_bodyweights
 from src.nutrition import calculate_nutrition_analytics
 from src.training import calculate_training_volume
 
@@ -30,10 +31,7 @@ def _bodyweight_change(body_metrics_df: pd.DataFrame, days=14) -> float | None:
     if body_metrics_df.empty:
         return None
 
-    trend_df = body_metrics_df.copy()
-    trend_df["date"] = pd.to_datetime(trend_df["date"], errors="coerce")
-    trend_df["bodyweight"] = pd.to_numeric(trend_df["bodyweight"], errors="coerce")
-    trend_df = trend_df.dropna(subset=["date", "bodyweight"]).sort_values("date")
+    trend_df = canonical_daily_bodyweights(body_metrics_df)
     if len(trend_df) < 2:
         return None
 

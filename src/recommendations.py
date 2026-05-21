@@ -11,6 +11,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 
+from src.body_metrics import canonical_daily_bodyweights
 from src.recovery import calculate_recovery_score
 from src.training import calculate_training_volume
 
@@ -55,12 +56,7 @@ def _get_bodyweight_change(body_metrics_df, days=7) -> float | None:
     if body_metrics_df.empty:
         return None
 
-    trend_df = body_metrics_df.copy()
-    trend_df["date"] = pd.to_datetime(trend_df["date"], errors="coerce")
-    trend_df["bodyweight"] = pd.to_numeric(
-        trend_df["bodyweight"], errors="coerce"
-    )
-    trend_df = trend_df.dropna(subset=["date", "bodyweight"]).sort_values("date")
+    trend_df = canonical_daily_bodyweights(body_metrics_df)
 
     if len(trend_df) < 2:
         return None

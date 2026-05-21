@@ -13,6 +13,7 @@ from fastapi.responses import Response
 
 from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row, load_recent_training_summary
 from backend_new.utils import json_safe, utc_now_iso
+from src.training_schedule import classify_workout
 
 
 router = APIRouter(tags=["training"])
@@ -64,6 +65,16 @@ def _workout_title(rows: list[dict[str, Any]]) -> str:
     return "Workout"
 
 
+def _classification_label(kind: str) -> str:
+    return {
+        "lift": "Lift",
+        "run": "Run",
+        "cardio": "Cardio",
+        "lift_cardio": "Lift + cardio",
+        "unknown": "Unknown",
+    }.get(str(kind or "unknown"), "Unknown")
+
+
 def _group_workouts(rows: list[dict[str, Any]], *, cutoff: str) -> list[dict[str, Any]]:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -78,11 +89,22 @@ def _group_workouts(rows: list[dict[str, Any]], *, cutoff: str) -> list[dict[str
         exercises = list(dict.fromkeys(str(row.get("exercise") or "").strip() for row in workout_rows if str(row.get("exercise") or "").strip()))
         muscle_groups = sorted({str(row.get("muscle_group") or "").strip() for row in workout_rows if str(row.get("muscle_group") or "").strip()})
         sources = sorted({str(row.get("source") or "manual").strip() for row in workout_rows})
+        classification = classify_workout(workout_rows)
+        kind = str(classification.get("kind") or "unknown")
         items.append(
             {
                 "date": workout_date,
                 "workout_id": workout_id,
                 "workout_type": _workout_title(workout_rows),
+                "classification": kind,
+                "classification_label": _classification_label(kind),
+                "classification_debug": {
+                    "has_lift": bool(classification.get("has_lift")),
+                    "has_cardio": bool(classification.get("has_cardio") or classification.get("has_run")),
+                    "matched_lift_terms": classification.get("matched_lift_terms") or [],
+                    "matched_cardio_terms": classification.get("matched_cardio_terms") or [],
+                    "reason": classification.get("reason") or "",
+                },
                 "muscle_groups": muscle_groups,
                 "exercise_names": exercises,
                 "total_sets": int(sum(max(0, _int(row.get("sets"), 0)) for row in workout_rows)),
