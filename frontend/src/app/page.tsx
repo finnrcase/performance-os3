@@ -5484,7 +5484,6 @@ type MislogSuggestion = {
   date: string;
   previousDay: string;
   earlier: WorkoutGroup;
-  later: WorkoutGroup;
 };
 
 type WorkoutKind = "run" | "cardio" | "lift" | "lift_cardio" | "unknown";
@@ -5530,6 +5529,38 @@ function workoutKindLabel(group: WorkoutGroup): string {
   if (kind === "lift_cardio") return "Lift + cardio";
   if (kind === "lift") return "Lift";
   return "Unknown";
+}
+
+function workoutStartMillis(workout: WorkoutGroup): number {
+  const candidates = (workout.details || []).flatMap((row) => {
+    const notes = String(row.notes || "");
+    const noteTimes = [...notes.matchAll(/(?:start_time|started_at)=([^|]+)/gi)]
+      .map((match) => match[1]?.trim())
+      .filter(Boolean) as string[];
+    return [...noteTimes, (row as TrainingEntry & { updated_at?: string }).updated_at, workout.date].filter(Boolean).map(String);
+  });
+  for (const value of [...candidates, `${(workout.date || "").slice(0, 10)}T12:00:00`]) {
+    const parsed = new Date(value).getTime();
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+  return 0;
+}
+
+function isLiftOnlyWorkout(workout: WorkoutGroup): boolean {
+  return classifyWorkout(workout) === "lift";
+}
+
+function hasLiftComponent(workout: WorkoutGroup): boolean {
+  const kind = classifyWorkout(workout);
+  return kind === "lift" || kind === "lift_cardio";
+}
+
+function isHevyOrLocalWorkout(workout: WorkoutGroup): boolean {
+  const source = String(workout.source || "").toLowerCase();
+  return source.includes("hevy") || source.includes("manual") || source.includes("local") || (workout.details || []).some((row) => {
+    const rowSource = String(row.source || "").toLowerCase();
+    return rowSource === "hevy" || rowSource === "manual" || Boolean((row as TrainingEntry & { hevy_workout_id?: string }).hevy_workout_id);
+  });
 }
 
 function estimatedOneRepMax(weight: number, reps: number): number {
@@ -5722,17 +5753,19 @@ function detectMisloggedWorkout(workouts: WorkoutGroup[]): MislogSuggestion | nu
     const group = byDate.get(date) ?? [];
     if (group.length < 2) continue;
     const previousDay = previousDayISO(date);
-    if (!previousDay || byDate.has(previousDay)) continue;
+    if (!previousDay) continue;
+    const previousLifts = (byDate.get(previousDay) ?? []).filter(hasLiftComponent);
+    if (previousLifts.length > 0) continue;
     // Only same-day lifting sessions are mis-log candidates — a run + lift is
     // legitimate two-a-day training, not an accidental duplicate.
-    const lifts = group.filter((workout) => classifyWorkout(workout) === "lift");
+    const lifts = group.filter((workout) => isLiftOnlyWorkout(workout) && isHevyOrLocalWorkout(workout)).sort((a, b) => workoutStartMillis(a) - workoutStartMillis(b));
     if (lifts.length < 2) continue;
     const earlier = lifts[0];
     const later = lifts[1];
     const sameType = (earlier.workout_type || "").trim().toLowerCase() === (later.workout_type || "").trim().toLowerCase();
     const sameMuscles = [...earlier.muscle_groups].sort().join("|") === [...later.muscle_groups].sort().join("|");
     if (sameType && sameMuscles) continue;
-    return { date, previousDay, earlier, later };
+    return { date, previousDay, earlier };
   }
   return null;
 }
@@ -5781,10 +5814,10 @@ function WorkoutHistory({
     <div className="space-y-3">
       {onMoveWorkout && suggestion && dismissedDate !== suggestion.date ? (
         <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4">
-          <p className="text-sm font-semibold text-amber-100">Possible mis-logged workout</p>
+          <p className="text-sm font-semibold text-amber-100">Possible missed-day lift</p>
           <p className="mt-1 text-sm text-amber-100/80">
-            Two workouts were logged on {suggestion.date} and none on {suggestion.previousDay}. Move the earlier
-            workout{suggestion.earlier.workout_type ? ` (${suggestion.earlier.workout_type})` : ""} to {suggestion.previousDay}?
+            Two lifting workouts were logged on {suggestion.date} and no lift was logged on {suggestion.previousDay}. Move the earlier
+            lift{suggestion.earlier.workout_type ? ` (${suggestion.earlier.workout_type})` : ""} to {suggestion.previousDay}?
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
@@ -5801,7 +5834,7 @@ function WorkoutHistory({
               disabled={busy}
               className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:opacity-60"
             >
-              Keep as today
+              Keep both on same day
             </button>
             <button
               type="button"

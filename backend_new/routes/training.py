@@ -12,7 +12,16 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 
-from backend_new.db import count_rows, fetch_latest_document, fetch_latest_json_rows, insert_json_row, load_recent_training_summary, move_workout_date_rows
+from backend_new.db import (
+    count_rows,
+    fetch_json_rows_for_value,
+    fetch_json_rows_matching_any,
+    fetch_latest_document,
+    fetch_latest_json_rows,
+    insert_json_row,
+    load_recent_training_summary,
+    move_workout_date_rows,
+)
 from backend_new.utils import json_safe, utc_now_iso
 from src.training_schedule import classify_workout
 
@@ -283,6 +292,23 @@ def _latest_date(rows: list[dict[str, Any]], *fields: str) -> str:
     return max(values, default="")
 
 
+def _same_workout(row: dict[str, Any], workout_id: str) -> bool:
+    return any(str(row.get(field) or "").strip() == workout_id for field in ("workout_id", "hevy_workout_id", "external_id", "source_id"))
+
+
+def _is_lift_workout_rows(rows: list[dict[str, Any]]) -> bool:
+    return str(classify_workout(rows).get("kind") or "") == "lift"
+
+
+def _has_lift_workout_rows(rows: list[dict[str, Any]]) -> bool:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        row_date = str(row.get("date") or "")
+        workout_id = str(row.get("workout_id") or row.get("hevy_workout_id") or row.get("external_id") or f"{row_date}:unknown")
+        grouped[workout_id].append(row)
+    return any(str(classify_workout(workout_rows).get("kind") or "") in {"lift", "lift_cardio"} for workout_rows in grouped.values())
+
+
 @router.get("/api/training/history")
 def training_history(limit: int = 25, days: int = 180) -> dict[str, Any]:
     return _history_payload(limit=limit, days=days)
@@ -296,6 +322,25 @@ def update_workout_date(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="workout_id is required.")
     if not new_date:
         raise HTTPException(status_code=400, detail="new_date is required.")
+    try:
+        parsed_new_date = date.fromisoformat(new_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="new_date must be a valid YYYY-MM-DD date.") from None
+    if parsed_new_date > date.today():
+        raise HTTPException(status_code=400, detail="Workout date corrections cannot move a workout into the future.")
+
+    selected_rows = _valid_rows(fetch_json_rows_matching_any("workout_logs", ("workout_id", "hevy_workout_id", "external_id", "source_id"), workout_id, limit=500))
+    if not selected_rows:
+        raise HTTPException(status_code=404, detail=f"No workout found with id {workout_id}.")
+    if not _is_lift_workout_rows(selected_rows):
+        raise HTTPException(status_code=400, detail="Only lifting workouts can be moved by the missed-day correction.")
+
+    target_rows = [
+        row for row in _valid_rows(fetch_json_rows_for_value("workout_logs", "date", new_date, limit=1000))
+        if not _same_workout(row, workout_id)
+    ]
+    if target_rows and _has_lift_workout_rows(target_rows):
+        raise HTTPException(status_code=409, detail=f"A lift is already logged on {new_date}.")
 
     normalized = move_workout_date_rows("workout_logs", workout_id, new_date, annotate_notes=True)
     if normalized.get("status") != "ok":

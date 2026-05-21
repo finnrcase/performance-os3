@@ -291,6 +291,42 @@ def fetch_json_rows_for_value(
         return [{"_db_error": {**structured_error(exc, operation="fetch_json_rows_for_value"), "duration_ms": _duration_ms(started)}}]
 
 
+def fetch_json_rows_matching_any(
+    table: str,
+    fields: tuple[str, ...],
+    value: str,
+    *,
+    limit: int = 500,
+) -> list[dict[str, Any]]:
+    started = time.perf_counter()
+    try:
+        safe_table = _safe_table(table)
+        safe_fields = tuple(field for field in (_safe_json_key(field) for field in fields) if field)
+        if not safe_fields:
+            raise ValueError("At least one field is required.")
+        bounded_limit = _bounded_limit(limit)
+        where_clause = " OR ".join(["COALESCE(data->>%s, '') = %s" for _ in safe_fields])
+        params: list[str] = []
+        for field in safe_fields:
+            params.extend([field, str(value)])
+        with cursor(timeout_ms=1500) as cur:
+            cur.execute(
+                f"""
+                SELECT data
+                FROM {safe_table}
+                WHERE {where_clause}
+                ORDER BY row_order DESC, id DESC
+                LIMIT %s
+                """,
+                (*params, bounded_limit),
+            )
+            return [sanitize_json(dict(row[0])) for row in cur.fetchall()]
+    except DatabaseNotConfigured:
+        return []
+    except Exception as exc:
+        return [{"_db_error": {**structured_error(exc, operation="fetch_json_rows_matching_any"), "duration_ms": _duration_ms(started)}}]
+
+
 def fetch_latest_json_rows(table: str, *, limit: int = 500) -> list[dict[str, Any]]:
     started = time.perf_counter()
     try:

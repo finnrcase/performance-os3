@@ -4,6 +4,21 @@ from backend_new.main import app
 from backend_new.routes import training
 
 
+LIFT_ROWS = [
+    {
+        "workout_id": "hevy-123",
+        "hevy_workout_id": "hevy-123",
+        "date": "2026-05-16",
+        "workout_type": "Push day",
+        "exercise": "Bench Press",
+        "sets": 1,
+        "reps": 8,
+        "weight": 185,
+        "source": "hevy",
+    }
+]
+
+
 def test_training_workout_date_move_updates_normalized_rows_and_cache(monkeypatch):
     calls = []
 
@@ -27,6 +42,8 @@ def test_training_workout_date_move_updates_normalized_rows_and_cache(monkeypatc
             "updated_rows": 2,
         }
 
+    monkeypatch.setattr(training, "fetch_json_rows_matching_any", lambda *args, **kwargs: LIFT_ROWS)
+    monkeypatch.setattr(training, "fetch_json_rows_for_value", lambda *args, **kwargs: [])
     monkeypatch.setattr(training, "move_workout_date_rows", fake_move)
     monkeypatch.setattr(training, "load_recent_training_summary", lambda force_refresh=False: {"status": "ok", "force_refresh": force_refresh})
 
@@ -50,6 +67,7 @@ def test_training_workout_date_move_updates_normalized_rows_and_cache(monkeypatc
 
 
 def test_training_workout_date_move_returns_404_when_no_rows(monkeypatch):
+    monkeypatch.setattr(training, "fetch_json_rows_matching_any", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         training,
         "move_workout_date_rows",
@@ -63,3 +81,69 @@ def test_training_workout_date_move_returns_404_when_no_rows(monkeypatch):
 
     assert response.status_code == 404
     assert "No workout found" in response.json()["detail"]
+
+
+def test_training_workout_date_move_rejects_future_date(monkeypatch):
+    response = TestClient(app).post(
+        "/api/training/workout-date",
+        json={"workout_id": "hevy-123", "new_date": "2999-01-01"},
+    )
+
+    assert response.status_code == 400
+    assert "future" in response.json()["detail"]
+
+
+def test_training_workout_date_move_rejects_non_lift(monkeypatch):
+    monkeypatch.setattr(
+        training,
+        "fetch_json_rows_matching_any",
+        lambda *args, **kwargs: [
+            {
+                "workout_id": "run-123",
+                "date": "2026-05-16",
+                "workout_type": "Run",
+                "exercise": "Run",
+                "sets": 0,
+                "reps": 0,
+                "weight": 0,
+                "source": "strava",
+                "notes": "distance_miles=3.2 | pace_min_per_mile=8.0",
+            }
+        ],
+    )
+
+    response = TestClient(app).post(
+        "/api/training/workout-date",
+        json={"workout_id": "run-123", "new_date": "2026-05-15"},
+    )
+
+    assert response.status_code == 400
+    assert "lifting workouts" in response.json()["detail"]
+
+
+def test_training_workout_date_move_rejects_target_date_with_existing_lift(monkeypatch):
+    monkeypatch.setattr(training, "fetch_json_rows_matching_any", lambda *args, **kwargs: LIFT_ROWS)
+    monkeypatch.setattr(
+        training,
+        "fetch_json_rows_for_value",
+        lambda *args, **kwargs: [
+            {
+                "workout_id": "other-lift",
+                "date": "2026-05-15",
+                "workout_type": "Pull day",
+                "exercise": "Barbell Row",
+                "sets": 1,
+                "reps": 8,
+                "weight": 155,
+                "source": "hevy",
+            }
+        ],
+    )
+
+    response = TestClient(app).post(
+        "/api/training/workout-date",
+        json={"workout_id": "hevy-123", "new_date": "2026-05-15"},
+    )
+
+    assert response.status_code == 409
+    assert "already logged" in response.json()["detail"]
