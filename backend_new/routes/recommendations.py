@@ -10,7 +10,7 @@ from fastapi import APIRouter
 from backend_new.db import fetch_json_rows, fetch_json_rows_for_value, fetch_latest_document, insert_json_row, upsert_json_row
 from backend_new.routes.dashboard import dashboard_core
 from backend_new.routes.goals import calculate_targets, fallback_goals
-from backend_new.routes.nutrition import _nutrition_value, _round, _target_payload, _today_iso, _totals
+from backend_new.routes.nutrition import _is_excluded, _nutrition_value, _round, _target_payload, _today_iso, _totals
 from backend_new.utils import utc_now_iso
 
 
@@ -69,7 +69,7 @@ def _target_from_payload(targets: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_daily_summary(selected_date: str) -> dict[str, Any]:
-    food_rows = _clean_rows(fetch_json_rows_for_value("food_logs", "date", selected_date, limit=1000))
+    food_rows = [row for row in _clean_rows(fetch_json_rows_for_value("food_logs", "date", selected_date, limit=1000)) if not _is_excluded(row)]
     totals = _totals(food_rows)
     targets = _target_from_payload(_target_payload())
     total_calories = _nutrition_value(totals, "calories")
@@ -116,7 +116,7 @@ def _finalize_day(selected_date: str) -> dict[str, Any]:
 
 def _load_daily_summaries() -> list[dict[str, Any]]:
     summaries = _clean_rows(fetch_json_rows("daily_nutrition_summary", limit=SUMMARY_LIMIT, date_field="date"))
-    finalized = [row for row in summaries if row.get("finalized") is True or str(row.get("status") or "") == "finalized"]
+    finalized = [row for row in summaries if not _is_excluded(row) and (row.get("finalized") is True or str(row.get("status") or "") == "finalized")]
     finalized.sort(key=lambda row: str(row.get("date") or ""))
     return finalized
 

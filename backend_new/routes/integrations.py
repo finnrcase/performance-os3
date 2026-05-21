@@ -275,7 +275,13 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
     base = settings_payload()
     strava_status, strava_meta = _strava_status(settings)
     withings_status, withings_meta = _withings_status(settings)
-    openai_configured = bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key"))
+    try:
+        from src.ai.food_parser import openai_analyzer_config
+
+        openai_config = openai_analyzer_config()
+    except Exception:
+        openai_config = {"openai_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key")), "model": "", "api_key_source": "unknown"}
+    openai_configured = bool(openai_config.get("openai_key_configured"))
     hevy_configured = bool(os.getenv("HEVY_API_KEY", "").strip() or _integrations(settings).get("hevy_api_key"))
     db = ping()
     database_ok = db.get("status") == "ok"
@@ -298,6 +304,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
                 status="green" if openai_configured else "gray",
                 message="OpenAI key is configured." if openai_configured else "OpenAI key is not configured. Manual logging still works.",
                 required_env_vars=["OPENAI_API_KEY"],
+                details={key: value for key, value in openai_config.items() if key != "model_error"},
             ),
             "hevy": _component(
                 configured=hevy_configured,
@@ -338,7 +345,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
     }
     base["services"] = {
         **base.get("services", {}),
-        "openai": {"configured": openai_configured, "status": "ok" if openai_configured else "missing_api_key", "message": base["openai"]["message"]},
+        "openai": {"configured": openai_configured, "status": "ok" if openai_configured else "missing_api_key", "message": base["openai"]["message"], "model": openai_config.get("model", ""), "api_key_source": openai_config.get("api_key_source", "unknown")},
         "hevy": {"configured": hevy_configured, "status": "ok" if hevy_configured else "missing_api_key", "message": base["hevy"]["message"]},
         "strava": {"configured": base["strava"]["configured"], "status": "ok" if strava_status == "Connected" else _status_slug(strava_status), "message": base["strava"]["message"], "last_synced_at": strava_meta.get("last_synced_at", ""), "latest_record": strava_meta.get("latest_activity_date", ""), "reconnect_required": strava_meta.get("needs_reconnect", False), "token_status": strava_meta.get("token_status", "missing")},
         "withings": {"configured": base["withings"]["configured"], "status": "ok" if withings_status == "Connected" else withings_status.lower().replace(" ", "_"), "message": base["withings"]["message"], "last_synced_at": withings_meta.get("last_synced_at", ""), "latest_record": withings_meta.get("latest_measurement_date", ""), "reconnect_required": withings_meta.get("needs_reconnect", False)},
@@ -412,7 +419,12 @@ def integrations_test() -> dict[str, Any]:
     strava_status, _ = _strava_status(settings)
     withings_status, _ = _withings_status(settings)
     hevy_configured = bool(os.getenv("HEVY_API_KEY", "").strip() or _integrations(settings).get("hevy_api_key"))
-    openai_configured = bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key"))
+    try:
+        from src.ai.food_parser import get_openai_key_status
+
+        openai_configured = get_openai_key_status()
+    except Exception:
+        openai_configured = bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key"))
     return {
         "checkedAt": utc_now_iso(),
         "hevy": _test_result("connected" if hevy_configured else "missing_api_key", "HEVY_API_KEY is configured." if hevy_configured else "HEVY_API_KEY is not configured."),

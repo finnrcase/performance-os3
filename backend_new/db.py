@@ -612,6 +612,52 @@ def upsert_json_row(table: str, key_field: str, key_value: str, data: dict[str, 
         return {**payload, "_db_error": {**structured_error(exc, operation="upsert_json_row"), "duration_ms": _duration_ms(started)}}
 
 
+def update_json_rows_for_value(table: str, field: str, value: str, patch: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
+    payload = sanitize_json(dict(patch))
+    try:
+        safe_table = _safe_table(table)
+        safe_field = _safe_json_key(field)
+        if safe_field is None:
+            raise ValueError("field is required.")
+        with cursor(timeout_ms=2500) as cur:
+            cur.execute(
+                f"""
+                UPDATE {safe_table}
+                SET data = data || %s::jsonb, updated_at = now()
+                WHERE COALESCE(data->>%s, '') = %s
+                """,
+                (_jsonb(payload), safe_field, str(value)),
+            )
+            updated = int(getattr(cur, "rowcount", 0) or 0)
+        return {
+            "status": "ok",
+            "table": safe_table,
+            "field": safe_field,
+            "value": str(value),
+            "updated_rows": updated,
+            "duration_ms": _duration_ms(started),
+        }
+    except DatabaseNotConfigured:
+        return {
+            "status": "not_configured",
+            "table": table,
+            "field": field,
+            "value": str(value),
+            "updated_rows": 0,
+            "duration_ms": _duration_ms(started),
+        }
+    except Exception as exc:
+        return {
+            **structured_error(exc, operation="update_json_rows_for_value"),
+            "table": table,
+            "field": field,
+            "value": str(value),
+            "updated_rows": 0,
+            "duration_ms": _duration_ms(started),
+        }
+
+
 def move_workout_date_rows(
     table: str,
     workout_id: str,
@@ -750,7 +796,15 @@ def count_rows(table: str) -> dict[str, Any]:
         }
 
 
-def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit: int = 90, training_limit: int = 500) -> dict[str, Any]:
+def fetch_dashboard_core_bundle(
+    today: str,
+    *,
+    food_limit: int = 500,
+    body_limit: int = 90,
+    recovery_limit: int = 90,
+    sleep_limit: int = 90,
+    include_training_summary: bool = True,
+) -> dict[str, Any]:
     """Fetch dashboard core inputs in one bounded round trip.
 
     Training reads are intentionally latest-insert bounded. This avoids full raw
@@ -782,6 +836,7 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
                       SELECT data
                       FROM food_logs
                       WHERE COALESCE(data->>'date', '') = %s
+                        AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
                       ORDER BY row_order DESC, id DESC
                       LIMIT %s
                     ) rows
@@ -802,15 +857,46 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
                     ORDER BY updated_at DESC, id DESC
                     LIMIT 1
                   ), '{}'::jsonb) AS training_cache_metadata,
+                  COALESCE((
+                    SELECT jsonb_agg(data)
+                    FROM (
+                      SELECT data
+                      FROM recovery_logs
+                      ORDER BY data->>'date' DESC, row_order DESC, id DESC
+                      LIMIT %s
+                    ) rows
+                  ), '[]'::jsonb) AS recovery_rows,
+                  COALESCE((
+                    SELECT jsonb_agg(data)
+                    FROM (
+                      SELECT data
+                      FROM sleep_logs
+                      ORDER BY data->>'date' DESC, row_order DESC, id DESC
+                      LIMIT %s
+                    ) rows
+                  ), '[]'::jsonb) AS sleep_rows,
                   COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'food_logs'::regclass), 0) AS food_count,
                   COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'body_metric_logs'::regclass), 0) AS body_count,
-                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'workout_logs'::regclass), 0) AS training_count
+                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'workout_logs'::regclass), 0) AS training_count,
+                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'recovery_logs'::regclass), 0) AS recovery_count,
+                  COALESCE((SELECT reltuples::bigint FROM pg_class WHERE oid = 'sleep_logs'::regclass), 0) AS sleep_count
                 """,
-                (today, _bounded_limit(food_limit), _bounded_limit(body_limit), CORE_TRAINING_CACHE_KEY),
+                (
+                    today,
+                    _bounded_limit(food_limit),
+                    _bounded_limit(body_limit),
+                    CORE_TRAINING_CACHE_KEY,
+                    _bounded_limit(recovery_limit),
+                    _bounded_limit(sleep_limit),
+                ),
             )
             row = cur.fetchone()
         cached_training_metadata = sanitize_json(dict(row[4] or {})) if row else {}
-        training_summary = load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
+        training_summary = (
+            load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
+            if include_training_summary
+            else empty_training_summary
+        )
         if not row:
             return {
                 "status": "ok",
@@ -818,9 +904,11 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
                 "targets": {},
                 "food_rows": [],
                 "body_rows": [],
+                "recovery_rows": [],
+                "sleep_rows": [],
                 "training_rows": [],
                 "training_summary": training_summary,
-                "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
+                "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
                 "duration_ms": _duration_ms(started),
             }
         return {
@@ -829,12 +917,16 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "targets": sanitize_json(dict(row[1] or {})),
             "food_rows": sanitize_json(list(row[2] or [])),
             "body_rows": sanitize_json(list(row[3] or [])),
+            "recovery_rows": sanitize_json(list(row[5] or [])),
+            "sleep_rows": sanitize_json(list(row[6] or [])),
             "training_rows": [],
             "training_summary": training_summary,
             "counts": {
-                "nutrition": max(0, int(row[5] or 0)),
-                "body_metrics": max(0, int(row[6] or 0)),
-                "training": max(0, int(row[7] or 0)),
+                "nutrition": max(0, int(row[7] or 0)),
+                "body_metrics": max(0, int(row[8] or 0)),
+                "training": max(0, int(row[9] or 0)),
+                "recovery": max(0, int(row[10] or 0)),
+                "sleep": max(0, int(row[11] or 0)),
             },
             "duration_ms": _duration_ms(started),
         }
@@ -845,9 +937,11 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "targets": {},
             "food_rows": [],
             "body_rows": [],
+            "recovery_rows": [],
+            "sleep_rows": [],
             "training_rows": [],
             "training_summary": empty_training_summary,
-            "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
+            "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
             "duration_ms": _duration_ms(started),
         }
     except Exception as exc:
@@ -857,8 +951,10 @@ def fetch_dashboard_core_bundle(today: str, *, food_limit: int = 500, body_limit
             "targets": {},
             "food_rows": [],
             "body_rows": [],
+            "recovery_rows": [],
+            "sleep_rows": [],
             "training_rows": [],
             "training_summary": empty_training_summary,
-            "counts": {"nutrition": 0, "body_metrics": 0, "training": 0},
+            "counts": {"nutrition": 0, "body_metrics": 0, "training": 0, "recovery": 0, "sleep": 0},
             "duration_ms": _duration_ms(started),
         }

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from collections import defaultdict
-import os
+from datetime import date
+import logging
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend_new.db import (
     delete_json_row,
@@ -13,12 +14,14 @@ from backend_new.db import (
     fetch_json_rows_for_value,
     fetch_latest_document,
     insert_json_row,
+    update_json_rows_for_value,
     upsert_json_row,
 )
 from backend_new.utils import utc_now_iso
 
 
 router = APIRouter(tags=["nutrition"])
+logger = logging.getLogger(__name__)
 
 TOTAL_FIELDS = ("calories", "protein", "carbs", "fat", "fiber")
 
@@ -40,6 +43,17 @@ def _number(value: Any, default: float = 0.0) -> float:
 def _round(value: float) -> int | float:
     rounded = round(value, 1)
     return int(rounded) if rounded == int(rounded) else rounded
+
+
+def _is_excluded(item: dict[str, Any]) -> bool:
+    return item.get("excluded_from_analytics") is True or str(item.get("excluded_from_analytics") or "").lower() == "true"
+
+
+def _normalize_history_date(value: str) -> str:
+    try:
+        return date.fromisoformat(str(value or "").strip()[:10]).isoformat()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="Date must be a valid YYYY-MM-DD value.") from exc
 
 
 def _nutrition_value(item: dict[str, Any], field: str) -> float:
@@ -210,11 +224,13 @@ def get_nutrition_history(limit: int = 500) -> dict[str, Any]:
     finalized = [
         row
         for row in fetch_json_rows("daily_nutrition_summary", limit=limit, date_field="date")
-        if isinstance(row, dict) and "_db_error" not in row and row.get("date")
+        if isinstance(row, dict) and "_db_error" not in row and row.get("date") and not _is_excluded(row)
     ]
     logs = fetch_json_rows("food_logs", limit=limit, date_field="date")
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for item in logs:
+        if _is_excluded(item):
+            continue
         item_date = str(item.get("date") or "")
         if item_date:
             grouped[item_date].append(item)
@@ -276,6 +292,47 @@ def get_nutrition_history(limit: int = 500) -> dict[str, Any]:
     }
 
 
+@router.post("/api/nutrition/history/{history_date}/exclude")
+def exclude_nutrition_history_day(history_date: str) -> dict[str, Any]:
+    selected_date = _normalize_history_date(history_date)
+    now = utc_now_iso()
+    patch = {
+        "date": selected_date,
+        "excluded_from_analytics": True,
+        "excluded_at": now,
+        "exclusion_reason": "User excluded incomplete nutrition day from analytics.",
+        "updated_at": now,
+    }
+    logs_result = update_json_rows_for_value("food_logs", "date", selected_date, patch)
+    summary_result = update_json_rows_for_value("daily_nutrition_summary", "date", selected_date, patch)
+    if logs_result.get("status") == "error" or summary_result.get("status") == "error":
+        raise HTTPException(status_code=500, detail={"food_logs": logs_result, "daily_nutrition_summary": summary_result})
+    marker = upsert_json_row(
+        "daily_nutrition_summary",
+        "date",
+        selected_date,
+        {
+            **patch,
+            "summary_id": f"nutrition-excluded:{selected_date}",
+            "status": "excluded",
+            "finalized": False,
+            "nutrition_logged": False,
+            "logged_day": False,
+            "notes": "Excluded from analytics by user; raw food logs remain stored.",
+        },
+    )
+    return {
+        "status": "ok",
+        "date": selected_date,
+        "rule": "excluded_from_analytics",
+        "updated_rows": int(logs_result.get("updated_rows") or 0) + int(summary_result.get("updated_rows") or 0),
+        "food_log_rows_updated": int(logs_result.get("updated_rows") or 0),
+        "summary_rows_updated": int(summary_result.get("updated_rows") or 0),
+        "marker_saved": not bool(isinstance(marker, dict) and marker.get("_db_error")),
+        "message": f"Nutrition day {selected_date} excluded from analytics.",
+    }
+
+
 @router.get("/api/nutrition/shortcuts")
 def get_nutrition_shortcuts() -> dict[str, Any]:
     return {
@@ -316,25 +373,110 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
 
 @router.post("/api/food/analyze-text")
 def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
-    if not os.getenv("OPENAI_API_KEY", "").strip():
+    text = str((payload or {}).get("text") or "").strip()
+    try:
+        from src.ai.food_parser import analyze_food_text as analyze_text
+        from src.ai.food_parser import openai_analyzer_config
+        from src.ai.food_parser import get_openai_key_status
+    except Exception as exc:
+        logger.exception("AI food parser import failed.")
         return {
             "items": [],
             "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
-            "warnings": ["OPENAI_API_KEY is not configured."],
-            "message": "AI food parsing is unavailable because OPENAI_API_KEY is not configured. Manual food logging still works.",
+            "warnings": [],
+            "message": "AI food parsing is temporarily unavailable. You can still log foods manually.",
+            "success": False,
+            "error_code": "ai_parser_unavailable",
+            "debug": {"backend_endpoint_reached": True, "openai_key_configured": False, "model": "unknown", "parsing_status": "import_error", "error_type": type(exc).__name__},
+        }
+    analyzer_config = openai_analyzer_config()
+    if not get_openai_key_status():
+        return {
+            "items": [],
+            "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
+            "warnings": [],
+            "message": "AI food parsing is not configured yet. You can still log foods manually.",
             "success": False,
             "error_code": "openai_not_configured",
-            "debug": {"ai_enabled": False},
+            "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "not_configured"},
         }
-    return {
-        "items": [],
-        "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
-        "warnings": ["AI parser is not enabled in backend_new yet."],
-        "message": "AI food parsing is not enabled in backend_new yet. Manual food logging still works.",
-        "success": False,
-        "error_code": "ai_parser_disabled",
-        "debug": {"ai_enabled": False, "text_length": len(str(payload.get("text") or ""))},
-    }
+    try:
+        result = analyze_text(text)
+        result["debug"] = {**analyzer_config, **(result.get("debug") if isinstance(result.get("debug"), dict) else {})}
+        logger.info(
+            "[food_analyze_text] model=%s fallback_model_used=%s success=%s error_code=%s items=%s",
+            analyzer_config.get("model"),
+            analyzer_config.get("fallback_model_used"),
+            result.get("success"),
+            result.get("error_code"),
+            len(result.get("items") or []),
+        )
+        return result
+    except Exception as exc:
+        logger.exception("AI food parsing failed.")
+        return {
+            "items": [],
+            "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
+            "warnings": [],
+            "message": "AI food parsing failed. You can still log foods manually.",
+            "success": False,
+            "error_code": "ai_parser_error",
+            "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "error", "error_type": type(exc).__name__},
+        }
+
+
+@router.post("/api/nutrition/label-upload")
+async def upload_nutrition_label(file: UploadFile = File(...)) -> dict[str, Any]:
+    content_type = str(file.content_type or "").lower()
+    if content_type not in {"image/png", "image/jpeg", "image/webp"}:
+        return {
+            "status": "unsupported_file_type",
+            "message": "AI nutrition label extraction supports PNG, JPG, JPEG, or WebP images. You can still enter the label manually.",
+            "items": [],
+            "path": file.filename or "nutrition-label",
+        }
+    image_bytes = await file.read()
+    if not image_bytes:
+        return {"status": "error", "message": "The uploaded label image was empty.", "items": [], "path": file.filename or "nutrition-label"}
+    if len(image_bytes) > 8 * 1024 * 1024:
+        return {"status": "error", "message": "The uploaded label image is too large. Use an image under 8 MB.", "items": [], "path": file.filename or "nutrition-label"}
+    try:
+        from src.ai.food_parser import analyze_food_label_image
+        from src.ai.food_parser import openai_analyzer_config
+        from src.ai.food_parser import get_openai_key_status
+    except Exception as exc:
+        logger.exception("AI food label analyzer import failed.")
+        return {"status": "error", "message": "AI label extraction is temporarily unavailable. You can still enter the label manually.", "items": [], "path": file.filename or "nutrition-label", "debug": {"error_type": type(exc).__name__}}
+    analyzer_config = openai_analyzer_config()
+    if not get_openai_key_status():
+        return {
+            "status": "openai_not_configured",
+            "message": "AI label extraction is not configured yet. You can still enter the label manually.",
+            "items": [],
+            "path": file.filename or "nutrition-label",
+            "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "not_configured"},
+        }
+    try:
+        result = analyze_food_label_image(image_bytes, content_type, context=file.filename or "")
+        logger.info(
+            "[nutrition_label_upload] model=%s fallback_model_used=%s success=%s items=%s",
+            analyzer_config.get("model"),
+            analyzer_config.get("fallback_model_used"),
+            result.get("success"),
+            len(result.get("items") or []),
+        )
+        return {
+            "status": "ok" if result.get("success") else "needs_review",
+            "message": result.get("message") or "Nutrition label analyzed. Review before saving.",
+            "items": result.get("items", []),
+            "totals": result.get("totals", {}),
+            "warnings": result.get("warnings", []),
+            "path": file.filename or "nutrition-label",
+            "debug": {**analyzer_config, **(result.get("debug") if isinstance(result.get("debug"), dict) else {})},
+        }
+    except Exception as exc:
+        logger.exception("AI food label extraction failed.")
+        return {"status": "error", "message": "AI label extraction failed. You can still enter the label manually.", "items": [], "path": file.filename or "nutrition-label", "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "error", "error_type": type(exc).__name__}}
 
 
 @router.post("/api/food/log-bulk")

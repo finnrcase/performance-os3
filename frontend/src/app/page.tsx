@@ -41,7 +41,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 
 function apiUrl(path: string) {
@@ -59,6 +59,8 @@ const navigation = [
 ] as const;
 
 type PageId = (typeof navigation)[number]["id"];
+type SidebarNavHighlight = { top: number; height: number; ready: boolean };
+type MobileNavHighlight = { left: number; top: number; width: number; height: number; ready: boolean };
 type FoodIconType = "bagel" | "protein_bar" | "oats" | "protein_shake" | "chicken";
 type AccentTheme = "lime" | "pink" | "purple" | "orange" | "blue" | "rainbow";
 
@@ -193,6 +195,7 @@ type DailyNutritionSummary = {
   nutrition_logged?: boolean;
   logged_day?: boolean;
   finalized?: boolean;
+  excluded_from_analytics?: boolean;
   notes: string;
 };
 
@@ -3962,6 +3965,7 @@ function FoodPage({
   parseResult,
   manualSaving,
   manualError,
+  aiParsingConfigured,
 }: Readonly<{
   logs: NutritionEntry[];
   targets: Targets | null;
@@ -4011,6 +4015,7 @@ function FoodPage({
   parseResult: FoodParseResponse | null;
   manualSaving: boolean;
   manualError: string | null;
+  aiParsingConfigured: boolean;
 }>) {
   const [showFoodHistory, setShowFoodHistory] = useState(false);
   const [shortcutQuery, setShortcutQuery] = useState("");
@@ -4595,10 +4600,13 @@ function FoodPage({
               />
               <span className="block text-xs text-zinc-600">{aiText.length}/4000</span>
             </label>
-            <button disabled={parseLoading || !aiText.trim()} className="h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+            <button disabled={parseLoading || !aiText.trim() || !aiParsingConfigured} className="h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
               {parseLoading ? "Analyzing..." : "Analyze"}
             </button>
           </form>
+          {!aiParsingConfigured ? (
+            <p className="mt-3 text-sm text-zinc-400">AI food parsing is not configured yet. You can still log foods manually.</p>
+          ) : null}
           {shortcutSuggestion ? (
             <div className="accent-outline mt-4 rounded-lg border p-4">
               <p className="text-sm font-semibold">Use saved {shortcutSuggestion.type} instead?</p>
@@ -4612,9 +4620,6 @@ function FoodPage({
           {parseResult ? (
             <div className={cx("mt-4 rounded-lg border p-3 text-sm", parseResult.success ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" : "border-amber-300/20 bg-amber-300/10 text-amber-100")}>
               <p>{parseResult.message}</p>
-              <p className="mt-2 text-xs opacity-80">
-                Debug: endpoint reached {parseResult.debug?.backend_endpoint_reached ? "yes" : "no"} · OpenAI key configured {parseResult.debug?.openai_key_configured ? "yes" : "no"} · model {parseResult.debug?.model ?? "unknown"} · status {parseResult.debug?.parsing_status ?? "unknown"}
-              </p>
             </div>
           ) : null}
           {parsedFoods.length ? (
@@ -6575,6 +6580,7 @@ function HistoryPage({
   trainingDataAction,
   workoutHistory,
   onMoveWorkout,
+  onExcludeNutritionDay,
   strength,
   selectedExercise,
   setSelectedExercise,
@@ -6606,6 +6612,7 @@ function HistoryPage({
   trainingDataAction: "idle" | "exporting" | "rebuilding";
   workoutHistory: WorkoutGroup[];
   onMoveWorkout: (workoutId: string, newDate: string) => void | Promise<void>;
+  onExcludeNutritionDay: (date: string) => Promise<void>;
   strength: StrengthTrendResponse | null;
   selectedExercise: string;
   setSelectedExercise: (value: string) => void;
@@ -6635,6 +6642,8 @@ function HistoryPage({
   const [backupSummary, setBackupSummary] = useState<BackupSummary | null>(null);
   const [backupFile, setBackupFile] = useState<File | null>(null);
   const backupInputRef = useRef<HTMLInputElement | null>(null);
+  const [excludingNutritionDate, setExcludingNutritionDate] = useState("");
+  const [excludeNutritionError, setExcludeNutritionError] = useState("");
   const [dailyNutritionHistoryExpanded, setDailyNutritionHistoryExpanded] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(DAILY_NUTRITION_HISTORY_EXPANDED_KEY) === "true";
@@ -6756,6 +6765,22 @@ function HistoryPage({
       setExportLoading(false);
     }
   }, [exportEndDate, exportRange, exportStartDate]);
+
+  const handleExcludeNutritionDay = useCallback(async (date: string) => {
+    const selectedDate = String(date || "").slice(0, 10);
+    if (!selectedDate) return;
+    const confirmed = window.confirm(`Exclude ${selectedDate} from nutrition analytics? Raw food logs will remain stored, but this day will not count toward trends, adherence, dashboard summaries, or recommendations.`);
+    if (!confirmed) return;
+    setExcludeNutritionError("");
+    setExcludingNutritionDate(selectedDate);
+    try {
+      await onExcludeNutritionDay(selectedDate);
+    } catch (error) {
+      setExcludeNutritionError(error instanceof Error ? error.message : "Could not exclude nutrition day.");
+    } finally {
+      setExcludingNutritionDate("");
+    }
+  }, [onExcludeNutritionDay]);
 
   const handleFullBackupExport = useCallback(async () => {
     setBackupLoading(true);
@@ -9098,9 +9123,43 @@ export default function Home() {
   const [rateLimited, setRateLimited] = useState(false);
   const [startupDebug, setStartupDebug] = useState<StartupDebugEntry[]>([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
+  const sidebarNavRef = useRef<HTMLElement | null>(null);
+  const sidebarItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
+  const mobileNavRef = useRef<HTMLDivElement | null>(null);
+  const mobileItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
+  const [sidebarHighlight, setSidebarHighlight] = useState<SidebarNavHighlight>({ top: 0, height: 0, ready: false });
+  const [mobileHighlight, setMobileHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
+
+  useLayoutEffect(() => {
+    const measureActiveNavItems = () => {
+      const sidebarItem = sidebarItemRefs.current[activePage];
+      if (sidebarItem && sidebarNavRef.current) {
+        setSidebarHighlight({
+          top: sidebarItem.offsetTop,
+          height: sidebarItem.offsetHeight,
+          ready: true,
+        });
+      }
+
+      const mobileItem = mobileItemRefs.current[activePage];
+      if (mobileItem && mobileNavRef.current) {
+        setMobileHighlight({
+          left: mobileItem.offsetLeft,
+          top: mobileItem.offsetTop,
+          width: mobileItem.offsetWidth,
+          height: mobileItem.offsetHeight,
+          ready: true,
+        });
+      }
+    };
+
+    measureActiveNavItems();
+    window.addEventListener("resize", measureActiveNavItems);
+    return () => window.removeEventListener("resize", measureActiveNavItems);
+  }, [activePage]);
 
   useEffect(() => {
     document.documentElement.dataset.accentTheme = accentTheme;
@@ -10105,6 +10164,7 @@ export default function Home() {
         parseResult={parseResult}
         manualSaving={manualFoodSaving}
         manualError={manualFoodError}
+        aiParsingConfigured={settings?.statuses.openai_api_key === "Configured"}
         shortcutSuggestion={shortcutSuggestion}
         onUseSuggestion={() => {
           if (!shortcutSuggestion) return;
@@ -10672,21 +10732,34 @@ export default function Home() {
               <p className="text-xs text-zinc-500">Local-first dashboard</p>
             </div>
           </div>
-          <nav className="space-y-2">
-            {navigation.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActivePage(item.id)}
-                  data-testid={`nav-${item.id}`}
-                  className={cx("flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition", activePage === item.id ? "accent-active" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
-                >
-                  <Icon className="h-4 w-4" />
-                  {item.label}
-                </button>
-              );
-            })}
+          <nav ref={sidebarNavRef} className="relative">
+            <span
+              aria-hidden="true"
+              className={cx(
+                "accent-active pointer-events-none absolute left-0 right-0 rounded-lg transition-[transform,height,opacity] duration-200 ease-out",
+                sidebarHighlight.ready ? "opacity-100" : "opacity-0",
+              )}
+              style={{ height: sidebarHighlight.height, transform: `translateY(${sidebarHighlight.top}px)` }}
+            />
+            <div className="space-y-2">
+              {navigation.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    ref={(node) => {
+                      sidebarItemRefs.current[item.id] = node;
+                    }}
+                    onClick={() => setActivePage(item.id)}
+                    data-testid={`nav-${item.id}`}
+                    className={cx("relative z-10 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
+                  >
+                    <Icon className="h-4 w-4" />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
           </nav>
           <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/[0.04] p-4">
             <p className="text-sm font-medium text-white">Backend</p>
@@ -10706,12 +10779,34 @@ export default function Home() {
                 Refresh
               </button>
             </div>
-            <div className="mt-4 flex gap-2 overflow-x-auto pb-1 lg:hidden">
-              {navigation.map((item) => (
-                <button key={item.id} onClick={() => setActivePage(item.id)} data-testid={`nav-${item.id}-mobile`} className={cx("whitespace-nowrap rounded-lg px-3 py-2 text-sm transition", activePage === item.id ? "accent-active" : "bg-white/[0.06] text-zinc-300")}>
-                  {item.label}
-                </button>
-              ))}
+            <div ref={mobileNavRef} className="relative mt-4 overflow-x-auto pb-1 lg:hidden">
+              <span
+                aria-hidden="true"
+                className={cx(
+                  "accent-active pointer-events-none absolute rounded-lg transition-[transform,width,height,opacity] duration-200 ease-out",
+                  mobileHighlight.ready ? "opacity-100" : "opacity-0",
+                )}
+                style={{
+                  height: mobileHighlight.height,
+                  width: mobileHighlight.width,
+                  transform: `translate(${mobileHighlight.left}px, ${mobileHighlight.top}px)`,
+                }}
+              />
+              <div className="flex gap-2">
+                {navigation.map((item) => (
+                  <button
+                    key={item.id}
+                    ref={(node) => {
+                      mobileItemRefs.current[item.id] = node;
+                    }}
+                    onClick={() => setActivePage(item.id)}
+                    data-testid={`nav-${item.id}-mobile`}
+                    className={cx("relative z-10 whitespace-nowrap rounded-lg px-3 py-2 text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "bg-white/[0.06] text-zinc-300")}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
             </div>
           </header>
 

@@ -210,6 +210,99 @@ def _safe_int(value) -> int:
         return 0
 
 
+def _first_present(payload: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, ""):
+            return payload.get(key)
+    return None
+
+
+def _set_reps(set_item: dict) -> int:
+    return _safe_int(
+        _first_present(
+            set_item,
+            (
+                "reps",
+                "repetitions",
+                "rep_count",
+                "reps_count",
+                "target_reps",
+            ),
+        )
+    )
+
+
+def _set_weight_lb(set_item: dict) -> float:
+    """Return a set weight in pounds from known Hevy/API variants."""
+    explicit_lb = _safe_float(
+        _first_present(
+            set_item,
+            (
+                "weight_lb",
+                "weight_lbs",
+                "weight_pounds",
+                "lbs",
+            ),
+        )
+    )
+    if explicit_lb > 0:
+        return explicit_lb
+
+    unit = str(
+        _first_present(set_item, ("weight_unit", "unit", "weight_unit_type", "weightUnit"))
+        or ""
+    ).lower()
+    generic_weight = _safe_float(_first_present(set_item, ("weight", "weight_value")))
+    if generic_weight > 0 and unit in {"lb", "lbs", "pound", "pounds", "imperial"}:
+        return generic_weight
+
+    weight_kg = _safe_float(
+        _first_present(
+            set_item,
+            (
+                "weight_kg",
+                "kg",
+                "kilograms",
+            ),
+        )
+    )
+    if weight_kg <= 0 and generic_weight > 0:
+        # Hevy's current API sends `weight_kg`; keep generic `weight` as kg
+        # unless an explicit pound unit was present above.
+        weight_kg = generic_weight
+    return weight_kg * KG_TO_LB if weight_kg > 0 else 0.0
+
+
+def _set_weight_kg(set_item: dict, weight_lb: float = 0.0) -> float:
+    weight_kg = _safe_float(_first_present(set_item, ("weight_kg", "kg", "kilograms")))
+    if weight_kg > 0:
+        return weight_kg
+    unit = str(_first_present(set_item, ("weight_unit", "unit", "weight_unit_type", "weightUnit")) or "").lower()
+    generic_weight = _safe_float(_first_present(set_item, ("weight", "weight_value")))
+    if generic_weight > 0 and unit not in {"lb", "lbs", "pound", "pounds", "imperial"}:
+        return generic_weight
+    return weight_lb / KG_TO_LB if weight_lb > 0 else 0.0
+
+
+def _set_has_cardio_metrics(set_item: dict) -> bool:
+    return any(
+        _safe_float(set_item.get(key)) > 0
+        for key in ("distance_meters", "distance_m", "duration_seconds", "elapsed_seconds", "moving_time")
+    )
+
+
+def _has_strength_set_payload(workout: dict) -> bool:
+    for exercise in workout.get("exercises", []) or []:
+        if not isinstance(exercise, dict):
+            continue
+        for set_item in exercise.get("sets", []) or []:
+            if not isinstance(set_item, dict):
+                continue
+            if _set_reps(set_item) > 0 or _set_weight_lb(set_item) > 0:
+                return True
+    return False
+
+
 def _save_debug_payload(payload: dict, page: int, page_size: int) -> None:
     """Persist the latest raw Hevy response without request headers or API keys."""
     HEVY_DEBUG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -401,6 +494,14 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
     classification = classify_hevy_workout(workout)
     workout_type = classification["workout_type"]
     is_cardio = bool(classification["is_run"])
+    has_strength_sets = _has_strength_set_payload(workout)
+    if is_cardio and has_strength_sets:
+        logger.warning(
+            "Hevy workout %s had strength set payloads despite cardio classification; preserving set/reps/weight data.",
+            workout_id,
+        )
+        is_cardio = False
+        workout_type = "Strength"
     cardio_metrics = _cardio_metrics(workout) if is_cardio else {}
     duration = _duration_minutes(workout.get("start_time"), workout.get("end_time"))
     if duration <= 0 and cardio_metrics.get("duration_minutes"):
@@ -420,7 +521,11 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
 
         for set_position, set_item in enumerate(sets):
             set_index = _safe_int(set_item.get("index") if set_item.get("index") is not None else set_position)
-            weight_kg = _safe_float(set_item.get("weight_kg"))
+            reps = _set_reps(set_item)
+            weight_lb = _set_weight_lb(set_item)
+            weight_kg = _set_weight_kg(set_item, weight_lb)
+            has_cardio_set_metrics = _set_has_cardio_metrics(set_item)
+            valid_strength_set = not is_cardio and (reps > 0 or weight_lb > 0 or not has_cardio_set_metrics)
             external_id = f"{workout_id}:{exercise_id}:{set_index}"
             notes_parts = [
                 "Imported from Hevy",
@@ -454,9 +559,9 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
                     "muscle_group": "Cardio" if is_cardio else _muscle_group(exercise),
                     "exercise": exercise_name,
                     "set_number": set_index + 1,
-                    "sets": 0 if is_cardio else 1,
-                    "reps": 0 if is_cardio else _safe_int(set_item.get("reps")),
-                    "weight": 0.0 if is_cardio else round(weight_kg * KG_TO_LB, 2) if weight_kg else 0.0,
+                    "sets": 0 if is_cardio else 1 if valid_strength_set else 0,
+                    "reps": 0 if is_cardio else reps,
+                    "weight": 0.0 if is_cardio else round(weight_lb, 2) if weight_lb else 0.0,
                     "rpe": _safe_float(set_item.get("rpe")),
                     "duration_minutes": duration if not duration_written else 0.0,
                     "notes": " | ".join(notes_parts),
@@ -513,6 +618,27 @@ def normalize_hevy_workout(workout: dict) -> list[dict]:
             }
         )
 
+    total_sets = sum(_safe_int(row.get("sets")) for row in rows)
+    total_volume = sum(
+        _safe_float(row.get("sets")) * _safe_float(row.get("reps")) * _safe_float(row.get("weight"))
+        for row in rows
+    )
+    zero_quant_rows = sum(
+        1
+        for row in rows
+        if _safe_float(row.get("sets")) <= 0
+        and _safe_float(row.get("reps")) <= 0
+        and _safe_float(row.get("weight")) <= 0
+    )
+    logger.info(
+        "Normalized Hevy workout %s rows=%s sets=%s volume=%.1f zero_quant_rows=%s type=%s",
+        workout_id,
+        len(rows),
+        total_sets,
+        total_volume,
+        zero_quant_rows,
+        workout_type,
+    )
     return rows
 
 
@@ -523,12 +649,21 @@ def _row_hevy_workout_id(row: pd.Series | dict) -> str:
     return _extract_note_value(str(row.get("notes", "") or ""), "hevy_workout_id")
 
 
-def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import") -> dict:
+def _apply_date_override(rows: list[dict], date_override: str | None) -> list[dict]:
+    override = str(date_override or "").strip()[:10]
+    if not override:
+        return rows
+    for row in rows:
+        row["date"] = override
+    return rows
+
+
+def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import", date_override: str | None = None) -> dict:
     """Idempotently replace local rows for one Hevy workout."""
     workout_id = str(workout.get("id", "") or "").strip()
     if not workout_id:
         raise HevyIntegrationError("Cannot upsert Hevy workout without an ID.")
-    rows = normalize_hevy_workout(workout)
+    rows = _apply_date_override(normalize_hevy_workout(workout), date_override)
     now = _now_iso()
     raw_result = upsert_raw_hevy_import(workout, rows, imported_at=now)
     for row in rows:
@@ -566,6 +701,150 @@ def upsert_hevy_workout(workout: dict, sync_source: str = "manual_import") -> di
         "action": "updated" if removed_rows > 0 else "created",
         "training_log": training_df,
         **raw_result,
+    }
+
+
+def _raw_payload_from_row(row: pd.Series | dict) -> dict:
+    payload = row.get("raw_payload") if isinstance(row, (pd.Series, dict)) else None
+    if isinstance(payload, dict):
+        return payload
+    try:
+        parsed = json.loads(str(payload or "{}"))
+        return parsed if isinstance(parsed, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def _current_hevy_workout_dates(training_df: pd.DataFrame) -> dict[str, str]:
+    dates: dict[str, str] = {}
+    if training_df.empty:
+        return dates
+    df = training_df.copy()
+    for _, row in df.iterrows():
+        workout_id = _row_hevy_workout_id(row)
+        if not workout_id:
+            continue
+        date_value = str(row.get("date") or "").strip()[:10]
+        if date_value and workout_id not in dates:
+            dates[workout_id] = date_value
+    return dates
+
+
+def repair_hevy_set_data(
+    *,
+    workout_ids: list[str] | None = None,
+    fetch_missing: bool = True,
+    zero_only: bool = True,
+    api_key: str | None = None,
+) -> dict:
+    """Regenerate normalized Hevy rows from raw cache/API details.
+
+    This is manual and side-effectful by design: it does not run on startup.
+    It preserves existing local workout dates so prior date corrections remain
+    intact while replacing zeroed normalized rows with set-level data.
+    """
+    training_df = load_training_log()
+    current_dates = _current_hevy_workout_dates(training_df)
+    target_ids = {str(value or "").strip() for value in (workout_ids or []) if str(value or "").strip()}
+
+    if not target_ids and not training_df.empty:
+        grouped: dict[str, list[dict]] = {}
+        for _, row in training_df.iterrows():
+            workout_id = _row_hevy_workout_id(row)
+            if workout_id:
+                grouped.setdefault(workout_id, []).append(row.to_dict())
+        for workout_id, rows in grouped.items():
+            if not zero_only:
+                target_ids.add(workout_id)
+                continue
+            total_sets = sum(max(0, _safe_int(row.get("sets"))) for row in rows)
+            total_volume = sum(
+                max(0.0, _safe_float(row.get("sets")))
+                * max(0.0, _safe_float(row.get("reps")))
+                * max(0.0, _safe_float(row.get("weight")))
+                for row in rows
+            )
+            has_lift_text = any(
+                str(row.get("exercise") or "").strip().lower() not in {"running", "run"}
+                for row in rows
+            )
+            if total_sets <= 0 and total_volume <= 0 and has_lift_text:
+                target_ids.add(workout_id)
+
+    raw_cache: dict[str, dict] = {}
+    raw_df = load_raw_hevy_workouts()
+    if not raw_df.empty:
+        for _, row in raw_df.iterrows():
+            workout_id = str(row.get("hevy_workout_id") or "").strip()
+            payload = _raw_payload_from_row(row)
+            if workout_id and payload:
+                raw_cache[workout_id] = payload
+
+    repaired = 0
+    fetched = 0
+    from_cache = 0
+    saved_rows = 0
+    replaced_rows = 0
+    failures: list[str] = []
+    skipped: list[str] = []
+
+    for workout_id in sorted(target_ids):
+        workout = raw_cache.get(workout_id)
+        source = "raw_cache"
+        if not workout and fetch_missing:
+            try:
+                workout = fetch_workout_details(workout_id, api_key=api_key)
+                source = "hevy_api"
+                fetched += 1
+            except Exception as exc:
+                failures.append(f"{workout_id}: {exc}")
+                continue
+        if not workout:
+            skipped.append(workout_id)
+            continue
+        try:
+            result = upsert_hevy_workout(
+                workout,
+                sync_source=f"repair_{source}",
+                date_override=current_dates.get(workout_id),
+            )
+            repaired += 1
+            from_cache += 1 if source == "raw_cache" else 0
+            saved_rows += int(result.get("saved_rows") or 0)
+            replaced_rows += int(result.get("replaced_rows") or 0)
+        except Exception as exc:
+            logger.exception("Hevy set-data repair failed for %s", workout_id)
+            failures.append(f"{workout_id}: {exc}")
+
+    sync_at = _now_iso()
+    cache_metadata = refresh_training_cache_metadata(last_hevy_sync=sync_at)
+    save_hevy_sync_state(
+        {
+            "last_sync_at": sync_at,
+            "last_error": "; ".join(failures),
+            "last_result": {
+                "source": "repair_hevy_set_data",
+                "target_workouts": len(target_ids),
+                "repaired_workouts": repaired,
+                "saved_rows": saved_rows,
+                "replaced_rows": replaced_rows,
+                "failures": failures,
+                "skipped": skipped,
+                "cache": cache_metadata,
+            },
+        }
+    )
+    return {
+        "status": "ok" if not failures else "partial",
+        "target_workouts": len(target_ids),
+        "repaired_workouts": repaired,
+        "from_raw_cache": from_cache,
+        "fetched_from_hevy": fetched,
+        "saved_rows": saved_rows,
+        "replaced_rows": replaced_rows,
+        "skipped": skipped,
+        "failures": failures,
+        "cache": cache_metadata,
     }
 
 

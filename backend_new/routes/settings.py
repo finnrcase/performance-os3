@@ -146,6 +146,13 @@ def settings_payload() -> dict[str, Any]:
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
     withings_sync = metadata.get("withings_sync") if isinstance(metadata.get("withings_sync"), dict) else {}
     statuses = {field: _status_for_field(field, integrations) for field in INTEGRATION_FIELDS}
+    try:
+        from src.ai.food_parser import openai_analyzer_config
+
+        openai_config = openai_analyzer_config()
+    except Exception:
+        openai_config = {"openai_key_configured": statuses["openai_api_key"] == "Configured", "model": "", "api_key_source": "unknown"}
+    statuses["openai_api_key"] = "Configured" if openai_config.get("openai_key_configured") else "Not configured"
     withings_status = _withings_status(settings, integrations)
     strava_status, strava_service = _strava_connection(settings, integrations)
     statuses.update(
@@ -175,7 +182,7 @@ def settings_payload() -> dict[str, Any]:
             **strava_service,
         },
         "withings": withings_service,
-        "openai": {"configured": statuses["openai_api_key"] == "Configured", "status": "disabled", "message": "AI enrichment is disabled in backend_new."},
+        "openai": {"configured": statuses["openai_api_key"] == "Configured", "status": "ok" if statuses["openai_api_key"] == "Configured" else "missing_api_key", "message": "OpenAI analyzer is configured." if statuses["openai_api_key"] == "Configured" else "OpenAI analyzer is not configured.", "model": openai_config.get("model", ""), "api_key_source": openai_config.get("api_key_source", "unknown")},
     }
     health = [
         {

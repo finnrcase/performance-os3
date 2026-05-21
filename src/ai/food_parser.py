@@ -8,8 +8,12 @@ flow handles persistence after the user reviews the parsed rows.
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -48,9 +52,22 @@ FOOD_CACHE_COLUMNS = [
 ]
 
 # Model used for structured food analysis. Override with the FOOD_ANALYSIS_MODEL
-# env var to trade cost for accuracy; defaults to a high-accuracy model.
-FOOD_ANALYSIS_DEFAULT_MODEL = "gpt-4.1"
+# env var only when you intentionally want a different high-quality model.
+FOOD_ANALYSIS_DEFAULT_MODEL = "gpt-5.5"
+FOOD_ANALYSIS_REASONING_EFFORT = "medium"
+DEPRECATED_OR_LOW_ACCURACY_MODELS = {
+    "gpt-3.5-turbo",
+    "gpt-4",
+    "gpt-4-turbo",
+    "gpt-4.5-preview",
+    "gpt-4o-mini",
+    "gpt-5-mini",
+    "gpt-5-nano",
+    "gpt-5.4-mini",
+    "gpt-5.4-nano",
+}
 CONFIDENCE_VALUES = {"low", "medium", "high"}
+logger = logging.getLogger(__name__)
 
 _TITLE_MINOR_WORDS = {"of", "and", "with", "the", "a", "an", "in", "on", "to", "for"}
 _LEADING_QUANTITY_RE = re.compile(
@@ -63,7 +80,26 @@ _LEADING_QUANTITY_RE = re.compile(
 
 def food_analysis_model() -> str:
     """Return the configured OpenAI model for food text analysis."""
-    return os.getenv("FOOD_ANALYSIS_MODEL", "").strip() or FOOD_ANALYSIS_DEFAULT_MODEL
+    model = os.getenv("FOOD_ANALYSIS_MODEL", "").strip() or FOOD_ANALYSIS_DEFAULT_MODEL
+    if model in DEPRECATED_OR_LOW_ACCURACY_MODELS:
+        raise ValueError(
+            f"FOOD_ANALYSIS_MODEL={model} is not allowed for nutrition parsing. "
+            f"Use {FOOD_ANALYSIS_DEFAULT_MODEL} or another current high-intelligence model."
+        )
+    return model
+
+
+def food_analysis_model_info() -> dict[str, Any]:
+    """Return non-secret model configuration metadata for logs/debug."""
+    configured = os.getenv("FOOD_ANALYSIS_MODEL", "").strip()
+    return {
+        "model": food_analysis_model(),
+        "model_source": "env" if configured else "default",
+        "fallback_model_used": False,
+        "reasoning_effort": os.getenv("FOOD_ANALYSIS_REASONING_EFFORT", "").strip() or FOOD_ANALYSIS_REASONING_EFFORT,
+        "supports_structured_outputs": True,
+        "supports_image_input": True,
+    }
 
 
 def _clean_display_name(raw: str, fallback: str = "") -> str:
@@ -116,11 +152,22 @@ def _save_food_cache(cache_df: pd.DataFrame) -> None:
 
 
 def _read_settings_key() -> str:
-    """Read the saved OpenAI key from local settings as a fallback."""
+    """Read the saved OpenAI key from the same settings document backend_new uses."""
+    try:
+        from backend_new.db import fetch_latest_document
+
+        stored = fetch_latest_document("api_connections", {})
+        integrations = stored.get("integrations") if isinstance(stored, dict) and isinstance(stored.get("integrations"), dict) else {}
+        value = str(integrations.get("openai_api_key") or "").strip()
+        if value and not value.startswith(("••••", "***")):
+            return value
+    except Exception:
+        pass
     try:
         from src.config import load_settings
 
-        return str(load_settings().get("integrations", {}).get("openai_api_key", "")).strip()
+        value = str(load_settings().get("integrations", {}).get("openai_api_key", "")).strip()
+        return "" if value.startswith(("••••", "***")) else value
     except Exception:
         return ""
 
@@ -133,6 +180,34 @@ def get_openai_key_status() -> bool:
 def _get_openai_api_key() -> str:
     """Read OpenAI key from environment first, then local settings fallback."""
     return os.getenv("OPENAI_API_KEY", "").strip() or _read_settings_key()
+
+
+def openai_analyzer_config() -> dict[str, Any]:
+    """Return the canonical non-secret OpenAI analyzer configuration."""
+    try:
+        model_info = food_analysis_model_info()
+        model_error = ""
+    except Exception as exc:
+        model_info = {
+            "model": "",
+            "model_source": "invalid",
+            "fallback_model_used": False,
+            "reasoning_effort": "",
+            "supports_structured_outputs": True,
+            "supports_image_input": True,
+        }
+        model_error = str(exc)
+    return {
+        "openai_key_configured": get_openai_key_status(),
+        "api_key_source": "environment" if os.getenv("OPENAI_API_KEY", "").strip() else "settings" if _read_settings_key() else "missing",
+        "model": model_info.get("model") or FOOD_ANALYSIS_DEFAULT_MODEL,
+        "model_source": model_info.get("model_source", "default"),
+        "fallback_model_used": bool(model_info.get("fallback_model_used", False)),
+        "reasoning_effort": model_info.get("reasoning_effort", FOOD_ANALYSIS_REASONING_EFFORT),
+        "supports_structured_outputs": bool(model_info.get("supports_structured_outputs", True)),
+        "supports_image_input": bool(model_info.get("supports_image_input", True)),
+        "model_error": model_error,
+    }
 
 
 def _to_float(value: Any) -> float:
@@ -327,8 +402,7 @@ def _response(
         "message": message,
         "debug": {
             "backend_endpoint_reached": True,
-            "openai_key_configured": get_openai_key_status(),
-            "model": food_analysis_model(),
+            **openai_analyzer_config(),
             "parsing_status": "success" if success else "failure",
         },
     }
@@ -447,10 +521,8 @@ def _parse_model_json(response: Any) -> dict:
     return json.loads(output_text)
 
 
-def _call_openai(food_text: str, api_key: str) -> dict:
-    """Call OpenAI with a strict JSON schema using the current Python SDK."""
-    client = OpenAI(api_key=api_key)
-    schema = {
+def _food_parse_schema() -> dict:
+    return {
         "type": "object",
         "additionalProperties": False,
         "properties": {
@@ -515,62 +587,124 @@ def _call_openai(food_text: str, api_key: str) -> dict:
         },
         "required": ["foods"],
     }
-    response = client.responses.create(
-        model=food_analysis_model(),
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise nutrition analysis assistant for a personal health "
-                    "dashboard. Convert one messy free-form food log into structured, accurate "
-                    "food items.\n\n"
-                    "TITLE RULES — for each food set display_name:\n"
-                    "- Clean, readable, Title Case.\n"
-                    "- Remove all quantities, units, and macro notes (e.g. '4oz', '140 cal', "
-                    "'17p', '4g of protein').\n"
-                    "- Remove filler wording such as 'w', 'with a', 'of'.\n"
-                    "- Keep brand names when meaningful (Built, Kirkland, Fairlife).\n"
-                    "- Use the natural singular noun form (e.g. '2 kirkland bagels' -> "
-                    "'Kirkland Bagel').\n"
-                    "- Examples: '4oz of non fat milk w 4g of protein' -> 'Nonfat Milk'; "
-                    "'built puff bar 140 cal 17p' -> 'Built Puff Bar'; "
-                    "'chicken burrito bowl with rice beans and guac' -> 'Chicken Burrito Bowl'; "
-                    "'finn shake oats protein powder fairlife milk' -> 'Finn Shake'.\n"
-                    "Set food_name equal to display_name. Set normalized_name to a lowercase "
-                    "snake_case form of display_name.\n\n"
-                    "MACRO RULES:\n"
-                    "- If the user states an exact calorie or macro value, USE THAT EXACT VALUE; "
-                    "never override a user-provided number. Only estimate macros the user did "
-                    "NOT provide.\n"
-                    "- For every macro you estimated rather than took from the user, add a short "
-                    "entry to assumptions naming the field (e.g. 'Estimated carbs and fat from "
-                    "standard nonfat milk nutrition facts').\n"
-                    "- Scale all macros to the stated quantity/serving size.\n"
-                    "- If quantity is missing, assume a reasonable serving, record it in "
-                    "assumptions, and set needs_review=true.\n"
-                    "- Use realistic values from standard nutrition facts. Do not claim "
-                    "exactness. Prefer conservative estimates.\n"
-                    "- confidence: 'high' only when the food is standard and unambiguous or the "
-                    "user supplied full macros; 'low' for vague or uncertain brand items.\n\n"
-                    "Always set source to 'openai_estimate' — downstream code may upgrade it "
-                    "after a database or USDA lookup. original_text must echo the user's wording "
-                    "for that item. Split combined entries when useful for review (a protein "
-                    "shake with banana may be split; toast with butter can stay as one item if "
-                    "the butter is in the serving description). Avoid medical claims. Return "
-                    "only valid JSON matching the schema."
-                ),
-            },
-            {"role": "user", "content": food_text},
-        ],
-        text={
+
+
+def _food_parse_system_prompt(*, includes_image: bool = False) -> str:
+    image_rules = (
+        "\nIMAGE / LABEL RULES:\n"
+        "- If an image is provided and it contains a Nutrition Facts label, prioritize exact label extraction over estimation.\n"
+        "- Extract serving size, calories, protein, carbs, fat, fiber, sugar, and sodium from the visible label when readable.\n"
+        "- If the front package/brand is visible, preserve the brand and product name.\n"
+        "- If label values are partially unreadable, return best-estimate values, confidence='low', needs_review=true, and explain what was unreadable in assumptions.\n"
+    ) if includes_image else ""
+    return (
+        "You are a precise nutrition analysis assistant for a personal health "
+        "dashboard. Convert one messy free-form food log into structured, accurate "
+        "food items.\n\n"
+        "TITLE RULES — for each food set display_name:\n"
+        "- Clean, readable, Title Case.\n"
+        "- Remove all quantities, units, and macro notes (e.g. '4oz', '140 cal', "
+        "'17p', '4g of protein').\n"
+        "- Remove filler wording such as 'w', 'with a', 'of'.\n"
+        "- Keep brand names when meaningful (Built, Kirkland, Fairlife).\n"
+        "- Use the natural singular noun form (e.g. '2 kirkland bagels' -> "
+        "'Kirkland Bagel').\n"
+        "- Examples: '4oz of non fat milk w 4g of protein' -> 'Nonfat Milk'; "
+        "'built puff bar 140 cal 17p' -> 'Built Puff Bar'; "
+        "'chicken burrito bowl with rice beans and guac' -> 'Chicken Burrito Bowl'; "
+        "'finn shake oats protein powder fairlife milk' -> 'Finn Shake'.\n"
+        "Set food_name equal to display_name. Set normalized_name to a lowercase "
+        "snake_case form of display_name.\n\n"
+        "MACRO RULES:\n"
+        "- If the user states an exact calorie or macro value, USE THAT EXACT VALUE; "
+        "never override a user-provided number. Only estimate macros the user did "
+        "NOT provide.\n"
+        "- For every macro you estimated rather than took from the user, add a short "
+        "entry to assumptions naming the field (e.g. 'Estimated carbs and fat from "
+        "standard nonfat milk nutrition facts').\n"
+        "- Scale all macros to the stated quantity/serving size.\n"
+        "- If quantity is missing, assume a reasonable serving, record it in "
+        "assumptions, and set needs_review=true.\n"
+        "- Use realistic values from manufacturer labels/USDA/standard nutrition facts. "
+        "Do not claim exactness unless exact label/user values are visible or provided.\n"
+        "- confidence: 'high' only when the food is standard and unambiguous, the "
+        "user supplied full macros, or a visible label clearly provides values; "
+        "'low' for vague or uncertain brand items.\n\n"
+        "Restaurant/menu items: preserve restaurant names when provided, decompose meals "
+        "when useful, and estimate from typical published menu/macronutrient patterns.\n\n"
+        f"{image_rules}"
+        "Always set source to 'openai_estimate' — downstream code may upgrade it "
+        "after a database or USDA lookup. original_text must echo the user's wording "
+        "for that item. Split combined entries when useful for review (a protein "
+        "shake with banana may be split; toast with butter can stay as one item if "
+        "the butter is in the serving description). Avoid medical claims. Return "
+        "only valid JSON matching the schema."
+    )
+
+
+def _response_input(food_text: str, image_data_url: str | None = None) -> list[dict[str, Any]]:
+    if not image_data_url:
+        return [{"role": "user", "content": food_text}]
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": food_text or "Extract this nutrition label or food package into structured macros."},
+                {"type": "input_image", "image_url": image_data_url, "detail": "high"},
+            ],
+        }
+    ]
+
+
+def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = None) -> dict:
+    """Call OpenAI with a strict JSON schema using the current Python SDK."""
+    client = OpenAI(api_key=api_key)
+    model_info = food_analysis_model_info()
+    model = str(model_info["model"])
+    reasoning_effort = str(model_info["reasoning_effort"])
+    started = time.perf_counter()
+    input_payload = [
+        {"role": "system", "content": _food_parse_system_prompt(includes_image=bool(image_data_url))},
+        *_response_input(food_text, image_data_url=image_data_url),
+    ]
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "input": input_payload,
+        "text": {
             "format": {
                 "type": "json_schema",
                 "name": "performance_os_food_parse",
-                "schema": schema,
+                "schema": _food_parse_schema(),
                 "strict": True,
             }
         },
-        max_output_tokens=1500,
+        "max_output_tokens": 1500,
+    }
+    if model.startswith("gpt-5"):
+        kwargs["reasoning"] = {"effort": reasoning_effort}
+    logger.info(
+        "[food_analyzer] calling_openai model=%s model_source=%s fallback_model_used=%s reasoning_effort=%s image_input=%s",
+        model,
+        model_info["model_source"],
+        model_info["fallback_model_used"],
+        reasoning_effort if model.startswith("gpt-5") else "not_supported",
+        bool(image_data_url),
+    )
+    try:
+        response = client.responses.create(**kwargs)
+    except Exception:
+        logger.exception(
+            "[food_analyzer] openai_error model=%s fallback_model_used=%s latency_ms=%s",
+            model,
+            model_info["fallback_model_used"],
+            round((time.perf_counter() - started) * 1000, 1),
+        )
+        raise
+    logger.info(
+        "[food_analyzer] openai_success model=%s fallback_model_used=%s latency_ms=%s",
+        model,
+        model_info["fallback_model_used"],
+        round((time.perf_counter() - started) * 1000, 1),
     )
     return _parse_model_json(response)
 
@@ -616,9 +750,9 @@ def _api_totals(items: list[dict]) -> dict:
     return totals
 
 
-def analyze_food_text(food_text: str) -> dict:
+def analyze_food_text(food_text: str, *, image_data_url: str | None = None) -> dict:
     """Return the richer Food tab analyze response shape."""
-    parsed = parse_food_text(food_text)
+    parsed = parse_food_text(food_text, image_data_url=image_data_url)
     warnings = []
     api_items = []
     for food in parsed.get("foods", []):
@@ -659,10 +793,10 @@ def analyze_food_text(food_text: str) -> dict:
     }
 
 
-def parse_food_text(food_text: str) -> dict:
+def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dict:
     """Parse natural-language food text into structured editable food rows."""
     cleaned_text = str(food_text or "").strip()
-    if not cleaned_text:
+    if not cleaned_text and not image_data_url:
         return _response(
             foods=[],
             source="validation",
@@ -673,16 +807,17 @@ def parse_food_text(food_text: str) -> dict:
         )
 
     query = _normalize_query(cleaned_text)
-    local_match = _local_saved_food_response(cleaned_text)
-    if local_match:
-        return local_match
+    if not image_data_url:
+        local_match = _local_saved_food_response(cleaned_text)
+        if local_match:
+            return local_match
 
-    cached = _cached_response(query)
-    if cached:
-        refreshed = _verify_uncertain_foods(cached)
-        if refreshed != cached:
-            _cache_result(query, refreshed)
-        return refreshed
+        cached = _cached_response(query)
+        if cached:
+            refreshed = _verify_uncertain_foods(cached)
+            if refreshed != cached:
+                _cache_result(query, refreshed)
+            return refreshed
 
     api_key = _get_openai_api_key()
     if not api_key:
@@ -693,7 +828,7 @@ def parse_food_text(food_text: str) -> dict:
         )
 
     try:
-        parsed = _call_openai(cleaned_text, api_key)
+        parsed = _call_openai(cleaned_text, api_key, image_data_url=image_data_url)
         foods = parsed.get("foods", [])
         if not isinstance(foods, list) or not foods:
             raise ValueError("Model response did not include a non-empty foods array.")
@@ -706,7 +841,8 @@ def parse_food_text(food_text: str) -> dict:
             message=f"Parsed with {food_analysis_model()}. Review before saving.",
         )
         result = _verify_uncertain_foods(result)
-        _cache_result(query, result)
+        if not image_data_url:
+            _cache_result(query, result)
         return result
     except AuthenticationError:
         return _fallback_response(cleaned_text, "OpenAI API key is invalid.", "invalid_api_key")
@@ -742,6 +878,31 @@ def parse_food_text(food_text: str) -> dict:
             f"OpenAI returned a malformed response: {exc}",
             "malformed_response",
         )
+
+
+def image_data_url(image_bytes: bytes, mime_type: str) -> str:
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    safe_mime = mime_type if mime_type in {"image/png", "image/jpeg", "image/webp"} else "image/jpeg"
+    return f"data:{safe_mime};base64,{encoded}"
+
+
+def analyze_food_label_image(image_bytes: bytes, mime_type: str, *, context: str = "") -> dict:
+    """Analyze a nutrition label/package image with the same strict food schema."""
+    digest = hashlib.sha256(image_bytes).hexdigest()[:12]
+    logger.info(
+        "[food_analyzer] label_image_received bytes=%s mime_type=%s sha256_prefix=%s",
+        len(image_bytes),
+        mime_type,
+        digest,
+    )
+    prompt = (
+        "Extract the visible packaged food or nutrition label. Prefer exact label values "
+        "over estimates. If multiple serving columns are visible, use the primary per-serving "
+        "column and note any ambiguity."
+    )
+    if context:
+        prompt = f"{prompt}\nUser context: {context}"
+    return analyze_food_text(prompt, image_data_url=image_data_url(image_bytes, mime_type))
 
 
 def _macro_conflict(ai_food: dict, verified_macros: dict) -> bool:

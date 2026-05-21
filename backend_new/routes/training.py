@@ -508,6 +508,24 @@ def sync_hevy() -> dict[str, Any]:
         return {"status": "error", "checked_hevy": True, "error_type": type(exc).__name__, "message": str(exc)}
 
 
+@router.post("/api/training/repair/hevy-set-data")
+def repair_hevy_set_data(fetch_missing: bool = True, zero_only: bool = True) -> dict[str, Any]:
+    if not _hevy_configured() and fetch_missing:
+        return {
+            "status": "not_configured",
+            "message": "HEVY_API_KEY is not configured, so only cached raw Hevy payloads can be repaired.",
+            "target_workouts": 0,
+            "repaired_workouts": 0,
+        }
+    try:
+        from src.integrations.hevy_client import repair_hevy_set_data as repair_hevy_rows
+
+        result = repair_hevy_rows(fetch_missing=fetch_missing, zero_only=zero_only)
+        return {"core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
+    except Exception as exc:
+        return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "repaired_workouts": 0}
+
+
 @router.post("/api/training/import/hevy/preview")
 def preview_hevy_import(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not _hevy_configured():

@@ -49,6 +49,7 @@ EXERCISE_PR_HISTORY_PATH = processed_data_path("exercise_pr_history.csv")
 MUSCLE_GROUP_VOLUME_HISTORY_PATH = processed_data_path("muscle_group_volume_history.csv")
 TRAINING_SUMMARY_STATE_PATH = processed_data_path("training_summary_state.json")
 TRAINING_CACHE_METADATA_PATH = processed_data_path("training_cache_metadata.json")
+KG_TO_LB = 2.2046226218
 
 RAW_HEVY_WORKOUT_COLUMNS = [
     "hevy_workout_id",
@@ -380,6 +381,59 @@ def _number_or_zero(value) -> float:
     return 0.0 if parsed is None else parsed
 
 
+def _first_present(payload: dict, keys: tuple[str, ...]):
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, ""):
+            return payload.get(key)
+    return None
+
+
+def _raw_set_reps(set_item: dict, normalized: dict) -> int:
+    value = _first_present(
+        set_item,
+        (
+            "reps",
+            "repetitions",
+            "rep_count",
+            "reps_count",
+            "target_reps",
+        ),
+    )
+    if value in (None, ""):
+        value = normalized.get("reps")
+    return int(_number_or_zero(value))
+
+
+def _raw_set_weight_lb(set_item: dict, normalized: dict) -> float | None:
+    normalized_weight = _number_or_none(normalized.get("weight"))
+    if normalized_weight and normalized_weight > 0:
+        return normalized_weight
+    explicit_lb = _number_or_none(
+        _first_present(set_item, ("weight_lb", "weight_lbs", "weight_pounds", "lbs"))
+    )
+    if explicit_lb and explicit_lb > 0:
+        return explicit_lb
+    unit = str(_first_present(set_item, ("weight_unit", "unit", "weight_unit_type", "weightUnit")) or "").lower()
+    generic_weight = _number_or_none(_first_present(set_item, ("weight", "weight_value")))
+    if generic_weight and generic_weight > 0 and unit in {"lb", "lbs", "pound", "pounds", "imperial"}:
+        return generic_weight
+    kg = _number_or_none(_first_present(set_item, ("weight_kg", "kg", "kilograms")))
+    if kg is None and generic_weight and generic_weight > 0:
+        kg = generic_weight
+    return kg * KG_TO_LB if kg and kg > 0 else None
+
+
+def _raw_set_weight_kg(set_item: dict, weight_lb: float | None) -> float | None:
+    kg = _number_or_none(_first_present(set_item, ("weight_kg", "kg", "kilograms")))
+    if kg and kg > 0:
+        return kg
+    unit = str(_first_present(set_item, ("weight_unit", "unit", "weight_unit_type", "weightUnit")) or "").lower()
+    generic_weight = _number_or_none(_first_present(set_item, ("weight", "weight_value")))
+    if generic_weight and generic_weight > 0 and unit not in {"lb", "lbs", "pound", "pounds", "imperial"}:
+        return generic_weight
+    return weight_lb / KG_TO_LB if weight_lb and weight_lb > 0 else None
+
+
 def _raw_hevy_workout_record(workout: dict, normalized_rows: list[dict], imported_at: str) -> dict:
     workout_id = str(workout.get("id", "") or "").strip()
     start_time = str(workout.get("start_time") or "").strip()
@@ -430,8 +484,8 @@ def _raw_hevy_set_records(workout: dict, normalized_rows: list[dict], imported_a
                 set_index = set_position
             external_id = f"{workout_id}:{exercise_id}:{set_index}"
             normalized = by_external_id.get(external_id, {})
-            weight_kg = _number_or_none(set_item.get("weight_kg"))
-            weight_lb = _number_or_none(normalized.get("weight"))
+            weight_lb = _raw_set_weight_lb(set_item, normalized)
+            weight_kg = _raw_set_weight_kg(set_item, weight_lb)
             records.append(
                 {
                     "external_id": external_id,
@@ -442,7 +496,7 @@ def _raw_hevy_set_records(workout: dict, normalized_rows: list[dict], imported_a
                     "exercise": exercise_name,
                     "set_index": set_index,
                     "set_number": int(normalized.get("set_number") or set_index + 1),
-                    "reps": int(_number_or_zero(set_item.get("reps"))),
+                    "reps": _raw_set_reps(set_item, normalized),
                     "weight_kg": weight_kg,
                     "weight_lb": weight_lb,
                     "rpe": _number_or_zero(set_item.get("rpe")),
