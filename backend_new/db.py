@@ -66,6 +66,8 @@ _connection: Any | None = None
 _connection_lock = threading.RLock()
 _dashboard_core_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
 _dashboard_core_cache_lock = threading.RLock()
+_performance_indexed_tables: set[str] = set()
+_performance_index_lock = threading.RLock()
 
 
 def _duration_ms(started: float) -> float:
@@ -195,6 +197,72 @@ def ensure_jsonb_table(table: str) -> dict[str, Any]:
         return {**structured_error(exc, operation="ensure_jsonb_table"), "table": table, "duration_ms": _duration_ms(started)}
 
 
+def ensure_jsonb_performance_indexes(table: str) -> dict[str, Any]:
+    """Create route-critical expression indexes for supported JSONB tables.
+
+    Called lazily by hot routes instead of startup. The query helpers use
+    literal, validated JSON keys so Postgres can match these expression indexes.
+    """
+    started = time.perf_counter()
+    try:
+        safe_table = _safe_table(table)
+        with _performance_index_lock:
+            if safe_table in _performance_indexed_tables:
+                return {"status": "ok", "table": safe_table, "cached": True, "duration_ms": _duration_ms(started)}
+            with cursor(timeout_ms=1000) as cur:
+                cur.execute(
+                    """
+                    SELECT
+                      to_regclass(%s)::text,
+                      COALESCE(array_agg(indexname) FILTER (WHERE indexname IS NOT NULL), ARRAY[]::text[])
+                    FROM pg_indexes
+                    WHERE tablename = %s
+                    """,
+                    (safe_table, safe_table),
+                )
+                index_row = cur.fetchone()
+            table_regclass = str(index_row[0] or "") if index_row else ""
+            existing_indexes = {str(item) for item in (index_row[1] or [])} if index_row else set()
+            ensure_result: dict[str, Any] = {"status": "ok", "table": safe_table}
+            if not table_regclass:
+                ensure_result = ensure_jsonb_table(safe_table)
+                if ensure_result.get("status") in {"error", "not_configured"}:
+                    return {**ensure_result, "operation": "ensure_jsonb_performance_indexes", "duration_ms": _duration_ms(started)}
+                existing_indexes = set()
+            statements: list[tuple[str, str]] = []
+            if safe_table == "food_logs":
+                statements = [
+                    ("food_logs_date_row_order_idx", "CREATE INDEX IF NOT EXISTS food_logs_date_row_order_idx ON food_logs ((data->>'date') DESC, row_order DESC, id DESC)"),
+                    ("food_logs_date_lookup_idx", "CREATE INDEX IF NOT EXISTS food_logs_date_lookup_idx ON food_logs ((data->>'date'), row_order DESC, id DESC)"),
+                    ("food_logs_food_log_id_idx", "CREATE INDEX IF NOT EXISTS food_logs_food_log_id_idx ON food_logs ((data->>'food_log_id'))"),
+                ]
+            elif safe_table == "daily_nutrition_summary":
+                statements = [
+                    ("daily_nutrition_summary_date_row_order_idx", "CREATE INDEX IF NOT EXISTS daily_nutrition_summary_date_row_order_idx ON daily_nutrition_summary ((data->>'date') DESC, row_order DESC, id DESC)"),
+                ]
+            missing_statements = statements
+            if statements:
+                missing_statements = [(name, statement) for name, statement in statements if name not in existing_indexes]
+            if missing_statements:
+                with cursor(timeout_ms=10_000) as cur:
+                    for _, statement in missing_statements:
+                        cur.execute(statement)
+            _performance_indexed_tables.add(safe_table)
+            return {
+                "status": "ok",
+                "table": safe_table,
+                "cached": False,
+                "indexes": len(statements),
+                "created_indexes": len(missing_statements),
+                "duration_ms": _duration_ms(started),
+            }
+    except DatabaseNotConfigured:
+        return {"status": "not_configured", "table": table, "duration_ms": _duration_ms(started)}
+    except Exception as exc:
+        logger.exception("[db] ensure performance indexes failed table=%s", table)
+        return {**structured_error(exc, operation="ensure_jsonb_performance_indexes"), "table": table, "duration_ms": _duration_ms(started)}
+
+
 def get_connection() -> Any:
     """Return a reusable Postgres connection with a bounded connect timeout."""
     global _connection
@@ -322,21 +390,21 @@ def fetch_json_rows(
                     f"""
                     SELECT data
                     FROM {safe_table}
-                    WHERE COALESCE(data->>%s, '') >= %s
-                    ORDER BY data->>%s DESC, row_order DESC, id DESC
+                    WHERE data->>'{safe_date_field}' >= %s
+                    ORDER BY data->>'{safe_date_field}' DESC, row_order DESC, id DESC
                     LIMIT %s
                     """,
-                    (safe_date_field, str(since_date), safe_date_field, bounded_limit),
+                    (str(since_date), bounded_limit),
                 )
             elif safe_date_field:
                 cur.execute(
                     f"""
                     SELECT data
                     FROM {safe_table}
-                    ORDER BY data->>%s DESC, row_order DESC, id DESC
+                    ORDER BY data->>'{safe_date_field}' DESC, row_order DESC, id DESC
                     LIMIT %s
                     """,
-                    (safe_date_field, bounded_limit),
+                    (bounded_limit,),
                 )
             else:
                 cur.execute(
@@ -374,11 +442,11 @@ def fetch_json_rows_for_value(
                 f"""
                 SELECT data
                 FROM {safe_table}
-                WHERE COALESCE(data->>%s, '') = %s
+                WHERE data->>'{safe_field}' = %s
                 ORDER BY row_order DESC, id DESC
                 LIMIT %s
                 """,
-                (safe_field, str(value), bounded_limit),
+                (str(value), bounded_limit),
             )
             return [sanitize_json(dict(row[0])) for row in cur.fetchall()]
     except DatabaseNotConfigured:
@@ -401,10 +469,8 @@ def fetch_json_rows_matching_any(
         if not safe_fields:
             raise ValueError("At least one field is required.")
         bounded_limit = _bounded_limit(limit)
-        where_clause = " OR ".join(["COALESCE(data->>%s, '') = %s" for _ in safe_fields])
-        params: list[str] = []
-        for field in safe_fields:
-            params.extend([field, str(value)])
+        where_clause = " OR ".join([f"data->>'{field}' = %s" for field in safe_fields])
+        params = [str(value) for _ in safe_fields]
         with cursor(timeout_ms=1500) as cur:
             cur.execute(
                 f"""
@@ -731,10 +797,10 @@ def upsert_json_row(table: str, key_field: str, key_value: str, data: dict[str, 
                 f"""
                 UPDATE {safe_table}
                 SET data = data || %s::jsonb, updated_at = now()
-                WHERE data->>%s = %s
+                WHERE data->>'{safe_key}' = %s
                 RETURNING data
                 """,
-                (_jsonb(payload), safe_key, str(key_value)),
+                (_jsonb(payload), str(key_value)),
             )
             row = cur.fetchone()
             if row:
@@ -769,9 +835,9 @@ def update_json_rows_for_value(table: str, field: str, value: str, patch: dict[s
                 f"""
                 UPDATE {safe_table}
                 SET data = data || %s::jsonb, updated_at = now()
-                WHERE COALESCE(data->>%s, '') = %s
+                WHERE data->>'{safe_field}' = %s
                 """,
-                (_jsonb(payload), safe_field, str(value)),
+                (_jsonb(payload), str(value)),
             )
             updated = int(getattr(cur, "rowcount", 0) or 0)
         if updated:
@@ -838,10 +904,8 @@ def move_workout_date_rows(
         safe_fields = tuple(field for field in (_safe_json_key(field) for field in match_fields) if field)
         if not safe_fields:
             raise ValueError("At least one match field is required.")
-        where_clause = " OR ".join(["data->>%s = %s" for _ in safe_fields])
-        params: list[str] = []
-        for field in safe_fields:
-            params.extend([field, workout_id])
+        where_clause = " OR ".join([f"data->>'{field}' = %s" for field in safe_fields])
+        params = [workout_id for _ in safe_fields]
 
         updated_rows = 0
         old_dates: list[str] = []
@@ -902,7 +966,7 @@ def delete_json_row(table: str, key_field: str, key_value: str) -> dict[str, Any
         if safe_key is None:
             raise ValueError("key_field is required.")
         with cursor(timeout_ms=1500) as cur:
-            cur.execute(f"DELETE FROM {safe_table} WHERE data->>%s = %s", (safe_key, str(key_value)))
+            cur.execute(f"DELETE FROM {safe_table} WHERE data->>'{safe_key}' = %s", (str(key_value),))
             deleted = int(getattr(cur, "rowcount", 0) or 0)
         if deleted:
             invalidate_dashboard_core_cache()
@@ -1179,7 +1243,7 @@ def fetch_dashboard_core_bundle(
              FROM (
                SELECT data
                FROM food_logs
-               WHERE COALESCE(data->>'date', '') = %s
+               WHERE data->>'date' = %s
                  AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
                ORDER BY row_order DESC, id DESC
                LIMIT %s
@@ -1273,7 +1337,7 @@ def fetch_dashboard_core_bundle(
             FROM (
               SELECT data
               FROM food_logs
-              WHERE COALESCE(data->>'date', '') = %s
+              WHERE data->>'date' = %s
                 AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
               ORDER BY row_order DESC, id DESC
               LIMIT %s

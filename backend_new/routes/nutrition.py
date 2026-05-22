@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date
+import copy
+from datetime import date as date_cls, timedelta
 import logging
+import threading
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -10,6 +13,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend_new.db import (
     delete_json_row,
+    ensure_jsonb_performance_indexes,
     fetch_json_rows,
     fetch_json_rows_for_value,
     fetch_latest_document,
@@ -24,6 +28,36 @@ router = APIRouter(tags=["nutrition"])
 logger = logging.getLogger(__name__)
 
 TOTAL_FIELDS = ("calories", "protein", "carbs", "fat", "fiber")
+NUTRITION_LOGS_CACHE_TTL_SECONDS = 15
+_nutrition_logs_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_nutrition_logs_cache_lock = threading.RLock()
+
+
+def _cached_nutrition_logs(cache_key: tuple[Any, ...]) -> dict[str, Any] | None:
+    now = time.monotonic()
+    with _nutrition_logs_cache_lock:
+        entry = _nutrition_logs_cache.get(cache_key)
+        if not entry:
+            return None
+        cached_at, payload = entry
+        if now - cached_at > NUTRITION_LOGS_CACHE_TTL_SECONDS:
+            _nutrition_logs_cache.pop(cache_key, None)
+            return None
+        cached_payload = copy.deepcopy(payload)
+        cached_payload["meta"] = {**(cached_payload.get("meta") or {}), "cache": "memory", "cache_hit": True}
+        return cached_payload
+
+
+def _cache_nutrition_logs(cache_key: tuple[Any, ...], payload: dict[str, Any]) -> None:
+    if payload.get("status") != "ok":
+        return
+    with _nutrition_logs_cache_lock:
+        _nutrition_logs_cache[cache_key] = (time.monotonic(), copy.deepcopy(payload))
+
+
+def _invalidate_nutrition_logs_cache() -> None:
+    with _nutrition_logs_cache_lock:
+        _nutrition_logs_cache.clear()
 
 
 def _today_iso() -> str:
@@ -51,9 +85,25 @@ def _is_excluded(item: dict[str, Any]) -> bool:
 
 def _normalize_history_date(value: str) -> str:
     try:
-        return date.fromisoformat(str(value or "").strip()[:10]).isoformat()
+        return date_cls.fromisoformat(str(value or "").strip()[:10]).isoformat()
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="Date must be a valid YYYY-MM-DD value.") from exc
+
+
+def _bounded_route_limit(limit: int | str | None, *, default: int = 300, max_limit: int = 1000) -> int:
+    try:
+        value = int(limit or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, max_limit))
+
+
+def _bounded_days(days: int | str | None, *, default: int = 90, max_days: int = 366) -> int:
+    try:
+        value = int(days or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(1, min(value, max_days))
 
 
 def _nutrition_value(item: dict[str, Any], field: str) -> float:
@@ -172,8 +222,8 @@ def _history_adherence(items: list[dict[str, Any]]) -> dict[str, Any]:
     dates = sorted({str(item.get("date") or "")[:10] for item in logged if item.get("date")})
     missing_days = 0
     if len(dates) >= 2:
-        start = date.fromisoformat(dates[0])
-        end = date.fromisoformat(dates[-1])
+        start = date_cls.fromisoformat(dates[0])
+        end = date_cls.fromisoformat(dates[-1])
         missing_days = max(0, (end - start).days + 1 - len(dates))
     confidence = "high" if len(logged) >= 14 and missing_days <= 1 else "medium" if len(logged) >= 7 and missing_days <= 3 else "low"
     avg_calories = round(sum(calories) / len(calories), 1) if calories else None
@@ -305,14 +355,59 @@ def get_nutrition_today(date: str | None = None) -> dict[str, Any]:
 
 
 @router.get("/api/nutrition/logs")
-def get_nutrition_logs(date: str | None = None, limit: int = 500) -> dict[str, Any]:
-    items = fetch_json_rows_for_value("food_logs", "date", date, limit=limit) if date else fetch_json_rows("food_logs", limit=limit, date_field="date")
-    return {"items": items}
+def get_nutrition_logs(
+    date: str | None = None,
+    limit: int = 300,
+    days: int = 90,
+    since_date: str | None = None,
+) -> dict[str, Any]:
+    bounded_limit = _bounded_route_limit(limit)
+    if date:
+        selected_date = _normalize_history_date(date)
+        query_meta = {"mode": "date", "date": selected_date}
+        cache_key: tuple[Any, ...] = ("date", selected_date, bounded_limit)
+    else:
+        bounded_window_days = _bounded_days(days)
+        cutoff = _normalize_history_date(since_date) if since_date else (date_cls.today() - timedelta(days=bounded_window_days)).isoformat()
+        query_meta = {"mode": "recent", "days": bounded_window_days, "since_date": cutoff}
+        cache_key = ("recent", cutoff, bounded_limit)
+    cached = _cached_nutrition_logs(cache_key)
+    if cached is not None:
+        return cached
+    index_result = ensure_jsonb_performance_indexes("food_logs")
+    if date:
+        items = fetch_json_rows_for_value("food_logs", "date", query_meta["date"], limit=bounded_limit)
+    else:
+        items = fetch_json_rows("food_logs", limit=bounded_limit, date_field="date", since_date=query_meta["since_date"])
+    if items and isinstance(items[0], dict) and "_db_error" in items[0]:
+        logger.warning("[nutrition_logs] query failed meta=%s error=%s", query_meta, items[0].get("_db_error"))
+        return {
+            "status": "error",
+            "items": [],
+            "error": items[0].get("_db_error"),
+            "meta": {**query_meta, "limit": bounded_limit, "returned": 0, "index_status": index_result.get("status")},
+        }
+    response = {
+        "status": "ok",
+        "items": items,
+        "meta": {
+            **query_meta,
+            "limit": bounded_limit,
+            "returned": len(items),
+            "index_status": index_result.get("status"),
+            "index_cached": index_result.get("cached"),
+            "cache": "miss",
+            "cache_hit": False,
+        },
+    }
+    _cache_nutrition_logs(cache_key, response)
+    return response
 
 
 @router.post("/api/nutrition/logs")
 def post_nutrition_log(payload: dict[str, Any]) -> dict[str, Any]:
     item = insert_json_row("food_logs", _normalize_food_log(payload))
+    _invalidate_nutrition_logs_cache()
     return {"item": item}
 
 
@@ -322,6 +417,7 @@ def put_nutrition_log(food_log_id: str, payload: dict[str, Any]) -> dict[str, An
     if not existing or "_db_error" in existing[0]:
         raise HTTPException(status_code=404, detail="Food log not found")
     item = upsert_json_row("food_logs", "food_log_id", food_log_id, _normalize_food_update(payload, food_log_id=food_log_id))
+    _invalidate_nutrition_logs_cache()
     return {"item": item}
 
 
@@ -330,6 +426,7 @@ def delete_nutrition_log(food_log_id: str) -> dict[str, Any]:
     result = delete_json_row("food_logs", "food_log_id", food_log_id)
     if result.get("status") == "error":
         raise HTTPException(status_code=500, detail=result)
+    _invalidate_nutrition_logs_cache()
     return result
 
 
@@ -444,6 +541,7 @@ def exclude_nutrition_history_day(history_date: str) -> dict[str, Any]:
             "notes": "Excluded from analytics by user; raw food logs remain stored.",
         },
     )
+    _invalidate_nutrition_logs_cache()
     return {
         "status": "ok",
         "date": selected_date,
@@ -491,6 +589,7 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
     if not shortcut:
         raise HTTPException(status_code=404, detail="Shortcut not found")
     item = insert_json_row("food_logs", _shortcut_to_log(shortcut, payload))
+    _invalidate_nutrition_logs_cache()
     return {"item": item}
 
 
@@ -624,5 +723,8 @@ def log_food_bulk(payload: dict[str, Any]) -> dict[str, Any]:
             continue
         items.append(inserted)
     if errors:
+        if items:
+            _invalidate_nutrition_logs_cache()
         raise HTTPException(status_code=500, detail={"message": "Some parsed food items could not be saved.", "code": "food_bulk_insert_failed", "errors": errors, "created": len(items)})
+    _invalidate_nutrition_logs_cache()
     return {"status": "ok", "items": items, "created": len(items), "requested": len(raw_items)}

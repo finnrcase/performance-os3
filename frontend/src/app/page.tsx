@@ -9426,9 +9426,9 @@ export default function Home() {
       {
         key: "nutrition_logs",
         label: "Nutrition logs",
-        path: "/api/nutrition/logs",
+        path: "/api/nutrition/logs?days=90&limit=300",
         run: async () => {
-          const data = await trackedApiGet<{ items: NutritionEntry[] }>({ key: "nutrition_logs", label: "Nutrition logs", path: "/api/nutrition/logs", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
+          const data = await trackedApiGet<{ items: NutritionEntry[] }>({ key: "nutrition_logs", label: "Nutrition logs", path: "/api/nutrition/logs?days=90&limit=300", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setNutritionLogs(data.items);
         },
       },
