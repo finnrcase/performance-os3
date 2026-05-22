@@ -50,3 +50,26 @@ def test_body_metrics_api_hides_excluded_rows_from_history(monkeypatch):
     assert payload["excluded_raw_count"] == 1
     assert [item["date"] for item in payload["items"]] == ["2026-05-15"]
     assert all(item["bodyweight"] != 181.88 for item in payload["items"])
+
+
+def test_canonical_daily_bodyweights_keeps_weight_only_rows():
+    frame = pd.DataFrame(
+        [
+            {"date": "2026-05-15", "bodyweight": 156.9, "source": "withings", "source_id": "a"},
+            {"date": "2026-05-16", "bodyweight": 156.7, "source": "withings", "source_id": "b", "body_fat_percent": None},
+            {"date": "2026-05-17", "bodyweight": 156.5, "source": "manual", "source_id": ""},
+        ]
+    )
+
+    canonical = canonical_daily_bodyweights(frame)
+    debug = canonical_bodyweight_debug(frame)
+
+    assert canonical["date"].dt.date.astype(str).tolist() == ["2026-05-15", "2026-05-16", "2026-05-17"]
+    assert canonical["bodyweight"].astype(float).tolist() == [156.9, 156.7, 156.5]
+    assert debug["raw_body_metric_rows"] == 3
+    assert debug["canonical_daily_weight_rows"] == 3
+    assert debug["dropped_invalid_rows"] == 0
+    assert debug["withings_rows"] == 2
+    assert debug["manual_rows"] == 1
+    assert debug["date_min"] == "2026-05-15"
+    assert debug["date_max"] == "2026-05-17"

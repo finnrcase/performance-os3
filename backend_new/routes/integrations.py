@@ -659,8 +659,27 @@ def sync_withings_now(payload: dict | None = None) -> dict:
             days=payload.get("days"),
             start_date=payload.get("start_date"),
             end_date=payload.get("end_date"),
+            history=bool(payload.get("history")),
         )
     except Exception as exc:
         return _withings_error(str(exc))
     items = fetch_json_rows("body_metric_logs", limit=1000, date_field="date")
+    return {**result, "items": items if not (items and "_db_error" in items[0]) else []}
+
+
+@router.post("/api/withings/sync-history")
+def sync_withings_history(payload: dict | None = None) -> dict:
+    payload = payload or {}
+    try:
+        from src.integrations.withings_client import DEFAULT_HISTORY_SYNC_DAYS, sync_withings_measurements
+
+        result = sync_withings_measurements(
+            days=payload.get("days") or DEFAULT_HISTORY_SYNC_DAYS,
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            history=True,
+        )
+    except Exception as exc:
+        return _withings_error(str(exc))
+    items = fetch_json_rows("body_metric_logs", limit=5000, date_field="date")
     return {**result, "items": items if not (items and "_db_error" in items[0]) else []}

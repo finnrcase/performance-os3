@@ -41,7 +41,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { CSSProperties, FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 
 function apiUrl(path: string) {
@@ -4892,6 +4892,7 @@ type WeightChartPoint = {
   timestamp: number;
   bodyweight: number;
   movingAverage7: number | null;
+  dailyChange: number | null;
   bodyFat: number | null;
   leanMass: number | null;
   fatMass: number | null;
@@ -4977,6 +4978,7 @@ function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
       timestamp: parsedDate.getTime(),
       bodyweight,
       movingAverage7: null,
+      dailyChange: null,
       bodyFat: bodyFatValue(entry),
       leanMass: valueOrNull(entry.lean_mass),
       fatMass: valueOrNull(entry.fat_mass),
@@ -5011,7 +5013,9 @@ function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
     .map((entry, index, all) => {
       const window = all.slice(Math.max(0, index - 6), index + 1);
       const movingAverage7 = window.reduce((sum, item) => sum + item.bodyweight, 0) / window.length;
-      return { ...entry, movingAverage7: Number(movingAverage7.toFixed(2)) };
+      const previous = all[index - 1];
+      const dailyChange = previous ? entry.bodyweight - previous.bodyweight : null;
+      return { ...entry, movingAverage7: Number(movingAverage7.toFixed(2)), dailyChange: dailyChange === null ? null : Number(dailyChange.toFixed(2)) };
     });
 }
 
@@ -5022,14 +5026,29 @@ function buildWeightTrend(history: WeightChartPoint[]) {
   cutoff.setDate(cutoff.getDate() - 6);
   const recent = history.filter((entry) => entry.timestamp >= cutoff.getTime());
   const sevenDayAverage = recent.length ? recent.reduce((sum, entry) => sum + entry.bodyweight, 0) / recent.length : null;
+  const fourteen = history.slice(-14);
+  const twentyEight = history.slice(-28);
+  const fourteenDayAverage = fourteen.length ? fourteen.reduce((sum, entry) => sum + entry.bodyweight, 0) / fourteen.length : null;
+  const twentyEightDayAverage = twentyEight.length ? twentyEight.reduce((sum, entry) => sum + entry.bodyweight, 0) / twentyEight.length : null;
   const firstRecent = recent[0] ?? null;
   const latestRecent = recent.at(-1) ?? null;
   const change = firstRecent && latestRecent && recent.length >= 2 ? latestRecent.bodyweight - firstRecent.bodyweight : null;
   const percentChange = change !== null && firstRecent && firstRecent.bodyweight > 0 ? (change / firstRecent.bodyweight) * 100 : null;
+  const byDate = new Map(history.map((entry) => [entry.date, entry]));
+  const latestDate = latest ? new Date(`${latest.date}T00:00:00Z`) : null;
+  const yesterdayDate = latestDate ? new Date(latestDate) : null;
+  if (yesterdayDate) yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1);
+  const sevenDaysAgoDate = latestDate ? new Date(latestDate) : null;
+  if (sevenDaysAgoDate) sevenDaysAgoDate.setUTCDate(sevenDaysAgoDate.getUTCDate() - 7);
+  const yesterday = yesterdayDate ? byDate.get(yesterdayDate.toISOString().slice(0, 10)) ?? null : null;
+  const sevenDaysAgo = sevenDaysAgoDate ? byDate.get(sevenDaysAgoDate.toISOString().slice(0, 10)) ?? null : null;
+  const changeVsYesterday = latest && yesterday ? latest.bodyweight - yesterday.bodyweight : null;
+  const changeVsSevenDaysAgo = latest && sevenDaysAgo ? latest.bodyweight - sevenDaysAgo.bodyweight : change;
   const recentBodyFat = recent.filter((entry) => entry.bodyFat !== null);
   const bodyFatChange = recentBodyFat.length >= 2 ? Number((Number(recentBodyFat.at(-1)?.bodyFat) - Number(recentBodyFat[0].bodyFat)).toFixed(2)) : null;
   const trendLabel = change === null ? "Need more weigh-ins" : Math.abs(change) < 0.3 ? "stable" : change > 0 ? "gaining" : "losing";
-  return { latest, recent, sevenDayAverage, change, percentChange, bodyFatChange, trendLabel };
+  const dataQualityReason = history.length < 7 ? `Only ${history.length} canonical weigh-in day${history.length === 1 ? "" : "s"} found` : "";
+  return { latest, recent, sevenDayAverage, fourteenDayAverage, twentyEightDayAverage, change, changeVsYesterday, changeVsSevenDaysAgo, percentChange, bodyFatChange, trendLabel, dataQualityReason };
 }
 
 function WeightTooltip({ active, payload, label }: Readonly<{ active?: boolean; payload?: Array<{ payload?: WeightChartPoint }>; label?: string }>) {
@@ -5040,6 +5059,7 @@ function WeightTooltip({ active, payload, label }: Readonly<{ active?: boolean; 
       <p className="font-semibold text-white">{label}</p>
       <p className="mt-1 text-xs text-zinc-500">Source: {sourceLabel(point?.source)}</p>
       <p className="mt-2 text-zinc-200">Weight: {formatWeight(point?.bodyweight)}</p>
+      {point?.dailyChange !== null && point?.dailyChange !== undefined ? <p className="text-zinc-400">Daily change: {formatWeightDelta(point.dailyChange)}</p> : null}
       {point?.movingAverage7 ? <p className="text-zinc-400">7-day avg: {formatWeight(point.movingAverage7)}</p> : null}
       {point?.bodyFat !== null && point?.bodyFat !== undefined ? <p className="text-zinc-400">Body fat: {point.bodyFat.toFixed(1)}%</p> : null}
       {point?.leanMass !== null && point?.leanMass !== undefined ? <p className="text-zinc-400">Lean mass: {formatWeight(point.leanMass)}</p> : null}
@@ -5311,7 +5331,15 @@ function RecoveryPage({
                   <p className="mt-1 text-lg font-semibold text-white">{weightTrend.recent.length} / 7</p>
                 </div>
                 <div>
-                  <p className="text-xs text-zinc-500">Change</p>
+                  <p className="text-xs text-zinc-500">Vs yesterday</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.changeVsYesterday)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">Vs 7 days ago</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.changeVsSevenDaysAgo)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">7-day span</p>
                   <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.change)}</p>
                 </div>
                 <div>
@@ -5319,11 +5347,19 @@ function RecoveryPage({
                   <p className="mt-1 text-lg font-semibold text-white">{formatPercentDelta(weightTrend.percentChange)}</p>
                 </div>
                 <div>
+                  <p className="text-xs text-zinc-500">14-day average</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.fourteenDayAverage)}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-zinc-500">28-day average</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.twentyEightDayAverage)}</p>
+                </div>
+                <div>
                   <p className="text-xs text-zinc-500">Body fat change</p>
                   <p className="mt-1 text-lg font-semibold text-white">{formatPercentDelta(weightTrend.bodyFatChange)}</p>
                 </div>
               </div>
-              {weightTrend.recent.length < 2 ? <p className="mt-4 text-sm text-amber-200">Need more weigh-ins</p> : null}
+              {weightTrend.dataQualityReason ? <p className="mt-4 text-sm text-amber-200">{weightTrend.dataQualityReason}</p> : null}
             </div>
             <ChartFrame className="h-64">
               <ResponsiveContainer width="100%" height="100%">
@@ -8904,6 +8940,7 @@ function SettingsPage({
   onConnectStrava,
   onConnectWithings,
   onSyncWithings,
+  onSyncWithingsHistory,
   onTestOpenAI,
   onSyncHevy,
   onImportStrava,
@@ -8921,6 +8958,7 @@ function SettingsPage({
   onConnectStrava: () => void;
   onConnectWithings: () => void;
   onSyncWithings: () => void;
+  onSyncWithingsHistory: () => void;
   onTestOpenAI: () => void;
   onSyncHevy: () => void;
   onImportStrava: () => void;
@@ -8992,6 +9030,9 @@ function SettingsPage({
             </button>
             <button onClick={onSyncWithings} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
               Sync Withings Now
+            </button>
+            <button onClick={onSyncWithingsHistory} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+              Sync Withings History
             </button>
             <button onClick={onClearWithings} disabled={!withingsConnected} className="h-11 rounded-lg border border-red-300/20 px-4 text-sm font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50">
               Disconnect
@@ -9213,6 +9254,16 @@ export default function Home() {
 
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
   const activeNavIndex = Math.max(0, navigation.findIndex((item) => item.id === activePage));
+  const activeNavOffset = activeNavIndex * 48;
+  const [sidebarHighlightOffset, setSidebarHighlightOffset] = useState(0);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      setSidebarHighlightOffset(activeNavOffset);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [activeNavOffset]);
+
   const strengthTrendPath = useCallback((exercise = selectedExercise) => {
     const params = new URLSearchParams();
     if (exercise) {
@@ -10738,6 +10789,20 @@ export default function Home() {
             setApiError(error instanceof Error ? error.message : "Withings sync failed.");
           }
         }}
+        onSyncWithingsHistory={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiSend<WithingsSyncResult>("/api/withings/sync-history", "POST", { days: 3650 });
+            if (result.status === "error") {
+              throw new Error(result.message ?? "Withings history sync failed.");
+            }
+            setMessage(`Withings history sync complete: ${result.imported_measurements} scale measurement(s) imported from ${result.fetched_groups} group(s).`);
+            await refreshAll();
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Withings history sync failed.");
+          }
+        }}
         onClearWithings={async () => {
           setApiError(null);
           setMessage(null);
@@ -10802,14 +10867,11 @@ export default function Home() {
               <p className="text-xs text-zinc-500">Local-first dashboard</p>
             </div>
           </div>
-          <nav
-            className="relative"
-            style={{ "--active-index": activeNavIndex, "--sidebar-tab-step": "3rem" } as CSSProperties}
-          >
+          <nav className="relative">
             <span
               aria-hidden="true"
-              className="accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-transform duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
-              style={{ transform: "translateY(calc(var(--active-index) * var(--sidebar-tab-step)))" }}
+              className="accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-transform duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none"
+              style={{ transform: `translate3d(0, ${sidebarHighlightOffset}px, 0)` }}
             />
             <div className="space-y-2">
               {navigation.map((item) => {

@@ -182,21 +182,27 @@ def _find_metric(metric_id: str) -> dict[str, Any] | None:
 
 
 @router.get("/api/body-metrics")
-def get_body_metrics(limit: int = 1000) -> dict[str, Any]:
+def get_body_metrics(limit: int = 5000) -> dict[str, Any]:
     rows = fetch_json_rows("body_metric_logs", limit=limit, date_field="date")
     if rows and "_db_error" in rows[0]:
         return {"items": [], "status": "error", "error": rows[0]["_db_error"]}
     analytics_rows = [row for row in rows if not _is_excluded(row)]
     raw_items = _sort_by_date([_public_metric(row) for row in analytics_rows])
     canonical_items = _canonical_public_metrics(analytics_rows)
+    debug = canonical_bodyweight_debug(rows)
     return {
         "items": canonical_items,
         "canonical_items": canonical_items,
         "raw_items": raw_items,
         "body_comp_trends": _body_comp_trends(canonical_items),
         "excluded_raw_count": len(rows) - len(analytics_rows),
+        "raw_body_metric_rows": debug.get("raw_body_metric_rows", len(rows)),
+        "canonical_daily_weight_rows": debug.get("canonical_daily_weight_rows", len(canonical_items)),
+        "date_min": debug.get("date_min", ""),
+        "date_max": debug.get("date_max", ""),
+        "rule": "lowest_weight_per_day",
         "status": "ok",
-        "debug": canonical_bodyweight_debug(rows),
+        "debug": debug,
     }
 
 

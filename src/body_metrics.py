@@ -144,8 +144,16 @@ def canonical_bodyweight_debug(body_metrics_df) -> dict:
     if raw.empty or "date" not in raw.columns or "bodyweight" not in raw.columns:
         return {
             "raw_body_metric_row_count": int(len(raw)),
+            "raw_body_metric_rows": int(len(raw)),
             "canonical_daily_weight_count": 0,
+            "canonical_daily_weight_rows": 0,
             "dates_with_multiple_weigh_ins": 0,
+            "dates_with_multiple_weighins": 0,
+            "dropped_invalid_rows": 0,
+            "withings_rows": 0,
+            "manual_rows": 0,
+            "date_min": "",
+            "date_max": "",
             "rule": "lowest_weight_per_day",
         }
     prepared = raw.copy()
@@ -154,17 +162,33 @@ def canonical_bodyweight_debug(body_metrics_df) -> dict:
         excluded = prepared["excluded_from_analytics"].fillna(False).astype(str).str.lower().isin({"true", "1", "yes"})
         excluded_count = int(excluded.sum())
         prepared = prepared[~excluded].copy()
+    source_series = prepared.get("source", pd.Series("", index=prepared.index)).fillna("").astype(str).str.lower()
+    notes_series = prepared.get("notes", pd.Series("", index=prepared.index)).fillna("").astype(str).str.lower()
+    withings_mask = source_series.str.contains("withings") | notes_series.str.contains("source=withings")
+    manual_rows = int((~withings_mask).sum())
     prepared["date"] = pd.to_datetime(prepared["date"], errors="coerce").dt.normalize()
     prepared["bodyweight"] = pd.to_numeric(prepared["bodyweight"], errors="coerce")
+    candidate_count = int(len(prepared))
     prepared = prepared.dropna(subset=["date", "bodyweight"])
     prepared = prepared[prepared["bodyweight"] > 0]
+    dropped_invalid = candidate_count - int(len(prepared))
     counts = prepared.groupby("date").size() if not prepared.empty else pd.Series(dtype=int)
     canonical = canonical_daily_bodyweights(prepared)
+    date_min = prepared["date"].min().date().isoformat() if not prepared.empty else ""
+    date_max = prepared["date"].max().date().isoformat() if not prepared.empty else ""
     return {
         "raw_body_metric_row_count": int(len(raw)),
+        "raw_body_metric_rows": int(len(raw)),
         "valid_bodyweight_row_count": int(len(prepared)),
         "canonical_daily_weight_count": int(len(canonical)),
+        "canonical_daily_weight_rows": int(len(canonical)),
         "dates_with_multiple_weigh_ins": int((counts > 1).sum()),
+        "dates_with_multiple_weighins": int((counts > 1).sum()),
+        "dropped_invalid_rows": int(dropped_invalid),
+        "withings_rows": int(withings_mask.sum()),
+        "manual_rows": manual_rows,
+        "date_min": date_min,
+        "date_max": date_max,
         "rule": "lowest_weight_per_day",
         "excluded_from_analytics_count": excluded_count,
     }

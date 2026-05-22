@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -24,7 +25,8 @@ WITHINGS_AUTH_URL = "https://account.withings.com/oauth2_user/authorize2"
 WITHINGS_TOKEN_URL = "https://wbsapi.withings.net/v2/oauth2"
 WITHINGS_MEASURE_URL = "https://wbsapi.withings.net/measure"
 WITHINGS_SCOPES = "user.metrics"
-DEFAULT_SYNC_DAYS = 90
+DEFAULT_SYNC_DAYS = 365
+DEFAULT_HISTORY_SYNC_DAYS = 3650
 TOKEN_EXPIRY_BUFFER_SECONDS = 300
 
 KG_TO_LB = 2.2046226218
@@ -63,6 +65,15 @@ class WithingsReconnectRequired(WithingsIntegrationError):
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _local_timezone() -> ZoneInfo:
+    name = os.getenv("APP_TIMEZONE", "").strip() or os.getenv("TIMEZONE", "").strip() or os.getenv("TZ", "").strip() or "America/Los_Angeles"
+    try:
+        return ZoneInfo(name)
+    except Exception:
+        logger.warning("Invalid timezone %s for Withings sync; falling back to America/Los_Angeles.", name)
+        return ZoneInfo("America/Los_Angeles")
 
 
 def _read_dotenv_value(key: str) -> str:
@@ -299,7 +310,9 @@ def _date_to_timestamp(date_value: str | None, fallback: datetime) -> int:
     if not date_value:
         return int(fallback.timestamp())
     try:
-        parsed = datetime.fromisoformat(str(date_value)).replace(tzinfo=timezone.utc)
+        parsed = datetime.fromisoformat(str(date_value))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=_local_timezone())
     except ValueError:
         return int(fallback.timestamp())
     return int(parsed.timestamp())
@@ -380,6 +393,7 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
         if not weight_lb or not weight_kg:
             continue
         measured_at = datetime.fromtimestamp(int(group.get("date", 0) or 0), tz=timezone.utc)
+        measured_local = measured_at.astimezone(_local_timezone())
         fat_percent = parsed.get("body_fat_percent")
         fat_mass_lb = parsed.get("fat_mass_lb")
         if fat_mass_lb is None and fat_percent is not None:
@@ -393,6 +407,7 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
             "source=withings",
             f"withings_measure_group_id={source_id}",
             f"measured_at={measured_at.isoformat()}",
+            f"measured_local={measured_local.isoformat()}",
             f"bodyweight_kg={weight_kg:.3f}",
         ]
         if parsed.get("fat_mass_kg") is not None:
@@ -407,7 +422,7 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
             notes.append(f"bmi={bmi:.2f}")
         rows.append(
             {
-                "date": measured_at.date().isoformat(),
+                "date": measured_local.date().isoformat(),
                 "bodyweight": weight_lb,
                 "waist": None,
                 "estimated_body_fat": round(float(fat_percent), 2) if fat_percent is not None else None,
@@ -426,9 +441,10 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
     return rows
 
 
-def sync_withings_measurements(days: int | None = None, start_date: str | None = None, end_date: str | None = None) -> dict:
+def sync_withings_measurements(days: int | None = None, start_date: str | None = None, end_date: str | None = None, history: bool = False) -> dict:
     end_dt = datetime.now(timezone.utc)
-    lookback_days = int(days or os.getenv("WITHINGS_SYNC_LOOKBACK_DAYS", str(DEFAULT_SYNC_DAYS)) or DEFAULT_SYNC_DAYS)
+    default_days = DEFAULT_HISTORY_SYNC_DAYS if history else DEFAULT_SYNC_DAYS
+    lookback_days = int(days or os.getenv("WITHINGS_SYNC_LOOKBACK_DAYS", str(default_days)) or default_days)
     start_dt = end_dt - timedelta(days=max(1, lookback_days))
     start_ts = _date_to_timestamp(start_date, start_dt)
     end_ts = _date_to_timestamp(end_date, end_dt)
@@ -469,6 +485,8 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
             "last_created_count": result["created"],
             "last_updated_count": result["updated"],
             "last_fetched_groups": len(measure_groups),
+            "last_requested_days": lookback_days,
+            "last_history_sync": bool(history),
             "latest_measure_date": latest_date,
             "latest_measurement_date": latest_date,
             "needs_reconnect": False,
@@ -480,6 +498,10 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         "created_measurements": result["created"],
         "updated_measurements": result["updated"],
         "fetched_groups": len(measure_groups),
+        "requested_days": lookback_days,
+        "start_date": datetime.fromtimestamp(start_ts, tz=timezone.utc).date().isoformat(),
+        "end_date": datetime.fromtimestamp(end_ts, tz=timezone.utc).date().isoformat(),
+        "history_sync": bool(history),
         "latest_measure_date": latest_date,
         "latest_measurement_date": latest_date,
         "last_synced_at": sync.get("last_synced_at", ""),
