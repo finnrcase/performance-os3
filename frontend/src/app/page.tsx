@@ -1175,27 +1175,45 @@ type FoodAiFlowStep = {
   message: string;
 };
 
+type FoodAiDebugState = {
+  analyzeEndpoint?: string;
+  analyzeRequestBody?: Record<string, unknown>;
+  analyzeResponseStatus?: string;
+  analyzeResponseMs?: number;
+  parsedItemCount?: number;
+  logEndpoint?: string;
+  logRequestBody?: Record<string, unknown>;
+  logInsertStatus?: string;
+  logCreated?: number;
+  logRequested?: number;
+  refreshEndpoint?: string;
+  refreshStatus?: string;
+  refreshCalories?: number;
+  exactError?: string;
+  updatedAt?: string;
+};
+
 type FoodAnalyzeItem = {
-    name: string;
-    display_name?: string;
-    normalized_name?: string;
-    original_text: string;
-    quantity: number | null;
-    unit: string;
-    serving_description: string;
-    calories: number;
-    protein_g: number;
-    carbs_g: number;
-    fat_g: number;
-    fiber_g: number | null;
-    sugar_g: number | null;
-    sodium_mg: number | null;
-    confidence: "low" | "medium" | "high" | string;
-    source: "usda_fdc" | "existing_database" | "openai_estimate" | "web_source" | string;
-    source_id: string | null;
-    source_url: string | null;
-    assumptions: string[];
-    needs_review: boolean;
+  name: string;
+  display_name?: string;
+  normalized_name?: string;
+  original_text: string;
+  quantity: number | null;
+  unit: string;
+  serving_description: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+  confidence: "low" | "medium" | "high" | string;
+  source: "usda_fdc" | "existing_database" | "openai_estimate" | "web_source" | string;
+  source_id: string | null;
+  source_url: string | null;
+  assumptions: string[];
+  needs_review: boolean;
 };
 
 type FoodAnalyzeTotals = {
@@ -4027,6 +4045,7 @@ function FoodPage({
   parseLoading,
   parseResult,
   foodAiFlow,
+  foodAiDebug,
   manualSaving,
   manualError,
   aiParsingConfigured,
@@ -4078,6 +4097,7 @@ function FoodPage({
   parseLoading: boolean;
   parseResult: FoodParseResponse | null;
   foodAiFlow: FoodAiFlowStep[];
+  foodAiDebug: FoodAiDebugState | null;
   manualSaving: boolean;
   manualError: string | null;
   aiParsingConfigured: boolean;
@@ -4703,6 +4723,30 @@ function FoodPage({
                   </div>
                 ))}
               </div>
+            </div>
+          ) : null}
+          {foodAiDebug ? (
+            <div className="mt-4 rounded-lg border border-violet-300/20 bg-violet-300/[0.07] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200">Temporary parser debug</p>
+              <div className="mt-3 grid gap-2 text-xs leading-5 text-zinc-300 sm:grid-cols-2">
+                <p><span className="font-semibold text-white">Endpoint:</span> {foodAiDebug.analyzeEndpoint || "not called"}</p>
+                <p><span className="font-semibold text-white">Response:</span> {foodAiDebug.analyzeResponseStatus || "pending"}</p>
+                <p><span className="font-semibold text-white">Parsed items:</span> {foodAiDebug.parsedItemCount ?? 0}</p>
+                <p><span className="font-semibold text-white">Log insert:</span> {foodAiDebug.logInsertStatus || "not started"}</p>
+                <p><span className="font-semibold text-white">Saved rows:</span> {foodAiDebug.logCreated ?? 0}{foodAiDebug.logRequested !== undefined ? ` / ${foodAiDebug.logRequested}` : ""}</p>
+                <p><span className="font-semibold text-white">Refresh:</span> {foodAiDebug.refreshStatus || "not started"}</p>
+              </div>
+              {foodAiDebug.exactError ? (
+                <p className="mt-3 rounded-lg border border-red-300/25 bg-red-300/10 p-2 text-xs text-red-100">
+                  {foodAiDebug.exactError}
+                </p>
+              ) : null}
+              <details className="mt-3">
+                <summary className="cursor-pointer text-xs font-semibold text-violet-100">Request/response details</summary>
+                <pre className="mt-2 max-h-72 overflow-auto rounded-lg border border-white/10 bg-zinc-950/70 p-3 text-xs leading-5 text-zinc-300">
+                  {JSON.stringify(foodAiDebug, null, 2)}
+                </pre>
+              </details>
             </div>
           ) : null}
           {parsedFoods.length ? (
@@ -9283,6 +9327,7 @@ export default function Home() {
   const [parsedFoods, setParsedFoods] = useState<ParsedFood[]>([]);
   const [parseResult, setParseResult] = useState<FoodParseResponse | null>(null);
   const [foodAiFlow, setFoodAiFlow] = useState<FoodAiFlowStep[]>([]);
+  const [foodAiDebug, setFoodAiDebug] = useState<FoodAiDebugState | null>(null);
   const [parseLoading, setParseLoading] = useState(false);
   const [manualFoodMode, setManualFoodMode] = useState<"direct" | "serving">("direct");
   const [servingForm, setServingForm] = useState<ServingScaleForm>({
@@ -9795,16 +9840,26 @@ export default function Home() {
     setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts", SETTINGS_API_TIMEOUT_MS));
   }, []);
 
-  const submitFoodAndRefreshToday = useCallback(async (event: FormEvent, action: () => Promise<void>, success: string, date = forms.nutrition.date) => {
+  const submitFoodAndRefreshToday = useCallback(async (
+    event: FormEvent,
+    action: () => Promise<void>,
+    success: string,
+    date = forms.nutrition.date,
+    afterRefresh?: (payload: NutritionTodayResponse) => void,
+    onFailure?: (message: string) => void,
+  ) => {
     event.preventDefault();
     setMessage(null);
     setApiError(null);
     try {
       await action();
-      await refreshTodayFoodOnly(date);
+      const payload = await refreshTodayFoodOnly(date);
+      afterRefresh?.(payload);
       setMessage(success);
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : "Food update failed.");
+      const message = error instanceof Error ? error.message : "Food update failed.";
+      onFailure?.(message);
+      setApiError(message);
     }
   }, [forms.nutrition.date, refreshTodayFoodOnly]);
 
@@ -10130,6 +10185,14 @@ export default function Home() {
     setFoodAiFlow((items) => [...items.filter((item) => item.step !== step), { step, status, message }]);
   };
 
+  const updateFoodAiDebug = (patch: FoodAiDebugState) => {
+    setFoodAiDebug((current) => ({
+      ...(current ?? {}),
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    }));
+  };
+
   const draftFromAnalyzeItem = (item: FoodAnalyzeItem): ParsedFood => ({
     food_name: item.display_name || item.name,
     display_name: item.display_name || item.name,
@@ -10198,34 +10261,36 @@ export default function Home() {
     });
   };
 
-  const saveParsedFoodsToToday = async () => {
+  const parsedFoodsLogPayload = () => ({
+    date: forms.nutrition.date,
+    meal_type: DEFAULT_MEAL_TYPE,
+    items: parsedFoods.map((food) => ({
+      name: food.food_name,
+      original_text: food.original_text ?? food.food_name,
+      quantity: food.quantity_value ?? null,
+      unit: food.unit ?? "",
+      serving_description: food.serving_description ?? food.quantity ?? "",
+      calories: Number(food.calories) || 0,
+      protein_g: Number(food.protein) || 0,
+      carbs_g: Number(food.carbs) || 0,
+      fat_g: Number(food.fat) || 0,
+      fiber_g: food.fiber ?? null,
+      sugar_g: food.sugar ?? null,
+      sodium_mg: food.sodium ?? null,
+      confidence: food.confidence || "medium",
+      source: food.source || "openai_estimate",
+      source_id: food.source_id ?? null,
+      source_url: food.source_url || null,
+      assumptions: food.assumptions ?? [],
+      needs_review: false,
+    })),
+  });
+
+  const saveParsedFoodsToToday = async (payload = parsedFoodsLogPayload()) => {
     if (!parsedFoods.length) {
       throw new Error("No parsed food items are available to save. Run Analyze first.");
     }
-    const response = await apiSend<FoodBulkLogResponse>("/api/food/log-bulk", "POST", {
-      date: forms.nutrition.date,
-      meal_type: DEFAULT_MEAL_TYPE,
-      items: parsedFoods.map((food) => ({
-        name: food.food_name,
-        original_text: food.original_text ?? food.food_name,
-        quantity: food.quantity_value ?? null,
-        unit: food.unit ?? "",
-        serving_description: food.serving_description ?? food.quantity ?? "",
-        calories: Number(food.calories) || 0,
-        protein_g: Number(food.protein) || 0,
-        carbs_g: Number(food.carbs) || 0,
-        fat_g: Number(food.fat) || 0,
-        fiber_g: food.fiber ?? null,
-        sugar_g: food.sugar ?? null,
-        sodium_mg: food.sodium ?? null,
-        confidence: food.confidence || "medium",
-        source: food.source || "openai_estimate",
-        source_id: food.source_id ?? null,
-        source_url: food.source_url || null,
-        assumptions: food.assumptions ?? [],
-        needs_review: false,
-      })),
-    });
+    const response = await apiSend<FoodBulkLogResponse>("/api/food/log-bulk", "POST", payload);
     if (response.status !== "ok") {
       throw new Error(response.message || "Food save failed.");
     }
@@ -10389,6 +10454,7 @@ export default function Home() {
         parseLoading={parseLoading}
         parseResult={parseResult}
         foodAiFlow={foodAiFlow}
+        foodAiDebug={foodAiDebug}
         manualSaving={manualFoodSaving}
         manualError={manualFoodError}
         aiParsingConfigured={Boolean(settings?.services?.openai?.configured ?? (settings?.statuses.openai_api_key === "Configured" || settings?.statuses.openai_api_key === "Connected"))}
@@ -10416,6 +10482,7 @@ export default function Home() {
           submitWithoutRefresh(event, async () => {
             const parseStarted = performance.now();
             setFoodAiFlow([]);
+            setFoodAiDebug(null);
             setParseResult(null);
             setParsedFoods([]);
             updateFoodAiFlowStep("Input", "pending", "Checking text and saved-food matches.");
@@ -10428,9 +10495,16 @@ export default function Home() {
                 throw new Error("Food text must be 4,000 characters or fewer.");
               }
               updateFoodAiFlowStep("Input", "ok", `${cleanedText.length} character(s) ready for analysis.`);
+              updateFoodAiDebug({
+                analyzeEndpoint: "/api/food/analyze-text",
+                analyzeRequestBody: { date: forms.nutrition.date, text: cleanedText },
+                analyzeResponseStatus: "pending",
+                parsedItemCount: 0,
+              });
               const savedMatch = findSavedFoodMatch(cleanedText, shortcutData.items, shortcutData.meal_templates, shortcutData.frequent_foods);
               if (savedMatch && !forceAiParse) {
                 setShortcutSuggestion(savedMatch);
+                updateFoodAiDebug({ exactError: "Saved shortcut matched before AI parsing. Use it or choose Parse new anyway." });
                 updateFoodAiFlowStep("Saved match", "pending", `${savedMatch.label} matched locally. Use it or choose Parse new anyway.`);
                 throw new Error("Saved shortcut found. Use it or choose Parse new anyway.");
               }
@@ -10442,6 +10516,12 @@ export default function Home() {
               const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: cleanedText });
               updateFoodAiFlowStep("Request", "ok", `/api/food/analyze-text responded in ${Math.round(performance.now() - parseStarted)}ms.`);
               const analyzedItems = Array.isArray(analyzed.items) ? analyzed.items : Array.isArray(analyzed.foods) ? analyzed.foods : [];
+              updateFoodAiDebug({
+                analyzeResponseStatus: analyzed.status || (analyzed.success ? "ok" : "error"),
+                analyzeResponseMs: Math.round(performance.now() - parseStarted),
+                parsedItemCount: analyzedItems.length,
+                exactError: analyzed.success ? undefined : (analyzed.message || analyzed.error_code || "Food analysis failed."),
+              });
               if (!Array.isArray(analyzed.items) && !Array.isArray(analyzed.foods)) {
                 throw new Error("Food analysis response did not include an items or foods array.");
               }
@@ -10474,6 +10554,7 @@ export default function Home() {
               }
               updateFoodAiFlowStep("Review", "ok", "Parsed drafts are visible below. Review them, then click Save to today.");
             } catch (error) {
+              updateFoodAiDebug({ exactError: error instanceof Error ? error.message : "Food analysis failed." });
               updateFoodAiFlowStep("Failure", "error", error instanceof Error ? error.message : "Food analysis failed.");
               throw error;
             }
@@ -10482,17 +10563,41 @@ export default function Home() {
         onSaveParsedFoods={(event) =>
           submitFoodAndRefreshToday(event, async () => {
             try {
+              const logPayload = parsedFoodsLogPayload();
               updateFoodAiFlowStep("Save", "pending", `POST /api/food/log-bulk with ${parsedFoods.length} parsed item(s).`);
-              const result = await saveParsedFoodsToToday();
+              updateFoodAiDebug({
+                logEndpoint: "/api/food/log-bulk",
+                logRequestBody: logPayload,
+                logInsertStatus: "pending",
+                logRequested: logPayload.items.length,
+              });
+              const result = await saveParsedFoodsToToday(logPayload);
+              updateFoodAiDebug({
+                logInsertStatus: result.status,
+                logCreated: result.created,
+                logRequested: result.requested ?? logPayload.items.length,
+                refreshEndpoint: `/api/nutrition/today?date=${encodeURIComponent(forms.nutrition.date || todayString())}`,
+                refreshStatus: "pending",
+              });
               updateFoodAiFlowStep("Save", "ok", `Saved ${result.created} parsed item(s) to food_logs. Today's totals refresh next.`);
               setParsedFoods([]);
               setParseResult(null);
               setAiText("");
             } catch (error) {
+              updateFoodAiDebug({ logInsertStatus: "error", exactError: error instanceof Error ? error.message : "Could not save parsed food items." });
               updateFoodAiFlowStep("Save", "error", error instanceof Error ? error.message : "Could not save parsed food items.");
               throw error;
             }
-          }, "Confirmed parsed food entries saved.")
+          }, "Confirmed parsed food entries saved.", forms.nutrition.date, (payload) => {
+            updateFoodAiDebug({
+              refreshStatus: "ok",
+              refreshCalories: Number(payload.totals?.calories) || 0,
+            });
+            updateFoodAiFlowStep("Refresh", "ok", `Today's nutrition refreshed: ${Math.round(Number(payload.totals?.calories) || 0)} kcal.`);
+          }, (message) => {
+            updateFoodAiDebug({ refreshStatus: "error", exactError: message });
+            updateFoodAiFlowStep("Failure", "error", message);
+          })
         }
         onSaveShortcut={(event) =>
           submitWithoutRefresh(event, async () => {
