@@ -872,9 +872,9 @@ def _api_totals(items: list[dict]) -> dict:
     return totals
 
 
-def analyze_food_text(food_text: str, *, image_data_url: str | None = None) -> dict:
+def analyze_food_text(food_text: str, *, image_data_url: str | None = None, force_openai: bool = False) -> dict:
     """Return the richer Food tab analyze response shape."""
-    parsed = parse_food_text(food_text, image_data_url=image_data_url)
+    parsed = parse_food_text(food_text, image_data_url=image_data_url, force_openai=force_openai)
     warnings = []
     api_items = []
     for food in parsed.get("foods", []):
@@ -904,18 +904,27 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None) -> d
                 warnings.append(f"Review {normalized['food_name']}: no confident nutrition database match was found.")
         api_items.append(_food_to_api_item(normalized))
 
+    totals = _api_totals(api_items)
     return {
         "items": api_items,
-        "totals": _api_totals(api_items),
+        "foods": api_items,
+        "totals": totals,
+        "total": totals,
         "warnings": warnings,
+        "source": parsed.get("source", ""),
+        "cached": bool(parsed.get("cached", False)),
         "success": bool(parsed.get("success")),
         "message": parsed.get("message", ""),
         "error_code": parsed.get("error_code"),
-        "debug": parsed.get("debug", {}),
+        "debug": {
+            **(parsed.get("debug", {}) if isinstance(parsed.get("debug"), dict) else {}),
+            "parser_source": parsed.get("source", ""),
+            "parser_cached": bool(parsed.get("cached", False)),
+        },
     }
 
 
-def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dict:
+def parse_food_text(food_text: str, *, image_data_url: str | None = None, force_openai: bool = False) -> dict:
     """Parse natural-language food text into structured editable food rows."""
     cleaned_text = str(food_text or "").strip()
     if not cleaned_text and not image_data_url:
@@ -929,7 +938,7 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dic
         )
 
     query = _normalize_query(cleaned_text)
-    if not image_data_url:
+    if not image_data_url and not force_openai:
         local_match = _local_saved_food_response(cleaned_text)
         if local_match:
             return local_match
@@ -963,7 +972,7 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dic
             message=f"Parsed with {food_analysis_model()}. Review before saving.",
         )
         result = _verify_uncertain_foods(result)
-        if not image_data_url:
+        if not image_data_url and not force_openai:
             _cache_result(query, result)
         return result
     except AuthenticationError as exc:

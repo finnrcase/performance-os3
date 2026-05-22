@@ -132,9 +132,16 @@ def _food_ai_response(
     totals = _food_ai_totals(items, result.get("totals") if isinstance(result.get("totals"), dict) else result.get("total"))
     debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
     success = bool(result.get("success")) and bool(items)
+    parser_source = str(result.get("source") or debug.get("parser_source") or "")
+    parser_cached = bool(result.get("cached", debug.get("parser_cached", False)))
+    openai_called = parser_source == "openai" and not parser_cached
     merged_steps = {
         **steps,
         "parser_returned": True,
+        "openai_called": openai_called,
+        "model_used": analyzer_config.get("model"),
+        "raw_items_count": len(raw_items) if isinstance(raw_items, list) else 0,
+        "normalized_items_count": len(items),
         "json_parse_success": bool(success),
         "returned_items": len(items),
         "duration_ms": round((time.perf_counter() - started) * 1000, 1),
@@ -154,6 +161,9 @@ def _food_ai_response(
             **analyzer_config,
             **debug,
             "backend_endpoint_reached": True,
+            "parser_source": parser_source,
+            "parser_cached": parser_cached,
+            "openai_called": openai_called,
             "failed_step": debug.get("failed_step") or (None if success else debug.get("parsing_status") or "parse"),
             "duration_ms": merged_steps["duration_ms"],
         },
@@ -739,7 +749,8 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
 def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     text = str((payload or {}).get("text") or "").strip()
-    steps: dict[str, Any] = {"route_entered": True, "text_length": len(text)}
+    force_openai = bool((payload or {}).get("force_openai"))
+    steps: dict[str, Any] = {"route_entered": True, "text_length": len(text), "force_openai": force_openai}
     logger.info("[food_ai] route_entered endpoint=/api/food/analyze-text")
     logger.info("[food_ai] text_length=%s", len(text))
     try:
@@ -773,7 +784,7 @@ def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
         )
     try:
         logger.info("[food_ai] parser_request_start")
-        result = analyze_text(text)
+        result = analyze_text(text, force_openai=force_openai)
         response = _food_ai_response(result, analyzer_config, steps, started)
         logger.info(
             "[food_ai] parser_success model=%s fallback_model_used=%s success=%s error_code=%s",
@@ -801,16 +812,42 @@ def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
 @router.post("/api/debug/food-parser-test")
 def debug_food_parser_test(payload: dict[str, Any]) -> dict[str, Any]:
     text = str((payload or {}).get("text") or "").strip() or "banana and protein shake"
-    result = analyze_food_text({"text": text})
+    request_body = {"text": text}
+    route_payload = {**request_body, "force_openai": True}
+    result = analyze_food_text(route_payload)
     debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
+    steps = result.get("steps") if isinstance(result.get("steps"), dict) else {}
+    items = result.get("items") if isinstance(result.get("items"), list) else []
+    foods = result.get("foods") if isinstance(result.get("foods"), list) else items
+    diagnostic = {
+        "endpoint_called": "/api/food/analyze-text",
+        "request_body_received": request_body,
+        "diagnostic_force_openai": True,
+        "openai_called": bool(steps.get("openai_called") or debug.get("openai_called")),
+        "model_used": steps.get("model_used") or debug.get("model") or "",
+        "raw_items_count": int(steps.get("raw_items_count") or len(foods)),
+        "normalized_items_count": int(steps.get("normalized_items_count") or len(items)),
+        "response_shape": {
+            "keys": sorted(str(key) for key in result.keys()),
+            "has_items": isinstance(result.get("items"), list),
+            "has_foods": isinstance(result.get("foods"), list),
+            "has_totals": isinstance(result.get("totals"), dict),
+            "has_total": isinstance(result.get("total"), dict),
+            "status": result.get("status") or ("ok" if result.get("success") else "error"),
+        },
+        "frontend_received_items": False,
+        "log_insert_attempted": False,
+        "log_insert_success": False,
+    }
     return {
         "status": result.get("status") or ("ok" if result.get("success") else "error"),
         "openai_connected": bool(debug.get("openai_key_configured")) and result.get("status") == "ok",
-        "items": result.get("items") or [],
-        "foods": result.get("foods") or result.get("items") or [],
+        **diagnostic,
+        "items": items,
+        "foods": foods,
         "totals": result.get("totals") or FOOD_AI_EMPTY_TOTALS,
         "raw_model_excerpt": "",
-        "steps": result.get("steps") or {},
+        "steps": steps,
         "debug": debug,
         "message": result.get("message") or "",
         "error_code": result.get("error_code"),

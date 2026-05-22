@@ -1166,6 +1166,9 @@ type FoodParseResponse = {
     error_type?: string;
     message?: string;
     duration_ms?: number;
+    openai_called?: boolean;
+    parser_source?: string;
+    parser_cached?: boolean;
   };
 };
 
@@ -1176,6 +1179,17 @@ type FoodAiFlowStep = {
 };
 
 type FoodAiDebugState = {
+  endpoint_called?: string;
+  request_body_received?: Record<string, unknown>;
+  diagnostic_force_openai?: boolean;
+  openai_called?: boolean;
+  model_used?: string;
+  raw_items_count?: number;
+  normalized_items_count?: number;
+  response_shape?: Record<string, unknown>;
+  frontend_received_items?: boolean;
+  log_insert_attempted?: boolean;
+  log_insert_success?: boolean;
   analyzeEndpoint?: string;
   analyzeRequestBody?: Record<string, unknown>;
   analyzeResponseStatus?: string;
@@ -1191,6 +1205,28 @@ type FoodAiDebugState = {
   refreshCalories?: number;
   exactError?: string;
   updatedAt?: string;
+};
+
+type FoodParserDiagnosticResponse = {
+  status: "ok" | "error" | string;
+  endpoint_called: string;
+  request_body_received: Record<string, unknown>;
+  diagnostic_force_openai?: boolean;
+  openai_called: boolean;
+  model_used: string;
+  raw_items_count: number;
+  normalized_items_count: number;
+  response_shape: Record<string, unknown>;
+  frontend_received_items: boolean;
+  log_insert_attempted: boolean;
+  log_insert_success: boolean;
+  items: FoodAnalyzeItem[];
+  foods?: FoodAnalyzeItem[];
+  totals?: FoodAnalyzeTotals;
+  message?: string;
+  error_code?: string | null;
+  steps?: Record<string, unknown>;
+  debug?: FoodParseResponse["debug"] & Record<string, unknown>;
 };
 
 type FoodAnalyzeItem = {
@@ -4729,7 +4765,15 @@ function FoodPage({
             <div className="mt-4 rounded-lg border border-violet-300/20 bg-violet-300/[0.07] p-3">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200">Temporary parser debug</p>
               <div className="mt-3 grid gap-2 text-xs leading-5 text-zinc-300 sm:grid-cols-2">
-                <p><span className="font-semibold text-white">Endpoint:</span> {foodAiDebug.analyzeEndpoint || "not called"}</p>
+                <p><span className="font-semibold text-white">endpoint_called:</span> {foodAiDebug.endpoint_called || foodAiDebug.analyzeEndpoint || "not called"}</p>
+                <p><span className="font-semibold text-white">diagnostic_force_openai:</span> {foodAiDebug.diagnostic_force_openai === undefined ? "false" : String(foodAiDebug.diagnostic_force_openai)}</p>
+                <p><span className="font-semibold text-white">openai_called:</span> {foodAiDebug.openai_called === undefined ? "unknown" : String(foodAiDebug.openai_called)}</p>
+                <p><span className="font-semibold text-white">model_used:</span> {foodAiDebug.model_used || "unknown"}</p>
+                <p><span className="font-semibold text-white">raw_items_count:</span> {foodAiDebug.raw_items_count ?? "unknown"}</p>
+                <p><span className="font-semibold text-white">normalized_items_count:</span> {foodAiDebug.normalized_items_count ?? foodAiDebug.parsedItemCount ?? 0}</p>
+                <p><span className="font-semibold text-white">frontend_received_items:</span> {foodAiDebug.frontend_received_items === undefined ? "unknown" : String(foodAiDebug.frontend_received_items)}</p>
+                <p><span className="font-semibold text-white">log_insert_attempted:</span> {foodAiDebug.log_insert_attempted === undefined ? "false" : String(foodAiDebug.log_insert_attempted)}</p>
+                <p><span className="font-semibold text-white">log_insert_success:</span> {foodAiDebug.log_insert_success === undefined ? "false" : String(foodAiDebug.log_insert_success)}</p>
                 <p><span className="font-semibold text-white">Response:</span> {foodAiDebug.analyzeResponseStatus || "pending"}</p>
                 <p><span className="font-semibold text-white">Parsed items:</span> {foodAiDebug.parsedItemCount ?? 0}</p>
                 <p><span className="font-semibold text-white">Log insert:</span> {foodAiDebug.logInsertStatus || "not started"}</p>
@@ -10496,6 +10540,11 @@ export default function Home() {
               }
               updateFoodAiFlowStep("Input", "ok", `${cleanedText.length} character(s) ready for analysis.`);
               updateFoodAiDebug({
+                endpoint_called: "/api/food/analyze-text",
+                request_body_received: { date: forms.nutrition.date, text: cleanedText },
+                frontend_received_items: false,
+                log_insert_attempted: false,
+                log_insert_success: false,
                 analyzeEndpoint: "/api/food/analyze-text",
                 analyzeRequestBody: { date: forms.nutrition.date, text: cleanedText },
                 analyzeResponseStatus: "pending",
@@ -10519,6 +10568,18 @@ export default function Home() {
               updateFoodAiDebug({
                 analyzeResponseStatus: analyzed.status || (analyzed.success ? "ok" : "error"),
                 analyzeResponseMs: Math.round(performance.now() - parseStarted),
+                openai_called: Boolean(analyzed.steps?.openai_called ?? analyzed.debug?.openai_called),
+                model_used: String(analyzed.steps?.model_used || analyzed.debug?.model || "unknown"),
+                raw_items_count: Number(analyzed.steps?.raw_items_count ?? analyzedItems.length),
+                normalized_items_count: analyzedItems.length,
+                response_shape: {
+                  has_items: Array.isArray(analyzed.items),
+                  has_foods: Array.isArray(analyzed.foods),
+                  has_totals: Boolean(analyzed.totals),
+                  has_total: Boolean(analyzed.total),
+                  status: analyzed.status || (analyzed.success ? "ok" : "error"),
+                },
+                frontend_received_items: analyzedItems.length > 0,
                 parsedItemCount: analyzedItems.length,
                 exactError: analyzed.success ? undefined : (analyzed.message || analyzed.error_code || "Food analysis failed."),
               });
@@ -10568,11 +10629,14 @@ export default function Home() {
               updateFoodAiDebug({
                 logEndpoint: "/api/food/log-bulk",
                 logRequestBody: logPayload,
+                log_insert_attempted: true,
+                log_insert_success: false,
                 logInsertStatus: "pending",
                 logRequested: logPayload.items.length,
               });
               const result = await saveParsedFoodsToToday(logPayload);
               updateFoodAiDebug({
+                log_insert_success: result.status === "ok",
                 logInsertStatus: result.status,
                 logCreated: result.created,
                 logRequested: result.requested ?? logPayload.items.length,
@@ -10584,7 +10648,7 @@ export default function Home() {
               setParseResult(null);
               setAiText("");
             } catch (error) {
-              updateFoodAiDebug({ logInsertStatus: "error", exactError: error instanceof Error ? error.message : "Could not save parsed food items." });
+              updateFoodAiDebug({ log_insert_success: false, logInsertStatus: "error", exactError: error instanceof Error ? error.message : "Could not save parsed food items." });
               updateFoodAiFlowStep("Save", "error", error instanceof Error ? error.message : "Could not save parsed food items.");
               throw error;
             }
@@ -11083,18 +11147,83 @@ export default function Home() {
           }
         }}
         onTestOpenAI={async () => {
+          const path = "/api/debug/food-parser-test";
+          const body = { text: "banana and protein shake" };
+          const timestamp = new Date().toISOString();
+          const started = performance.now();
           setApiError(null);
           setMessage(null);
+          recordStartupDebug({
+            key: "food_parser_diagnostic",
+            label: "Food parser diagnostic",
+            path,
+            required: false,
+            status: "pending",
+            httpStatus: null,
+            backendLabel: publicApiBaseLabel(),
+            timestamp,
+          });
           try {
-            const result = await apiGet<OpenAIDebugResponse>("/api/debug/openai", SETTINGS_API_TIMEOUT_MS);
-            if (result.test_status !== "ok") {
-              throw new Error(result.message || result.error_type || "OpenAI test failed.");
+            const result = await apiSend<FoodParserDiagnosticResponse>(path, "POST", body);
+            const durationMs = Math.round(performance.now() - started);
+            const frontendReceivedItems = Array.isArray(result.items) && result.items.length > 0;
+            const diagnostic = {
+              ...result,
+              frontend_received_items: frontendReceivedItems,
+              log_insert_attempted: false,
+              log_insert_success: false,
+            };
+            recordStartupDebug({
+              key: "food_parser_diagnostic",
+              label: "Food parser diagnostic",
+              path,
+              required: false,
+              status: result.status === "ok" && frontendReceivedItems ? "ok" : "error",
+              httpStatus: 200,
+              durationMs,
+              errorMessage: result.status === "ok" && frontendReceivedItems ? undefined : result.message || result.error_code || "Food parser returned no items.",
+              responseText: JSON.stringify(diagnostic, null, 2).slice(0, 2000),
+              backendLabel: publicApiBaseLabel(),
+              timestamp: new Date().toISOString(),
+            });
+            setFoodAiDebug({
+              endpoint_called: result.endpoint_called,
+              request_body_received: result.request_body_received,
+              diagnostic_force_openai: result.diagnostic_force_openai,
+              openai_called: result.openai_called,
+              model_used: result.model_used,
+              raw_items_count: result.raw_items_count,
+              normalized_items_count: result.normalized_items_count,
+              response_shape: result.response_shape,
+              frontend_received_items: frontendReceivedItems,
+              log_insert_attempted: false,
+              log_insert_success: false,
+              analyzeEndpoint: result.endpoint_called,
+              analyzeRequestBody: result.request_body_received,
+              analyzeResponseStatus: result.status,
+              parsedItemCount: result.items?.length ?? 0,
+              exactError: result.status === "ok" && frontendReceivedItems ? undefined : result.message || result.error_code || "Food parser returned no items.",
+            });
+            if (result.status !== "ok" || !frontendReceivedItems) {
+              throw new Error(result.message || result.error_code || "Food parser returned no items.");
             }
-            const latencyValue = result.response_ms ?? result.latency_ms;
-            const latency = latencyValue ? ` in ${Math.round(latencyValue)}ms` : "";
-            setMessage(`OpenAI test passed with ${result.model || "configured model"}${latency}. Food Analyze is ready.`);
+            setMessage(`Food parser diagnostic passed: ${result.normalized_items_count} item(s) from ${result.endpoint_called}. OpenAI called: ${String(result.openai_called)}.`);
           } catch (error) {
-            setApiError(error instanceof Error ? error.message : "OpenAI parser test failed.");
+            const durationMs = Math.round(performance.now() - started);
+            const message = error instanceof Error ? error.message : "OpenAI parser test failed.";
+            recordStartupDebug({
+              key: "food_parser_diagnostic",
+              label: "Food parser diagnostic",
+              path,
+              required: false,
+              status: "error",
+              httpStatus: null,
+              durationMs,
+              errorMessage: message,
+              backendLabel: publicApiBaseLabel(),
+              timestamp: new Date().toISOString(),
+            });
+            setApiError(message);
           }
         }}
         onSubmit={(event) =>

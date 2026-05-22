@@ -26,10 +26,12 @@ def test_openai_config_agrees_across_settings_status_and_analyzer_when_configure
         "items": [],
         "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
         "warnings": [],
+        "source": "openai",
+        "cached": False,
         "message": "Parsed with gpt-5.5. Review before saving.",
         "success": True,
         "error_code": None,
-        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-5.5", "parsing_status": "success"},
+        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-5.5", "parsing_status": "success", "parser_source": "openai", "parser_cached": False},
     }
     with (
         patch("src.ai.food_parser.openai_analyzer_config", return_value=config),
@@ -272,10 +274,12 @@ def test_debug_food_parser_test_uses_same_parser_path():
         ],
         "totals": {"calories": 105, "protein_g": 1.3, "carbs_g": 27, "fat_g": 0.4, "fiber_g": 3, "sugar_g": 14, "sodium_mg": 1},
         "warnings": [],
+        "source": "openai",
+        "cached": False,
         "message": "Parsed with gpt-5.5. Review before saving.",
         "success": True,
         "error_code": None,
-        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-5.5", "parsing_status": "success"},
+        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-5.5", "parsing_status": "success", "parser_source": "openai", "parser_cached": False},
     }
     with (
         patch("src.ai.food_parser.openai_analyzer_config", return_value=config),
@@ -288,6 +292,18 @@ def test_debug_food_parser_test_uses_same_parser_path():
     data = response.json()
     assert data["status"] == "ok"
     assert data["openai_connected"] is True
+    assert data["endpoint_called"] == "/api/food/analyze-text"
+    assert data["request_body_received"] == {"text": "banana and protein shake"}
+    assert data["diagnostic_force_openai"] is True
+    assert data["openai_called"] is True
+    assert data["model_used"] == "gpt-5.5"
+    assert data["raw_items_count"] == 1
+    assert data["normalized_items_count"] == 1
+    assert data["response_shape"]["has_items"] is True
+    assert data["response_shape"]["has_foods"] is True
+    assert data["frontend_received_items"] is False
+    assert data["log_insert_attempted"] is False
+    assert data["log_insert_success"] is False
     assert data["items"][0]["display_name"] == "Banana"
     assert data["steps"]["route_entered"] is True
     assert data["steps"]["returned_items"] == 1
