@@ -907,7 +907,17 @@ type WithingsSyncResult = {
   status: string;
   message?: string;
   imported_measurements: number;
+  created_measurements?: number;
+  updated_measurements?: number;
   fetched_groups: number;
+  withings_measurement_groups?: number;
+  imported_rows?: number;
+  updated_rows?: number;
+  skipped_rows?: number;
+  earliest_date?: string;
+  latest_date?: string;
+  pages_fetched?: number;
+  pagination_complete?: boolean;
   latest_measure_date: string;
   last_synced_at: string;
 };
@@ -5166,6 +5176,7 @@ function RecoveryPage({
   setForms,
   onBodySubmit,
   onRecoverySubmit,
+  onSyncWithingsHistory,
 }: Readonly<{
   bodyMetrics: BodyMetricEntry[];
   recoveryLogs: RecoveryEntry[];
@@ -5176,6 +5187,7 @@ function RecoveryPage({
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onBodySubmit: (event: FormEvent) => void;
   onRecoverySubmit: (event: FormEvent) => void;
+  onSyncWithingsHistory: () => void;
 }>) {
   const [bodyCompositionTab, setBodyCompositionTab] = useState<BodyCompositionTab>("weight");
   const weightHistory = useMemo(() => cleanWeightHistory(bodyMetrics), [bodyMetrics]);
@@ -5292,6 +5304,11 @@ function RecoveryPage({
 
       <Card>
         <SectionHeader eyebrow="Withings" title="Body Composition Snapshot" />
+        <div className="mb-4 flex justify-end">
+          <button onClick={onSyncWithingsHistory} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+            Sync Withings History
+          </button>
+        </div>
         {withingsHistory.length ? (
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -10569,6 +10586,21 @@ export default function Home() {
             setForms((state) => ({ ...state, recovery: { ...initialForms.recovery, date: todayString() } }));
           }, "Recovery check-in saved.")
         }
+        onSyncWithingsHistory={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiSend<WithingsSyncResult>("/api/withings/sync-history", "POST", { days: 3650 });
+            if (result.status === "error") {
+              throw new Error(result.message ?? "Withings history sync failed.");
+            }
+            const dateRange = result.earliest_date && result.latest_date ? ` (${result.earliest_date} to ${result.latest_date})` : "";
+            setMessage(`Withings history sync complete: ${result.imported_measurements} scale measurement(s) imported or updated from ${result.fetched_groups} group(s)${dateRange}.`);
+            await refreshAll();
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Withings history sync failed.");
+          }
+        }}
       />
     ),
     training: (
@@ -10783,7 +10815,7 @@ export default function Home() {
             if (result.status === "error") {
               throw new Error(result.message ?? "Withings sync failed.");
             }
-            setMessage(`Withings sync complete: ${result.imported_measurements} scale measurement(s) imported.`);
+            setMessage(`Withings sync complete: ${result.imported_measurements} scale measurement(s) imported or updated.`);
             await refreshAll();
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "Withings sync failed.");
@@ -10797,7 +10829,8 @@ export default function Home() {
             if (result.status === "error") {
               throw new Error(result.message ?? "Withings history sync failed.");
             }
-            setMessage(`Withings history sync complete: ${result.imported_measurements} scale measurement(s) imported from ${result.fetched_groups} group(s).`);
+            const dateRange = result.earliest_date && result.latest_date ? ` (${result.earliest_date} to ${result.latest_date})` : "";
+            setMessage(`Withings history sync complete: ${result.imported_measurements} scale measurement(s) imported or updated from ${result.fetched_groups} group(s)${dateRange}.`);
             await refreshAll();
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "Withings history sync failed.");

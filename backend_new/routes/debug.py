@@ -46,6 +46,21 @@ def debug_startup(request: Request, full: bool = Query(default=False)) -> dict:
     body_rows = fetch_json_rows("body_metric_logs", limit=5000 if full else 1000, date_field="date")
     body_rows = [row for row in body_rows if isinstance(row, dict) and "_db_error" not in row]
     body_metric_debug = canonical_bodyweight_debug(body_rows)
+    raw_withings_rows = sum(
+        1
+        for row in body_rows
+        if "withings" in str(row.get("source", "") or "").lower()
+        or "source=withings" in str(row.get("notes", "") or "").lower()
+    )
+    body_metrics_summary = {
+        "raw_body_metric_rows": body_metric_debug.get("raw_body_metric_rows", 0),
+        "canonical_daily_weight_rows": body_metric_debug.get("canonical_daily_weight_rows", 0),
+        "withings_measurement_groups": raw_withings_rows,
+        "earliest_weight_date": body_metric_debug.get("date_min", ""),
+        "latest_weight_date": body_metric_debug.get("date_max", ""),
+        "dates_with_multiple_weighins": body_metric_debug.get("dates_with_multiple_weighins", 0),
+        "rule": "lowest_weight_per_day",
+    }
     count_checks = [
         {
             "name": f"count_rows:{table}",
@@ -63,6 +78,7 @@ def debug_startup(request: Request, full: bool = Query(default=False)) -> dict:
         "database": db_result,
         "row_counts": row_counts,
         "body_metrics_debug": body_metric_debug,
+        "body_metrics": body_metrics_summary,
         "full": full,
         "checks": checks,
         "env": env_presence(DEBUG_ENV_VARS),

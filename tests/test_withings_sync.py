@@ -6,10 +6,9 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
-from backend.main import app
+from backend_new.main import app
 from src import body_metrics as body_metrics_module
 from src.integrations import withings_client
-from tests.auth_helpers import configure_test_auth
 
 
 WITHINGS_MEASURE_RESPONSE = {
@@ -39,7 +38,6 @@ class WithingsSyncTest(unittest.TestCase):
         self.env_patch = patch.dict(os.environ, {"DATABASE_URL": ""})
         self.env_patch.start()
         self.client = TestClient(app)
-        configure_test_auth(self.client)
 
     def tearDown(self):
         self.env_patch.stop()
@@ -71,6 +69,62 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertAlmostEqual(float(saved["bmi"].iloc[0]), 25.46, places=2)
         self.assertIn("source=withings", saved["notes"].iloc[0])
         self.assertIn("withings_measure_group_id=123", saved["notes"].iloc[0])
+
+    def test_history_sync_paginates_measurement_groups(self):
+        page_one = {
+            "status": 0,
+            "body": {
+                "measuregrps": [
+                    {
+                        "grpid": 201,
+                        "date": 1_715_769_600,
+                        "measures": [{"type": 1, "value": 70000, "unit": -3}],
+                    }
+                ],
+                "more": 1,
+                "offset": "next-page",
+            },
+        }
+        page_two = {
+            "status": 0,
+            "body": {
+                "measuregrps": [
+                    {
+                        "grpid": 202,
+                        "date": 1_715_856_000,
+                        "measures": [{"type": 1, "value": 70500, "unit": -3}],
+                    }
+                ],
+                "more": 0,
+            },
+        }
+        captured_bodies = []
+
+        def fake_post(_url, body, **_kwargs):
+            captured_bodies.append(dict(body))
+            return [page_one, page_two][len(captured_bodies) - 1]
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics_path = Path(temp_dir) / "body_metrics.csv"
+            with patch.object(body_metrics_module, "BODY_METRICS_PATH", metrics_path), patch(
+                "src.integrations.withings_client.refresh_withings_token_if_needed",
+                return_value="token",
+            ), patch("src.integrations.withings_client._post_form", side_effect=fake_post), patch(
+                "src.integrations.withings_client._save_withings_sync_state",
+                side_effect=lambda updates: updates,
+            ):
+                result = withings_client.sync_withings_measurements(days=3650, history=True)
+                saved = body_metrics_module.load_body_metrics()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["pages_fetched"], 2)
+        self.assertTrue(result["pagination_complete"])
+        self.assertEqual(result["withings_measurement_groups"], 2)
+        self.assertEqual(result["imported_measurements"], 2)
+        self.assertEqual(len(saved), 2)
+        self.assertNotIn("offset", captured_bodies[0])
+        self.assertEqual(captured_bodies[1]["offset"], "next-page")
+        self.assertEqual(sorted(saved["source_id"].astype(str).tolist()), ["201", "202"])
 
     def test_connect_route_redirects_to_withings_authorization(self):
         with patch.dict(
@@ -119,15 +173,16 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertEqual(get_response.json()["provider"], "withings")
         self.assertIn("callback reachable", get_response.json()["message"])
         self.assertEqual(post_response.status_code, 200)
-        self.assertEqual(post_response.json(), {"status": "ok", "provider": "withings"})
+        self.assertEqual(post_response.json()["provider"], "withings")
+        self.assertIn("callback reachable", post_response.json()["message"])
         self.assertEqual(head_response.status_code, 200)
         self.assertIn(options_response.status_code, {200, 204})
 
     def test_sync_route_returns_error_when_not_connected(self):
         with patch(
-            "backend.routes.withings.sync_withings_measurements",
+            "src.integrations.withings_client.sync_withings_measurements",
             side_effect=withings_client.WithingsIntegrationError("Withings is not connected."),
-        ), patch("backend.routes.withings.save_withings_sync_error", return_value={"last_error": "Withings is not connected."}):
+        ):
             response = self.client.post("/api/withings/sync")
 
         self.assertEqual(response.status_code, 200)

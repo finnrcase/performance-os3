@@ -27,6 +27,7 @@ WITHINGS_MEASURE_URL = "https://wbsapi.withings.net/measure"
 WITHINGS_SCOPES = "user.metrics"
 DEFAULT_SYNC_DAYS = 365
 DEFAULT_HISTORY_SYNC_DAYS = 3650
+MAX_WITHINGS_PAGES = 100
 TOKEN_EXPIRY_BUFFER_SECONDS = 300
 
 KG_TO_LB = 2.2046226218
@@ -441,6 +442,48 @@ def _measurement_rows(measure_groups: list[dict]) -> list[dict]:
     return rows
 
 
+def _fetch_measure_pages(access_token: str, request_body: dict) -> tuple[list[dict], int, bool]:
+    """Fetch all Withings measure pages for a date window.
+
+    Withings returns historical measurements in pages with ``more`` and
+    ``offset`` fields. The previous importer only read the first page, which
+    made long-term weight history look like only a few recent rows.
+    """
+    headers = {"Authorization": f"Bearer {access_token}"}
+    measure_groups: list[dict] = []
+    seen_offsets: set[str] = set()
+    offset = ""
+    pages_fetched = 0
+    pagination_complete = True
+
+    for _ in range(MAX_WITHINGS_PAGES):
+        page_body = dict(request_body)
+        if offset:
+            page_body["offset"] = offset
+        payload = _post_form(WITHINGS_MEASURE_URL, page_body, headers=headers, context="Withings API fetch failed")
+        body = _withings_body(payload, context="Withings API fetch failed")
+        pages_fetched += 1
+        page_groups = body.get("measuregrps", []) or []
+        if isinstance(page_groups, list):
+            measure_groups.extend(page_groups)
+
+        more = int(body.get("more") or 0)
+        next_offset = str(body.get("offset") or "").strip()
+        if not more:
+            break
+        if not next_offset or next_offset in seen_offsets:
+            pagination_complete = False
+            logger.warning("Withings history pagination stopped early: next offset was missing or repeated.")
+            break
+        seen_offsets.add(next_offset)
+        offset = next_offset
+    else:
+        pagination_complete = False
+        logger.warning("Withings history pagination hit max page guard (%s pages).", MAX_WITHINGS_PAGES)
+
+    return measure_groups, pages_fetched, pagination_complete
+
+
 def sync_withings_measurements(days: int | None = None, start_date: str | None = None, end_date: str | None = None, history: bool = False) -> dict:
     end_dt = datetime.now(timezone.utc)
     default_days = DEFAULT_HISTORY_SYNC_DAYS if history else DEFAULT_SYNC_DAYS
@@ -460,22 +503,19 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         "startdate": start_ts,
         "enddate": end_ts,
     }
-    headers = {"Authorization": f"Bearer {access_token}"}
     try:
-        payload = _post_form(WITHINGS_MEASURE_URL, request_body, headers=headers, context="Withings API fetch failed")
-        body = _withings_body(payload, context="Withings API fetch failed")
+        measure_groups, pages_fetched, pagination_complete = _fetch_measure_pages(str(access_token), request_body)
     except WithingsIntegrationError:
         access_token = refresh_withings_token_if_needed(force=True)
         if isinstance(access_token, dict):
             access_token = str(access_token.get("access_token", ""))
-        headers = {"Authorization": f"Bearer {access_token}"}
-        payload = _post_form(WITHINGS_MEASURE_URL, request_body, headers=headers, context="Withings API fetch failed")
-        body = _withings_body(payload, context="Withings API fetch failed")
+        measure_groups, pages_fetched, pagination_complete = _fetch_measure_pages(str(access_token), request_body)
 
-    measure_groups = body.get("measuregrps", []) or []
     rows = _measurement_rows(measure_groups)
     result = upsert_withings_measurements(rows)
     imported = result["created"] + result["updated"]
+    skipped = max(len(measure_groups) - len(rows), 0)
+    earliest_date = min((row["date"] for row in rows), default="")
     latest_date = max((row["date"] for row in rows), default="")
     sync = _save_withings_sync_state(
         {
@@ -485,8 +525,11 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
             "last_created_count": result["created"],
             "last_updated_count": result["updated"],
             "last_fetched_groups": len(measure_groups),
+            "last_pages_fetched": pages_fetched,
+            "last_pagination_complete": pagination_complete,
             "last_requested_days": lookback_days,
             "last_history_sync": bool(history),
+            "earliest_measure_date": earliest_date,
             "latest_measure_date": latest_date,
             "latest_measurement_date": latest_date,
             "needs_reconnect": False,
@@ -498,6 +541,14 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         "created_measurements": result["created"],
         "updated_measurements": result["updated"],
         "fetched_groups": len(measure_groups),
+        "withings_measurement_groups": len(measure_groups),
+        "imported_rows": result["created"],
+        "updated_rows": result["updated"],
+        "skipped_rows": skipped,
+        "earliest_date": earliest_date,
+        "latest_date": latest_date,
+        "pages_fetched": pages_fetched,
+        "pagination_complete": pagination_complete,
         "requested_days": lookback_days,
         "start_date": datetime.fromtimestamp(start_ts, tz=timezone.utc).date().isoformat(),
         "end_date": datetime.fromtimestamp(end_ts, tz=timezone.utc).date().isoformat(),
