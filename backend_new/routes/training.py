@@ -18,6 +18,7 @@ from backend_new.db import (
     fetch_json_rows_matching_any,
     fetch_latest_document,
     fetch_latest_json_rows,
+    invalidate_dashboard_core_cache,
     insert_json_row,
     load_recent_training_summary,
     move_workout_date_rows,
@@ -395,6 +396,7 @@ def update_workout_date(payload: dict[str, Any]) -> dict[str, Any]:
     raw_workouts = move_workout_date_rows("raw_hevy_workouts", workout_id, new_date, match_fields=("hevy_workout_id", "workout_id", "id"))
     raw_sets = move_workout_date_rows("raw_hevy_sets", workout_id, new_date, match_fields=("hevy_workout_id", "workout_id"))
     cache_summary = load_recent_training_summary(force_refresh=True)
+    invalidate_dashboard_core_cache()
     old_date = str(normalized.get("old_date") or "")
     updated_rows = int(normalized.get("updated_rows") or 0)
     logger.info(
@@ -548,7 +550,9 @@ def sync_hevy() -> dict[str, Any]:
             result = sync_hevy_events()
         except HevyIntegrationError:
             result = import_hevy_workouts(page_size=10, pages=1)
-        return {"status": "ok", "checked_hevy": True, "core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
+        summary = load_recent_training_summary(force_refresh=True)
+        invalidate_dashboard_core_cache()
+        return {"status": "ok", "checked_hevy": True, "core_training_summary": summary, **_jsonable_result(result)}
     except Exception as exc:
         return {"status": "error", "checked_hevy": True, "error_type": type(exc).__name__, "message": str(exc)}
 
@@ -566,7 +570,9 @@ def repair_hevy_set_data(fetch_missing: bool = True, zero_only: bool = True) -> 
         from src.integrations.hevy_client import repair_hevy_set_data as repair_hevy_rows
 
         result = repair_hevy_rows(fetch_missing=fetch_missing, zero_only=zero_only)
-        return {"core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
+        summary = load_recent_training_summary(force_refresh=True)
+        invalidate_dashboard_core_cache()
+        return {"core_training_summary": summary, **_jsonable_result(result)}
     except Exception as exc:
         return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "repaired_workouts": 0}
 
@@ -597,7 +603,9 @@ def import_hevy(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         from src.integrations.hevy_client import import_hevy_workouts
 
         result = import_hevy_workouts(page_size=page_size, pages=pages)
-        return {"status": "ok", "core_training_summary": load_recent_training_summary(force_refresh=True), **_jsonable_result(result)}
+        summary = load_recent_training_summary(force_refresh=True)
+        invalidate_dashboard_core_cache()
+        return {"status": "ok", "core_training_summary": summary, **_jsonable_result(result)}
     except Exception as exc:
         return {"status": "error", "error_type": type(exc).__name__, "message": str(exc), "imported_workouts": 0, "imported_rows": 0}
 
@@ -614,10 +622,12 @@ def import_strava(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         )
 
         result = import_recent_runs(per_page=per_page)
+        summary = load_recent_training_summary(force_refresh=True)
+        invalidate_dashboard_core_cache()
         return {
             "status": "ok",
             "message": "Strava activities imported.",
-            "core_training_summary": load_recent_training_summary(force_refresh=True),
+            "core_training_summary": summary,
             **_jsonable_result(result),
         }
     except StravaReconnectRequired as exc:
@@ -856,6 +866,7 @@ def rebuild_summaries() -> dict[str, Any]:
         },
     )
     result["core_training_summary"] = load_recent_training_summary(force_refresh=True)
+    invalidate_dashboard_core_cache()
     return result
 
 

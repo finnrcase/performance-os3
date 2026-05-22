@@ -354,6 +354,7 @@ type WorkoutGroup = {
   muscle_groups: string[];
   exercise_names: string[];
   total_sets: number;
+  total_reps?: number;
   total_volume: number;
   duration_minutes: number;
   source: string;
@@ -728,6 +729,37 @@ type OptimizationData = {
   };
 };
 
+type OptimizationSignals = {
+  nutrition_recommendation: {
+    status: string;
+    decision: string;
+    title: string;
+    calorie_adjustment: number;
+    confidence: string;
+    data_quality_score?: number | null;
+    primary_reason: string;
+    source: string;
+    engine_snapshot_available?: boolean;
+  };
+  macro_adherence: OptimizationData["macro_adherence"] & {
+    adherence_percent?: number | null;
+    confidence?: string;
+    consistency?: string;
+    logged_days?: number;
+    missing_days?: number;
+  };
+  plateau_watch: OptimizationData["plateau_detection"];
+  personal_baseline: OptimizationData["personal_baseline"] & {
+    data_points?: number;
+    counts?: Record<string, number>;
+  };
+  confidence: {
+    overall: string;
+    score: number;
+    missing_data: string[];
+  };
+};
+
 type SettingsHealthCard = {
   id: string;
   title: string;
@@ -981,12 +1013,35 @@ type DashboardData = {
   };
   workout_quality: {
     status: string;
+    date?: string;
+    workout_id?: string;
+    title?: string;
+    workout_type?: string;
+    classification?: string;
+    classification_label?: string;
+    rating?: string;
     score: number | null;
     score_label: string;
     confidence: string;
     color: "gray" | "red" | "orange" | "green" | "bright_green" | string;
+    summary?: string;
     explanation: string;
-    comparison: string | null;
+    total_sets?: number;
+    total_reps?: number;
+    total_volume?: number;
+    duration_minutes?: number;
+    muscle_groups?: string[];
+    comparison: string | {
+      basis?: string;
+      volume_vs_average_pct?: number | null;
+      sets_vs_average_pct?: number | null;
+      sample_size?: number;
+      summary?: string;
+    } | null;
+    debug?: {
+      source?: string;
+      latest_lift_found?: boolean;
+    };
     source: string;
   };
   todays_action: {
@@ -1035,6 +1090,7 @@ type DashboardData = {
   weekly_report: WeeklyReport;
   optimization: OptimizationData;
   recommendation: { recommendation_summary: string; reasoning_explanation: string };
+  optimization_signals?: OptimizationSignals;
   counts: { nutrition: number; body_metrics: number; recovery: number; sleep?: number; training: number };
   errors?: DashboardDebugBlock[];
   debug?: {
@@ -3314,6 +3370,28 @@ function workoutQualityStyles(color: string) {
   return { ring: "border-zinc-500/30 text-zinc-100", bar: "bg-zinc-400", badge: "border-zinc-300/20 bg-zinc-300/10 text-zinc-200" };
 }
 
+function workoutQualityScorePercent(score?: number | null) {
+  if (score === null || score === undefined || !Number.isFinite(score)) return 0;
+  return Math.min(100, Math.max(0, score <= 10 ? score * 10 : score));
+}
+
+function workoutQualityScoreText(score?: number | null) {
+  if (score === null || score === undefined || !Number.isFinite(score)) return "--";
+  return score <= 10 ? score.toFixed(1) : `${Math.round(score)}`;
+}
+
+function workoutQualityComparisonText(comparison?: DashboardData["workout_quality"]["comparison"]) {
+  if (!comparison) return "";
+  if (typeof comparison === "string") return comparison;
+  if (comparison.summary) return comparison.summary;
+  const pieces = [
+    typeof comparison.volume_vs_average_pct === "number" ? `volume ${comparison.volume_vs_average_pct > 0 ? "+" : ""}${comparison.volume_vs_average_pct}%` : "",
+    typeof comparison.sets_vs_average_pct === "number" ? `sets ${comparison.sets_vs_average_pct > 0 ? "+" : ""}${comparison.sets_vs_average_pct}%` : "",
+    typeof comparison.sample_size === "number" ? `${comparison.sample_size} similar` : "",
+  ].filter(Boolean);
+  return pieces.join(" · ");
+}
+
 function todaysActionStyles(color: string) {
   if (color === "green") {
     return {
@@ -3452,16 +3530,28 @@ function Dashboard({
   const lift = data?.lift_performance;
   const workoutQuality = data?.workout_quality;
   const qualityStyles = workoutQualityStyles(workoutQuality?.color ?? "gray");
+  const qualityScorePercent = workoutQualityScorePercent(workoutQuality?.score);
+  const qualityComparison = workoutQualityComparisonText(workoutQuality?.comparison);
+  const workoutQualityTitle = workoutQuality?.title ?? workoutQuality?.workout_type ?? "";
+  const workoutQualityMeta = [
+    workoutQuality?.date,
+    workoutQuality?.classification_label ?? workoutQuality?.classification,
+  ].filter(Boolean).join(" · ");
   const todaysAction = data?.todays_action;
   const actionStyles = todaysActionStyles(todaysAction?.color ?? "gray");
   const personalLearning = data?.personal_learning;
   const weeklyReport = data?.weekly_report;
   const prs = data?.prs;
   const optimization = data?.optimization;
-  const dashboardInsight = optimization?.personal_baseline.dashboard_insight;
-  const topPlateauAlerts = optimization?.plateau_detection.top_alerts ?? [];
+  const optimizationSignals = data?.optimization_signals;
+  const nutritionRecommendation = optimizationSignals?.nutrition_recommendation;
+  const macroAdherence = optimizationSignals?.macro_adherence ?? optimization?.macro_adherence;
+  const plateauWatch = optimizationSignals?.plateau_watch ?? optimization?.plateau_detection;
+  const baselineSignal = optimizationSignals?.personal_baseline ?? optimization?.personal_baseline;
+  const dashboardInsight = baselineSignal?.dashboard_insight;
+  const topPlateauAlerts = plateauWatch?.top_alerts ?? [];
   const adaptiveRecommendation = data?.adaptive_recommendation;
-  const topAdaptiveWarning = adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
+  const topAdaptiveWarning = optimizationSignals?.confidence.missing_data?.[0] ?? adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
   const plannedWorkout = lift?.planned_workout ?? "Training";
   const completedTraining = lift?.completed_summary || "";
   const trainingSources = lift?.sources ?? [];
@@ -3576,24 +3666,29 @@ function Dashboard({
       </Card>
 
       <Card>
-        <SectionHeader eyebrow="Today" title="Workout Quality" />
+        <SectionHeader eyebrow="Training" title="Workout Quality" />
         <div className="flex items-center gap-4">
           <div className={`grid h-20 w-20 shrink-0 place-items-center rounded-full border-4 bg-white/[0.035] ${qualityStyles.ring}`}>
-            <span className="text-xl font-semibold">{workoutQuality?.score !== null && workoutQuality?.score !== undefined ? workoutQuality.score.toFixed(1) : "--"}</span>
+            <span className="text-xl font-semibold">{workoutQualityScoreText(workoutQuality?.score)}</span>
           </div>
           <div className="min-w-0">
-            <p className="text-xl font-semibold text-white">{workoutQuality?.score_label ?? "Missing workout"}</p>
-            <p className="mt-2 text-sm leading-6 text-zinc-400">{workoutQuality?.explanation ?? "No Hevy or Strava activity logged today."}</p>
+            <p className="text-xl font-semibold text-white">{workoutQuality?.rating ?? workoutQuality?.score_label ?? "No recent lift"}</p>
+            <p className="mt-2 text-sm font-semibold text-zinc-100">{workoutQualityTitle || "Latest lift pending"}</p>
+            <p className="mt-1 text-xs uppercase tracking-[0.12em] text-zinc-500">{workoutQualityMeta || "Lift summary"}</p>
           </div>
         </div>
+        <p className="mt-4 text-sm leading-6 text-zinc-400">{workoutQuality?.summary ?? workoutQuality?.explanation ?? "No recent lifting workout found."}</p>
         <div className="mt-4 h-2 rounded-full bg-white/10">
-          <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${Math.min(100, Math.max(0, (workoutQuality?.score ?? 0) * 10))}%` }} />
+          <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${qualityScorePercent}%` }} />
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${qualityStyles.badge}`}>
             {workoutQuality?.confidence ?? "low"} confidence
           </span>
-          {workoutQuality?.comparison ? <span className="text-xs text-zinc-500">{workoutQuality.comparison}</span> : null}
+          {workoutQuality?.muscle_groups?.slice(0, 3).map((group) => (
+            <span key={group} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{group}</span>
+          ))}
+          {qualityComparison ? <span className="text-xs text-zinc-500">{qualityComparison}</span> : null}
         </div>
       </Card>
 
@@ -3636,7 +3731,7 @@ function Dashboard({
 
       <Card className="xl:col-span-2">
         <SectionHeader eyebrow="Adaptive" title="Optimization Signals" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Details</button>} />
-        {adaptiveRecommendation ? (
+        {nutritionRecommendation || adaptiveRecommendation ? (
           <button
             type="button"
             onClick={() => setActivePage("goals")}
@@ -3646,12 +3741,12 @@ function Dashboard({
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Nutrition recommendation</p>
                 <p className="mt-1 text-sm font-semibold text-white">
-                  {adaptiveRecommendation.calorieAdjustment === 0 ? "Hold baseline targets" : `${adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}${adaptiveRecommendation.calorieAdjustment} kcal baseline adjustment`}
+                  {nutritionRecommendation?.title ?? (adaptiveRecommendation?.calorieAdjustment === 0 ? "Hold targets" : `${adaptiveRecommendation?.calorieAdjustment && adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}${adaptiveRecommendation?.calorieAdjustment ?? 0} kcal adjustment`)}
                 </p>
-                <p className="mt-1 text-xs leading-5 text-zinc-400">{adaptiveRecommendation.reasoning?.[0] ?? "Adaptive engine is learning from current data."}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">{nutritionRecommendation?.primary_reason ?? adaptiveRecommendation?.reasoning?.[0] ?? "Insufficient data for a nutrition recommendation."}</p>
               </div>
               <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
-                {recommendationConfidenceLabel(adaptiveRecommendation.confidence, adaptiveRecommendation.confidenceLevel)} · {adaptiveRecommendation.dataQualityScore ?? 0}/100
+                {nutritionRecommendation?.confidence ?? recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel)} · {nutritionRecommendation?.data_quality_score ?? adaptiveRecommendation?.dataQualityScore ?? 0}/100
               </span>
             </div>
             {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
@@ -3660,8 +3755,8 @@ function Dashboard({
         <div className="grid gap-3 md:grid-cols-3">
           <div className="accent-outline rounded-lg border p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{optimization?.macro_adherence.weekly_score !== null && optimization?.macro_adherence.weekly_score !== undefined ? `${Math.round(optimization.macro_adherence.weekly_score)}` : "--"}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{optimization?.macro_adherence.summary ?? "Log meals against targets to calculate adherence."}</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{macroAdherence?.weekly_score !== null && macroAdherence?.weekly_score !== undefined ? `${Math.round(macroAdherence.weekly_score)}%` : "--"}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{macroAdherence?.summary ?? "Insufficient finalized nutrition data."}</p>
           </div>
           <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau watch</p>
@@ -3672,13 +3767,13 @@ function Dashboard({
                 ))}
               </div>
             ) : (
-              <p className="mt-2 text-sm leading-5 text-zinc-400">{optimization?.plateau_detection.summary ?? "No conservative plateau flags yet."}</p>
+              <p className="mt-2 text-sm leading-5 text-zinc-400">{plateauWatch?.summary ?? "Insufficient data for plateau detection."}</p>
             )}
           </div>
           <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
-            <p className="mt-2 text-sm font-semibold text-white">{dashboardInsight?.title ?? personalLearning?.insights?.[0]?.title ?? "Learning"}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{dashboardInsight?.summary ?? personalLearning?.insights?.[0]?.explanation ?? "More overlapping data will unlock personal baseline ranges."}</p>
+            <p className="mt-2 text-sm font-semibold text-white">{dashboardInsight?.title ?? personalLearning?.insights?.[0]?.title ?? "Building baseline"}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{dashboardInsight?.summary ?? personalLearning?.insights?.[0]?.explanation ?? "Insufficient overlapping data for a stable personal baseline."}</p>
           </div>
         </div>
       </Card>
@@ -10221,14 +10316,14 @@ export default function Home() {
     setMessage(null);
     try {
       const result = await apiSend<{ raw_rows_summarized?: number; weekly_summaries?: number; monthly_summaries?: number }>("/api/training/consolidate-history", "POST", {});
-      await refreshTrainingSummaryStatus();
+      await Promise.all([refreshTrainingSummaryStatus(), refreshDashboardCoreOnly()]);
       setMessage(`Training summaries rebuilt: ${(result.raw_rows_summarized ?? 0).toLocaleString()} older rows summarized.`);
     } catch (error) {
       setApiError(error instanceof Error ? error.message : "Training summary rebuild failed.");
     } finally {
       setTrainingDataAction("idle");
     }
-  }, [refreshTrainingSummaryStatus]);
+  }, [refreshDashboardCoreOnly, refreshTrainingSummaryStatus]);
 
   const syncHevyNow = useCallback(async (showMessage = true) => {
     setHevySyncing(true);
@@ -11091,6 +11186,7 @@ export default function Home() {
                 latest_workout_title: result.latest_workout_title,
               });
               await refreshTrainingData(true);
+              await refreshDashboardCoreOnly();
               const failureText = result.failures?.length ? ` ${result.failures.length} failures.` : "";
               setMessage(`Imported ${result.imported_workouts} Hevy workouts (${result.imported_rows} rows). Skipped ${result.skipped_duplicates} duplicates.${failureText}`);
             } catch (error) {

@@ -9,7 +9,7 @@ from typing import Any, Callable
 from fastapi import APIRouter, Query
 import pandas as pd
 
-from backend_new.db import fetch_dashboard_core_bundle
+from backend_new.db import fetch_dashboard_core_bundle, fetch_latest_document
 from backend_new.routes.goals import calculate_targets, fallback_goals
 from backend_new.config import app_timezone_name
 from backend_new.utils import app_today_iso, utc_now_iso
@@ -312,6 +312,633 @@ def _latest_from_training_history(history_items: list[dict[str, Any]]) -> dict[s
         "total_volume": latest.get("total_volume", 0),
         "duration_minutes": latest.get("duration_minutes", 0),
         "source": latest.get("source") or "manual",
+    }
+
+
+def _workout_reps(item: dict[str, Any]) -> int:
+    if item.get("total_reps") not in {None, ""}:
+        return int(max(0, _number(item.get("total_reps"), 0)))
+    details = item.get("details") if isinstance(item.get("details"), list) else []
+    total = 0
+    for row in details:
+        if not isinstance(row, dict):
+            continue
+        total += int(max(0, _number(row.get("sets"), 0))) * int(max(0, _number(row.get("reps"), 0)))
+    return total
+
+
+def _workout_muscle_groups(item: dict[str, Any]) -> list[str]:
+    groups: list[str] = []
+    item_groups = item.get("muscle_groups") if isinstance(item.get("muscle_groups"), list) else []
+    for group in item_groups:
+        text = str(group or "").strip()
+        if text and text not in groups:
+            groups.append(text)
+    details = item.get("details") if isinstance(item.get("details"), list) else []
+    for row in details:
+        if not isinstance(row, dict):
+            continue
+        text = str(row.get("muscle_group") or "").strip()
+        if text and text not in groups:
+            groups.append(text)
+    return groups[:5]
+
+
+def _is_lift_history_item(item: dict[str, Any]) -> bool:
+    return str(item.get("classification") or "").lower() == "lift"
+
+
+def _pct_change(current: float, average: float) -> float | None:
+    if average <= 0:
+        return None
+    return round(((current - average) / average) * 100, 1)
+
+
+def _quality_rating(volume_pct: float | None, sets_pct: float | None, sample_size: int) -> tuple[str, int | None, str, str]:
+    if sample_size <= 0 or (volume_pct is None and sets_pct is None):
+        return "Insufficient data", None, "gray", "low"
+    values = [value for value in (volume_pct, sets_pct) if value is not None]
+    if any(value >= 10 for value in values):
+        return "Strong", 88, "bright_green", "high" if sample_size >= 4 else "medium"
+    if any(value <= -15 for value in values):
+        return "Light", 58, "orange", "high" if sample_size >= 4 else "medium"
+    return "Solid", 78, "green", "high" if sample_size >= 4 else "medium"
+
+
+def _workout_quality_payload(training_items: list[dict[str, Any]]) -> dict[str, Any]:
+    lifts = [dict(item) for item in training_items if _is_lift_history_item(item)]
+    if not lifts:
+        return {
+            "status": "empty",
+            "rating": "No recent lift",
+            "score": None,
+            "score_label": "No recent lift",
+            "color": "gray",
+            "confidence": "low",
+            "summary": "No recent lifting workout found.",
+            "explanation": "No recent lifting workout found.",
+            "comparison": {
+                "basis": "recent_similar_lifts",
+                "volume_vs_average_pct": None,
+                "sets_vs_average_pct": None,
+                "sample_size": 0,
+            },
+            "debug": {"source": "/api/training/history", "latest_lift_found": False},
+            "source": "/api/training/history",
+        }
+
+    latest = lifts[0]
+    latest_date = str(latest.get("date") or "")[:10]
+    latest_id = str(latest.get("workout_id") or "")
+    title = str(latest.get("workout_type") or "Lift").strip() or "Lift"
+    total_sets = int(max(0, _number(latest.get("total_sets"), 0)))
+    total_reps = _workout_reps(latest)
+    total_volume = _round(_number(latest.get("total_volume"), 0))
+    duration = _round(_number(latest.get("duration_minutes"), 0))
+    muscle_groups = _workout_muscle_groups(latest)
+    latest_muscles = set(muscle_groups)
+    title_key = title.lower()
+
+    previous = [
+        item
+        for item in lifts[1:]
+        if str(item.get("workout_id") or "") != latest_id and str(item.get("date") or "")[:10] < latest_date
+    ]
+    similar = [item for item in previous if str(item.get("workout_type") or "").strip().lower() == title_key]
+    if not similar and latest_muscles:
+        similar = [item for item in previous if latest_muscles & set(_workout_muscle_groups(item))]
+    similar = similar[:6]
+    sample_size = len(similar)
+    average_volume = sum(_number(item.get("total_volume"), 0) for item in similar) / sample_size if sample_size else 0
+    average_sets = sum(_number(item.get("total_sets"), 0) for item in similar) / sample_size if sample_size else 0
+    volume_pct = _pct_change(_number(total_volume, 0), average_volume)
+    sets_pct = _pct_change(total_sets, average_sets)
+    rating, score, color, confidence = _quality_rating(volume_pct, sets_pct, sample_size)
+    summary_parts = [
+        f"{total_sets:,} sets",
+        f"{total_reps:,} reps",
+        f"{_number(total_volume, 0):,.0f} lb volume",
+        f"{_number(duration, 0):,.0f} min" if _number(duration, 0) > 0 else "duration pending",
+    ]
+    comparison_text = (
+        f"Compared with {sample_size} recent similar lift{'s' if sample_size != 1 else ''}."
+        if sample_size
+        else "No comparable recent lifts yet."
+    )
+    return {
+        "status": "ok",
+        "date": latest_date,
+        "workout_id": latest_id,
+        "title": title,
+        "workout_type": title,
+        "classification": "lift",
+        "classification_label": latest.get("classification_label") or "Lift",
+        "rating": rating,
+        "score": score,
+        "score_label": f"{score}/100" if score is not None else rating,
+        "color": color,
+        "confidence": confidence,
+        "summary": " | ".join(summary_parts),
+        "explanation": f"{title} on {latest_date}: " + " | ".join(summary_parts),
+        "total_sets": total_sets,
+        "total_reps": total_reps,
+        "total_volume": total_volume,
+        "duration_minutes": duration,
+        "muscle_groups": muscle_groups,
+        "comparison": {
+            "basis": "recent_similar_lifts",
+            "volume_vs_average_pct": volume_pct,
+            "sets_vs_average_pct": sets_pct,
+            "sample_size": sample_size,
+            "summary": comparison_text,
+        },
+        "debug": {
+            "source": "/api/training/history",
+            "latest_lift_found": True,
+            "history_items_checked": len(training_items),
+            "lift_items_checked": len(lifts),
+        },
+        "source": "/api/training/history",
+    }
+
+
+def _date_text(value: Any) -> str:
+    text = str(value or "").strip()[:10]
+    try:
+        datetime.strptime(text, "%Y-%m-%d")
+        return text
+    except ValueError:
+        return ""
+
+
+def _recent_rows(rows: list[dict[str, Any]], today: str, days: int) -> list[dict[str, Any]]:
+    end = pd.to_datetime(today, errors="coerce")
+    if pd.isna(end):
+        end = pd.Timestamp.today().normalize()
+    start = end - pd.Timedelta(days=max(0, days - 1))
+    recent: list[dict[str, Any]] = []
+    for row in rows:
+        row_date = pd.to_datetime(_date_text(row.get("date")), errors="coerce")
+        if not pd.isna(row_date) and start <= row_date <= end:
+            recent.append(row)
+    return recent
+
+
+def _macro_score(actual: float, target: float, *, protein: bool = False) -> float | None:
+    if target <= 0:
+        return None
+    if protein:
+        deviation = max(0.0, target - actual) / target
+        if actual > target * 1.4:
+            deviation = max(deviation, (actual - target * 1.4) / target)
+    else:
+        deviation = abs(actual - target) / target
+    return max(0.0, min(100.0, 100 - deviation * 100))
+
+
+def _daily_adherence_score(row: dict[str, Any]) -> tuple[float | None, dict[str, float | None]]:
+    fields = {
+        "calories": ("total_calories", "target_calories", 0.35, False),
+        "protein": ("total_protein", "target_protein", 0.30, True),
+        "carbs": ("total_carbs", "target_carbs", 0.20, False),
+        "fat": ("total_fat", "target_fat", 0.15, False),
+    }
+    weighted = 0.0
+    weight_total = 0.0
+    components: dict[str, float | None] = {}
+    for name, (actual_key, target_key, weight, protein) in fields.items():
+        score = _macro_score(_number(row.get(actual_key), 0), _number(row.get(target_key), 0), protein=protein)
+        components[name] = round(score, 1) if score is not None else None
+        if score is not None:
+            weighted += score * weight
+            weight_total += weight
+    if weight_total <= 0:
+        stored = row.get("adherence_score")
+        if stored not in {None, ""}:
+            return _number(stored, 0), components
+        return None, components
+    return round(weighted / weight_total, 1), components
+
+
+def _finalized_nutrition_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    finalized = []
+    for row in rows:
+        if _date_text(row.get("date")) and row.get("nutrition_logged") is not False and row.get("logged_day") is not False:
+            is_finalized = row.get("finalized") is True or str(row.get("status") or "").lower() == "finalized"
+            has_targets = _number(row.get("target_calories"), 0) > 0
+            if is_finalized and has_targets:
+                finalized.append(row)
+    return sorted(finalized, key=lambda item: _date_text(item.get("date")))
+
+
+def _macro_adherence_payload(nutrition_rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
+    finalized = _finalized_nutrition_rows(nutrition_rows)
+    recent = _recent_rows(finalized, today, 14)
+    window_dates = {
+        (pd.to_datetime(today) - pd.Timedelta(days=offset)).date().isoformat()
+        for offset in range(14)
+    }
+    logged_dates = {_date_text(row.get("date")) for row in recent}
+    missing_days = len(window_dates - logged_dates)
+    daily = []
+    component_values: dict[str, list[float]] = {"calories": [], "protein": [], "carbs": [], "fat": []}
+    calorie_deltas = []
+    for row in recent:
+        score, components = _daily_adherence_score(row)
+        if score is None:
+            continue
+        for key, value in components.items():
+            if value is not None:
+                component_values[key].append(value)
+        target_calories = _number(row.get("target_calories"), 0)
+        if target_calories > 0:
+            calorie_deltas.append((_number(row.get("total_calories"), 0) - target_calories) / target_calories * 100)
+        daily.append(
+            {
+                "date": _date_text(row.get("date")),
+                "score": round(score, 1),
+                **{key: value for key, value in components.items() if value is not None},
+            }
+        )
+    if not daily:
+        return {
+            "weekly_score": None,
+            "adherence_percent": None,
+            "status": "insufficient data",
+            "confidence": "low",
+            "consistency": "insufficient data",
+            "logged_days": 0,
+            "missing_days": missing_days,
+            "summary": "Insufficient finalized nutrition data.",
+            "components": {},
+            "daily": [],
+            "correlations": [],
+        }
+    weekly_score = round(sum(item["score"] for item in daily) / len(daily), 1)
+    avg_delta = sum(calorie_deltas) / len(calorie_deltas) if calorie_deltas else 0
+    status = "on-target" if abs(avg_delta) <= 5 else "under" if avg_delta < -5 else "over"
+    consistency = "consistent" if weekly_score >= 90 else "solid" if weekly_score >= 80 else "variable" if weekly_score >= 65 else "inconsistent"
+    confidence = "high" if len(daily) >= 10 and missing_days <= 2 else "medium" if len(daily) >= 5 else "low"
+    components = {
+        key: round(sum(values) / len(values), 1) if values else None
+        for key, values in component_values.items()
+    }
+    best_components = [key for key, value in components.items() if value is not None and value >= 85]
+    summary = f"{weekly_score:.0f}% adherence. "
+    if status == "on-target":
+        summary += "Calories are near target"
+    elif status == "under":
+        summary += "Calories are trending under target"
+    else:
+        summary += "Calories are trending over target"
+    if "protein" in best_components:
+        summary += " and protein is consistent."
+    else:
+        summary += "."
+    if missing_days:
+        summary += f" {missing_days} missing day{'s' if missing_days != 1 else ''} lowers confidence."
+    return {
+        "weekly_score": weekly_score,
+        "adherence_percent": weekly_score,
+        "status": status,
+        "confidence": confidence,
+        "consistency": consistency,
+        "logged_days": len(daily),
+        "missing_days": missing_days,
+        "summary": summary,
+        "components": components,
+        "daily": daily[-56:],
+        "correlations": [],
+    }
+
+
+def _bodyweight_trend_payload(body_rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
+    usable = []
+    for row in _recent_rows(body_rows, today, 35):
+        weight = _number(row.get("bodyweight"), 0)
+        if weight > 0:
+            usable.append({"date": _date_text(row.get("date")), "bodyweight": weight, "body_fat_percent": row.get("body_fat_percent")})
+    usable.sort(key=lambda item: item["date"])
+    if len(usable) < 4:
+        return {"status": "insufficient data", "weekly_change_lb": None, "lean_mass_weekly_change_lb": None, "days": len(usable)}
+    first = usable[0]
+    last = usable[-1]
+    elapsed_days = max(1, (pd.to_datetime(last["date"]) - pd.to_datetime(first["date"])).days)
+    weekly_change = (last["bodyweight"] - first["bodyweight"]) / elapsed_days * 7
+    lean_first = None
+    lean_last = None
+    if first.get("body_fat_percent") not in {None, ""} and last.get("body_fat_percent") not in {None, ""}:
+        lean_first = first["bodyweight"] * (1 - _number(first.get("body_fat_percent"), 0) / 100)
+        lean_last = last["bodyweight"] * (1 - _number(last.get("body_fat_percent"), 0) / 100)
+    lean_weekly = ((lean_last - lean_first) / elapsed_days * 7) if lean_first is not None and lean_last is not None else None
+    return {
+        "status": "ready",
+        "weekly_change_lb": round(weekly_change, 2),
+        "lean_mass_weekly_change_lb": round(lean_weekly, 2) if lean_weekly is not None else None,
+        "days": elapsed_days,
+        "latest_weight": _round(last["bodyweight"]),
+    }
+
+
+def _training_plateau_payload(training_rows: list[dict[str, Any]], body_rows: list[dict[str, Any]], goals: dict[str, Any], today: str) -> dict[str, Any]:
+    rows = []
+    for row in training_rows:
+        if not _date_text(row.get("date")) or not str(row.get("exercise") or "").strip():
+            continue
+        reps = _number(row.get("reps"), 0)
+        weight = _number(row.get("weight"), 0)
+        sets = _number(row.get("sets"), 0)
+        if reps <= 0 or weight <= 0 or sets <= 0:
+            continue
+        estimated = weight * (1 + reps / 30)
+        rows.append({**row, "date": _date_text(row.get("date")), "estimated_1rm": estimated, "volume": sets * reps * weight})
+    alerts = []
+    if rows:
+        frame = pd.DataFrame(rows)
+        frame["date_dt"] = pd.to_datetime(frame["date"], errors="coerce")
+        for exercise, history in frame.groupby("exercise"):
+            history = history.sort_values("date_dt")
+            daily = history.groupby("date", as_index=False).agg(date_dt=("date_dt", "max"), estimated_1rm=("estimated_1rm", "max"), volume=("volume", "sum"), reps=("reps", "max"))
+            if len(daily) < 6:
+                continue
+            recent = daily.tail(3)
+            previous = daily.iloc[-6:-3]
+            weeks = max(1, round((recent["date_dt"].max() - previous["date_dt"].min()).days / 7))
+            if weeks < 3:
+                continue
+            strength_change = _pct_change(float(recent["estimated_1rm"].mean()), float(previous["estimated_1rm"].mean()))
+            volume_change = _pct_change(float(recent["volume"].mean()), float(previous["volume"].mean()))
+            reps_delta = float(recent["reps"].mean() - previous["reps"].mean())
+            if strength_change is not None and strength_change <= -3:
+                signal = "performance decline"
+                severity = "medium"
+                message = f"{exercise} estimated 1RM is down {abs(strength_change):.1f}% over ~{weeks} weeks."
+            elif strength_change is not None and abs(strength_change) < 1.5 and reps_delta <= 0 and weeks >= 3:
+                signal = "possible plateau"
+                severity = "medium"
+                message = f"{exercise} top strength/reps are flat for ~{weeks} weeks."
+            elif volume_change is not None and volume_change < -15 and weeks >= 3:
+                signal = "volume decline"
+                severity = "low"
+                message = f"{exercise} volume is down {abs(volume_change):.1f}% over ~{weeks} weeks."
+            else:
+                continue
+            alerts.append(
+                {
+                    "type": "exercise",
+                    "name": str(exercise),
+                    "muscle_group": str(history.get("muscle_group", pd.Series([""])).iloc[-1] or ""),
+                    "signal": signal,
+                    "severity": severity,
+                    "duration_weeks": weeks,
+                    "message": message,
+                    "estimated_1rm_change_pct": round(strength_change, 1) if strength_change is not None else None,
+                    "volume_change_pct": round(volume_change, 1) if volume_change is not None else None,
+                    "reps_at_same_weight_delta": round(reps_delta, 1),
+                }
+            )
+            if len(alerts) >= 2:
+                break
+    body_trend = _bodyweight_trend_payload(body_rows, today)
+    goal_text = str(goals.get("goal_type") or "").lower()
+    if "bulk" in goal_text and body_trend.get("weekly_change_lb") is not None and abs(_number(body_trend.get("weekly_change_lb"), 0)) < 0.1 and int(body_trend.get("days") or 0) >= 21:
+        alerts.append(
+            {
+                "type": "bodyweight",
+                "name": "Lean bulk bodyweight",
+                "muscle_group": "",
+                "signal": "possible plateau",
+                "severity": "low",
+                "duration_weeks": max(3, round(int(body_trend.get("days") or 21) / 7)),
+                "message": "Bodyweight trend is flat during a lean bulk window.",
+                "estimated_1rm_change_pct": None,
+                "volume_change_pct": None,
+                "reps_at_same_weight_delta": None,
+            }
+        )
+    alerts = alerts[:2]
+    if alerts:
+        return {"status": "possible plateau", "summary": "Possible plateau detected.", "top_alerts": alerts, "details": alerts}
+    if len(rows) >= 12 or int(body_trend.get("days") or 0) >= 21:
+        return {"status": "clear", "summary": "No plateau detected.", "top_alerts": [], "details": []}
+    return {"status": "insufficient data", "summary": "Insufficient data for conservative plateau detection.", "top_alerts": [], "details": []}
+
+
+def _personal_baseline_payload(
+    nutrition_rows: list[dict[str, Any]],
+    training_items: list[dict[str, Any]],
+    body_rows: list[dict[str, Any]],
+    recovery_rows: list[dict[str, Any]],
+    sleep_rows: list[dict[str, Any]],
+    today: str,
+) -> dict[str, Any]:
+    finalized = _recent_rows(_finalized_nutrition_rows(nutrition_rows), today, 35)
+    training_days = {_date_text(row.get("date")) for row in training_items if _date_text(row.get("date"))}
+    body_days = {_date_text(row.get("date")) for row in _recent_rows(body_rows, today, 35) if _number(row.get("bodyweight"), 0) > 0}
+    recovery_days = {_date_text(row.get("date")) for row in _recent_rows([*recovery_rows, *sleep_rows], today, 35) if _date_text(row.get("date"))}
+    nutrition_days = len({_date_text(row.get("date")) for row in finalized})
+    data_points = nutrition_days + len(training_days) + len(body_days) + len(recovery_days)
+    if nutrition_days >= 28 and len(training_days) >= 12 and len(body_days) >= 14:
+        confidence = "high"
+        title = "Baseline confidence strong"
+        summary = f"{nutrition_days} nutrition days, {len(training_days)} training days, and {len(body_days)} weigh-ins are available."
+        status = "ready"
+    elif nutrition_days >= 14 and len(training_days) >= 6 and len(body_days) >= 7:
+        confidence = "medium"
+        title = "Baseline confidence improving"
+        summary = f"{nutrition_days} finalized nutrition days plus recent training/bodyweight data are available."
+        status = "building"
+    else:
+        confidence = "low"
+        title = "Building baseline"
+        missing_nutrition = max(0, 14 - nutrition_days)
+        summary = f"Needs {missing_nutrition} more finalized nutrition day{'s' if missing_nutrition != 1 else ''} plus consistent training/bodyweight history."
+        status = "insufficient data" if data_points < 8 else "building"
+    insight = {"title": title, "summary": summary, "confidence": confidence, "metric": "data_completeness"}
+    return {
+        "status": status,
+        "confidence": confidence,
+        "summary": summary,
+        "dashboard_insight": insight,
+        "insights": [insight],
+        "data_points": data_points,
+        "counts": {
+            "nutrition_days": nutrition_days,
+            "training_days": len(training_days),
+            "bodyweight_days": len(body_days),
+            "recovery_days": len(recovery_days),
+        },
+    }
+
+
+def _nutrition_recommendation_payload(
+    *,
+    latest_history: dict[str, Any],
+    targets: dict[str, Any],
+    macro_adherence: dict[str, Any],
+    plateau_watch: dict[str, Any],
+    body_trend: dict[str, Any],
+    goals: dict[str, Any],
+) -> dict[str, Any]:
+    adaptive = latest_history.get("adaptive_recommendation") if isinstance(latest_history, dict) else None
+    if isinstance(adaptive, dict) and adaptive:
+        adjustment = int(round(_number(adaptive.get("calorieAdjustment"), 0)))
+        trace = adaptive.get("recommendation_trace") if isinstance(adaptive.get("recommendation_trace"), dict) else {}
+        decision = str(trace.get("decision") or ("increase" if adjustment > 0 else "decrease" if adjustment < 0 else "hold"))
+        reasons = adaptive.get("reasoning") if isinstance(adaptive.get("reasoning"), list) else trace.get("main_reasons")
+        primary = str((reasons or ["Latest recommendation snapshot loaded."])[0])
+        confidence = str(adaptive.get("confidenceLevel") or (adaptive.get("confidence") or {}).get("overall") or "low")
+        title = "Hold targets" if adjustment == 0 else f"{'Increase' if adjustment > 0 else 'Decrease'} {adjustment:+d} kcal"
+        return {
+            "status": "ok",
+            "decision": decision,
+            "title": title,
+            "calorie_adjustment": adjustment,
+            "confidence": confidence,
+            "data_quality_score": adaptive.get("dataQualityScore"),
+            "primary_reason": primary,
+            "source": "/api/recommendations/latest",
+            "engine_snapshot_available": True,
+        }
+
+    confidence = str(macro_adherence.get("confidence") or "low")
+    body_change = body_trend.get("weekly_change_lb")
+    plateau_status = str(plateau_watch.get("status") or "")
+    macro_status = str(macro_adherence.get("status") or "")
+    goal_text = str(goals.get("goal_type") or "").lower()
+    adjustment = 0
+    decision = "hold"
+    if confidence == "low":
+        reason = "Insufficient finalized nutrition history for a calorie change."
+    elif "bulk" in goal_text and body_change is not None and _number(body_change, 0) < 0.1 and macro_status in {"on-target", "under"}:
+        adjustment = 100
+        decision = "increase"
+        reason = "Bodyweight is flat during lean bulk while intake is not over target."
+    elif macro_status == "over" and body_change is not None and _number(body_change, 0) > 0.6:
+        adjustment = -100
+        decision = "decrease"
+        reason = "Calories are over target and bodyweight is rising faster than expected."
+    elif plateau_status == "possible plateau" and macro_status != "over":
+        adjustment = 0
+        reason = "Possible plateau detected, but nutrition confidence favors holding before changing targets."
+    else:
+        reason = "Current logged nutrition and trend data do not justify changing targets."
+    title = "Hold targets" if adjustment == 0 else f"{'Increase' if adjustment > 0 else 'Decrease'} {adjustment:+d} kcal"
+    return {
+        "status": "ok" if confidence != "low" else "insufficient data",
+        "decision": decision,
+        "title": title,
+        "calorie_adjustment": adjustment,
+        "confidence": confidence,
+        "data_quality_score": {"high": 85, "medium": 65, "low": 35}.get(confidence, 35),
+        "primary_reason": reason,
+        "source": "lightweight_dashboard_snapshot",
+        "engine_snapshot_available": False,
+        "target_calories": targets.get("target_calories"),
+    }
+
+
+def _adaptive_from_optimization_signals(signals: dict[str, Any], targets: dict[str, Any]) -> dict[str, Any]:
+    nutrition = signals["nutrition_recommendation"]
+    adjustment = int(nutrition.get("calorie_adjustment") or 0)
+    current = {
+        "calories": _round(_number(targets.get("target_calories"), 0)),
+        "protein": _round(_number(targets.get("protein_grams"), 0)),
+        "carbs": _round(_number(targets.get("carb_grams"), 0)),
+        "fat": _round(_number(targets.get("fat_grams"), 0)),
+    }
+    recommended = {**current, "calories": current["calories"] + adjustment}
+    return {
+        "recommendedCalories": recommended["calories"],
+        "recommendedProtein": recommended["protein"],
+        "recommendedCarbs": recommended["carbs"],
+        "recommendedFat": recommended["fat"],
+        "caloriesTarget": recommended["calories"],
+        "proteinTarget": recommended["protein"],
+        "carbsTarget": recommended["carbs"],
+        "fatTarget": recommended["fat"],
+        "calorieAdjustment": adjustment,
+        "macroAdjustment": {"calories": adjustment, "protein": 0, "carbs": 0, "fat": 0},
+        "macroChanges": {"calories": adjustment, "protein": 0, "carbs": 0, "fat": 0},
+        "dayType": "standard",
+        "dayTypeAdjustment": {"type": "standard", "reason": "Using lightweight dashboard signals.", "calorie_delta": 0, "carb_delta": 0, "fat_delta": 0, "confidence": nutrition.get("confidence", "low"), "applied_delta": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}, "adjusted_targets": current},
+        "confidence": signals["confidence"],
+        "confidenceLevel": nutrition.get("confidence", "low"),
+        "dataQualityScore": nutrition.get("data_quality_score", signals["confidence"].get("score", 0)),
+        "reasoning": [nutrition.get("primary_reason") or "Insufficient data."],
+        "warnings": [] if nutrition.get("status") == "ok" else ["More finalized nutrition, bodyweight, and training history will improve confidence."],
+        "detectedTrends": [signals["plateau_watch"].get("summary", "")],
+        "missingDataWarnings": signals["confidence"].get("missing_data", []),
+        "nextReviewDate": "",
+        "currentTarget": current,
+        "recommendedTargets": {"target_calories": recommended["calories"], "protein_grams": recommended["protein"], "carb_grams": recommended["carbs"], "fat_grams": recommended["fat"]},
+        "baselineRecommendedTargets": targets,
+        "dayTypeAdjustedTargets": targets,
+        "signals": {
+            "bodyComposition": {"status": "dashboard_snapshot", "lean_gain_quality": "unknown"},
+            "performance": {"label": signals["plateau_watch"].get("status", "insufficient data"), "confidence": nutrition.get("confidence", "low"), "summary": signals["plateau_watch"].get("summary", ""), "recommendation": nutrition.get("decision", "hold"), "drivers": [], "muscle_group_drivers": []},
+            "recovery": {"status": "dashboard_snapshot", "label": "Recent recovery", "confidence": "low", "summary": "Recovery is included in baseline confidence.", "recommendation": "maintain", "drivers": []},
+            "trainingLoad": {"status": "dashboard_snapshot", "summary": signals["plateau_watch"].get("summary", "")},
+            "runningLoad": {"status": "dashboard_snapshot", "summary": "Recent runs are excluded from lift quality selection.", "interference_risk": "unknown"},
+            "nutrition": {"adherence": signals["macro_adherence"].get("status"), "days": signals["macro_adherence"].get("logged_days"), "missing_days_14": signals["macro_adherence"].get("missing_days")},
+            "dataQuality": signals["confidence"],
+            "historicalLearning": {"detectedTrends": [signals["personal_baseline"].get("summary", "")]},
+        },
+        "recommendation_trace": {"decision": nutrition.get("decision", "hold"), "calorie_change": adjustment, "main_reasons": [nutrition.get("primary_reason", "")], "what_would_change_decision": signals["confidence"].get("missing_data", [])},
+        "strategy": "Lightweight dashboard optimization snapshot",
+    }
+
+
+def _optimization_signals_payload(
+    *,
+    nutrition_history_items: list[dict[str, Any]],
+    training_items: list[dict[str, Any]],
+    training_rows: list[dict[str, Any]],
+    body_rows: list[dict[str, Any]],
+    recovery_rows: list[dict[str, Any]],
+    sleep_rows: list[dict[str, Any]],
+    goals: dict[str, Any],
+    targets: dict[str, Any],
+    today: str,
+) -> dict[str, Any]:
+    macro_adherence = _macro_adherence_payload(nutrition_history_items, today)
+    plateau_watch = _training_plateau_payload(training_rows, body_rows, goals, today)
+    personal_baseline = _personal_baseline_payload(nutrition_history_items, training_items, body_rows, recovery_rows, sleep_rows, today)
+    body_trend = _bodyweight_trend_payload(body_rows, today)
+    latest_recommendation = fetch_latest_document("nutrition_recommendation_history", {})
+    nutrition_recommendation = _nutrition_recommendation_payload(
+        latest_history=latest_recommendation,
+        targets=targets,
+        macro_adherence=macro_adherence,
+        plateau_watch=plateau_watch,
+        body_trend=body_trend,
+        goals=goals,
+    )
+    confidence_values = [nutrition_recommendation.get("confidence"), macro_adherence.get("confidence"), personal_baseline.get("confidence")]
+    rank = {"high": 3, "medium": 2, "low": 1}
+    confidence_score = round(sum(rank.get(str(value), 1) for value in confidence_values) / max(1, len(confidence_values)) / 3 * 100)
+    missing = []
+    if macro_adherence.get("missing_days"):
+        missing.append(f"{macro_adherence['missing_days']} nutrition day(s) missing in the last 14 days.")
+    counts = personal_baseline.get("counts", {})
+    if int(counts.get("nutrition_days") or 0) < 14:
+        missing.append("More finalized nutrition summaries needed.")
+    if int(counts.get("training_days") or 0) < 6:
+        missing.append("More recent lifting history needed.")
+    overall = "high" if confidence_score >= 75 else "medium" if confidence_score >= 50 else "low"
+    return {
+        "nutrition_recommendation": nutrition_recommendation,
+        "macro_adherence": macro_adherence,
+        "plateau_watch": plateau_watch,
+        "personal_baseline": personal_baseline,
+        "confidence": {"overall": overall, "score": confidence_score, "missing_data": missing},
+        "debug": {
+            "source": "dashboard_core_lightweight",
+            "engine_ran": False,
+            "openai_called": False,
+            "training_history_limit": 50,
+            "full_hevy_scan": False,
+        },
     }
 
 
@@ -721,7 +1348,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     training_payload = _source_block(
         "training",
         "/api/training/history",
-        lambda: training_history(limit=25, days=180),
+        lambda: training_history(limit=50, days=180),
         {"items": bundle_training_items, "debug": {}, "status": "fallback"},
         blocks,
     )
@@ -831,9 +1458,43 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "nutrition_history_latest_date": sources["food"]["nutrition_history_latest_date"],
         "latest_training_date": sources["training"]["latest_workout_date"],
     }
-    adaptive_recommendation = _adaptive_placeholder(targets)
     lean_bulk_decision = _lean_bulk_placeholder(targets)
     lift_performance = _lift_performance_payload(today=today, latest_workout=latest_workout, training_items=training_items, training_rows=training_rows)
+    workout_quality = _workout_quality_payload(training_items)
+    optimization_signals = _optimization_signals_payload(
+        nutrition_history_items=nutrition_history_items,
+        training_items=training_items,
+        training_rows=training_rows,
+        body_rows=body_rows,
+        recovery_rows=recovery_rows,
+        sleep_rows=sleep_rows,
+        goals=goals,
+        targets=targets,
+        today=today,
+    )
+    adaptive_recommendation = _adaptive_from_optimization_signals(optimization_signals, targets)
+    macro_targets = _target_macros(targets)
+    optimization = {
+        "day_type_macros": {
+            "day_type": "standard",
+            "confidence": optimization_signals["confidence"]["overall"],
+            "reason": optimization_signals["nutrition_recommendation"]["primary_reason"],
+            "baseline_targets": macro_targets,
+            "adjusted_targets": {
+                **macro_targets,
+                "calories": _round(_number(macro_targets.get("calories"), 0) + _number(optimization_signals["nutrition_recommendation"].get("calorie_adjustment"), 0)),
+            },
+            "delta": {"calories": optimization_signals["nutrition_recommendation"].get("calorie_adjustment", 0), "protein": 0, "carbs": 0, "fat": 0},
+            "signals": [
+                optimization_signals["macro_adherence"].get("summary", ""),
+                optimization_signals["plateau_watch"].get("summary", ""),
+                optimization_signals["personal_baseline"].get("summary", ""),
+            ],
+        },
+        "plateau_detection": optimization_signals["plateau_watch"],
+        "macro_adherence": optimization_signals["macro_adherence"],
+        "personal_baseline": optimization_signals["personal_baseline"],
+    }
     total_duration_ms = round((time.perf_counter() - started) * 1000, 1)
     blocks.extend(
         [
@@ -877,7 +1538,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "bodyweight_trend": bodyweight_trend,
         "latest_workout": latest_workout,
         "lift_performance": lift_performance,
-        "workout_quality": {"status": "missing", "score": None, "score_label": "No score", "confidence": "low", "color": "gray", "explanation": "Workout quality is deferred in dashboard core.", "comparison": None, "source": "backend_new_core"},
+        "workout_quality": workout_quality,
         "todays_action": {"status": "maintain", "color": "gray", "headline": "Keep logging", "reason": "Lightweight dashboard core loaded."},
         "recovery": recovery,
         "prs": {"bench_press": None, "mile_time": None},
@@ -890,23 +1551,14 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "personal_records": {"bench_press": None, "mile_time": None, "history": {"bench_press": [], "mile_time": []}},
         "lean_bulk_decision": lean_bulk_decision,
         "adaptive_recommendation": adaptive_recommendation,
+        "optimization_signals": optimization_signals,
         "personal_learning": {"status": "deferred", "confidence": "low", "summary": "Personal learning is deferred.", "window": "", "data_points": 0, "insights": []},
         "weekly_report": {"status": "deferred", "period_label": "Deferred", "summary": "Weekly report is deferred.", "rows": [], "best_trend": "", "watch": "", "recommendation": ""},
-        "optimization": {
-            "day_type_macros": {
-                "day_type": "standard",
-                "confidence": "low",
-                "reason": "Optimization is deferred in dashboard core.",
-                "baseline_targets": {"calories": targets.get("target_calories"), "protein": targets.get("protein_grams"), "carbs": targets.get("carb_grams"), "fat": targets.get("fat_grams")},
-                "adjusted_targets": {"calories": targets.get("target_calories"), "protein": targets.get("protein_grams"), "carbs": targets.get("carb_grams"), "fat": targets.get("fat_grams")},
-                "delta": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0},
-                "signals": [],
-            },
-            "plateau_detection": {"status": "deferred", "summary": "Plateau detection is deferred.", "top_alerts": [], "details": []},
-            "macro_adherence": {"weekly_score": None, "status": "deferred", "summary": "Macro adherence is deferred.", "components": {}, "daily": [], "correlations": []},
-            "personal_baseline": {"status": "deferred", "confidence": "low", "summary": "Personal baseline is deferred.", "dashboard_insight": None, "insights": []},
+        "optimization": optimization,
+        "recommendation": {
+            "recommendation_summary": optimization_signals["nutrition_recommendation"]["primary_reason"],
+            "reasoning_explanation": f"{optimization_signals['nutrition_recommendation']['title']} from lightweight dashboard signals.",
         },
-        "recommendation": {"recommendation_summary": "Advanced recommendations are deferred.", "reasoning_explanation": ""},
         "counts": counts,
         "errors": [],
         "debug": {
