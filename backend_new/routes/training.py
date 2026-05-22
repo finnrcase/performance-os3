@@ -463,6 +463,8 @@ def training_summary_status() -> dict[str, Any]:
     raw_sets = count_rows("raw_hevy_sets")
     weekly = count_rows("weekly_training_summary")
     monthly = count_rows("monthly_training_summary")
+    prs = count_rows("exercise_prs")
+    muscle = count_rows("muscle_group_training_summary")
     sync_state = _sync_state()
     summary_state = _summary_state()
     latest_rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=1000))
@@ -481,8 +483,8 @@ def training_summary_status() -> dict[str, Any]:
         "cache_health": "ready",
         "weekly_summaries": weekly.get("count_estimate", 0) or summary_state.get("weekly_summaries", 0),
         "monthly_summaries": monthly.get("count_estimate", 0) or summary_state.get("monthly_summaries", 0),
-        "exercise_prs": 0,
-        "muscle_group_periods": 0,
+        "exercise_prs": prs.get("count_estimate", 0) or summary_state.get("exercise_prs", 0),
+        "muscle_group_periods": muscle.get("count_estimate", 0) or summary_state.get("muscle_group_periods", 0),
         "latest_sync_date": sync_state.get("last_sync_at") or sync_state.get("last_synced_at") or "",
         "last_summary_rebuild_at": summary_state.get("rebuilt_at", ""),
         "last_summary_rebuild_status": summary_state.get("status", "not_run"),
@@ -498,6 +500,8 @@ def training_summary_status() -> dict[str, Any]:
             "raw_hevy_sets": raw_sets,
             "weekly_training_summary": weekly,
             "monthly_training_summary": monthly,
+            "exercise_prs": prs,
+            "muscle_group_training_summary": muscle,
         },
         "architecture": {
             "hevy_role": "manual_sync_to_local_cache",
@@ -682,12 +686,16 @@ def export_normalized(limit: int = 5000) -> Response:
     rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=bounded))
     weekly = _valid_rows(fetch_latest_json_rows("weekly_training_summary", limit=bounded))
     monthly = _valid_rows(fetch_latest_json_rows("monthly_training_summary", limit=bounded))
+    prs = _valid_rows(fetch_latest_json_rows("exercise_prs", limit=bounded))
+    muscle = _valid_rows(fetch_latest_json_rows("muscle_group_training_summary", limit=bounded))
     metadata = [{**training_summary_status(), "generated_at": utc_now_iso(), "limit": bounded}]
     return _excel_response(
         {
             "normalized_sets": rows,
             "weekly_summary": weekly,
             "monthly_summary": monthly,
+            "exercise_prs": prs,
+            "muscle_group_summary": muscle,
             "metadata": metadata,
         },
         f"training_normalized_export_{date.today().isoformat()}.xlsx",
@@ -699,6 +707,7 @@ def export_normalized(limit: int = 5000) -> Response:
 def rebuild_summaries() -> dict[str, Any]:
     history = _history_payload(limit=200, days=365)
     workouts = history.get("items", [])
+    generated_at = utc_now_iso()
     weekly: dict[str, dict[str, Any]] = defaultdict(
         lambda: {
             "workout_count": 0,
@@ -709,38 +718,130 @@ def rebuild_summaries() -> dict[str, Any]:
             "muscle_groups": [],
         }
     )
-    for workout in workouts:
-        workout_date = str(workout.get("date") or "")[:10]
-        try:
-            week = (date.fromisoformat(workout_date) - timedelta(days=date.fromisoformat(workout_date).weekday())).isoformat()
-        except ValueError:
-            week = workout_date
-        bucket = weekly[week]
-        bucket["period_start"] = week
-        bucket["period_label"] = week
+    monthly: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "workout_count": 0,
+            "total_sets": 0,
+            "total_reps": 0,
+            "total_volume": 0.0,
+            "duration_minutes": 0.0,
+            "muscle_groups": [],
+        }
+    )
+    muscle_periods: dict[tuple[str, str, str], dict[str, Any]] = defaultdict(
+        lambda: {
+            "workout_count": 0,
+            "total_sets": 0,
+            "total_reps": 0,
+            "total_volume": 0.0,
+        }
+    )
+    prs: dict[str, dict[str, Any]] = {}
+
+    def add_period(bucket: dict[str, Any], period_start: str, workout: dict[str, Any]) -> None:
+        bucket["period_start"] = period_start
+        bucket["period_label"] = period_start
         bucket["workout_count"] += 1
         bucket["total_sets"] += _int(workout.get("total_sets"), 0)
         bucket["total_reps"] += _int(workout.get("total_reps"), 0)
         bucket["total_volume"] += _number(workout.get("total_volume"), 0)
         bucket["duration_minutes"] += _number(workout.get("duration_minutes"), 0)
-        bucket["latest_workout_date"] = max(str(bucket.get("latest_workout_date") or ""), workout_date)
+        bucket["latest_workout_date"] = max(str(bucket.get("latest_workout_date") or ""), str(workout.get("date") or "")[:10])
         bucket["muscle_groups"] = sorted(set(bucket["muscle_groups"]) | set(workout.get("muscle_groups") or []))
+
+    for workout in workouts:
+        workout_date = str(workout.get("date") or "")[:10]
+        try:
+            parsed_date = date.fromisoformat(workout_date)
+            week = (parsed_date - timedelta(days=parsed_date.weekday())).isoformat()
+            month = parsed_date.replace(day=1).isoformat()
+        except ValueError:
+            week = workout_date
+            month = workout_date[:7]
+        add_period(weekly[week], week, workout)
+        add_period(monthly[month], month, workout)
+        details = workout.get("details") if isinstance(workout.get("details"), list) else []
+        seen_muscles: set[str] = set()
+        for row in details:
+            if not isinstance(row, dict):
+                continue
+            exercise = str(row.get("exercise") or "").strip()
+            group = str(row.get("muscle_group") or "").strip() or _infer_muscle_group(exercise)
+            sets = max(0, _int(row.get("sets"), 0))
+            reps = max(0, _int(row.get("reps"), 0))
+            weight = _number(row.get("weight"), 0)
+            volume = _volume(row)
+            if group:
+                seen_muscles.add(group)
+                for period_type, period_start in (("weekly", week), ("monthly", month)):
+                    muscle_bucket = muscle_periods[(period_type, period_start, group)]
+                    muscle_bucket["period_type"] = period_type
+                    muscle_bucket["period_start"] = period_start
+                    muscle_bucket["muscle_group"] = group
+                    muscle_bucket["total_sets"] += sets
+                    muscle_bucket["total_reps"] += sets * reps
+                    muscle_bucket["total_volume"] += volume
+                    muscle_bucket["latest_workout_date"] = max(str(muscle_bucket.get("latest_workout_date") or ""), workout_date)
+            if exercise and weight > 0 and reps > 0:
+                estimated_1rm = round(weight * (1 + reps / 30), 1)
+                current = prs.get(exercise)
+                if current is None or estimated_1rm > _number(current.get("estimated_1rm"), 0):
+                    prs[exercise] = {
+                        "pr_id": f"exercise-pr:{exercise.lower()}",
+                        "exercise": exercise,
+                        "date": workout_date,
+                        "weight": weight,
+                        "reps": reps,
+                        "estimated_1rm": estimated_1rm,
+                        "workout_id": workout.get("workout_id") or "",
+                        "workout_type": workout.get("workout_type") or "",
+                        "source": workout.get("source") or "local_cache",
+                        "updated_at": generated_at,
+                    }
+        for group in seen_muscles:
+            for period_type, period_start in (("weekly", week), ("monthly", month)):
+                muscle_periods[(period_type, period_start, group)]["workout_count"] += 1
+
     summary_items = [dict(value) for value in weekly.values()]
     for item in summary_items:
         item["summary_id"] = f"weekly-training:{item.get('period_start')}"
-        item["updated_at"] = utc_now_iso()
+        item["updated_at"] = generated_at
+    monthly_items = [dict(value) for value in monthly.values()]
+    for item in monthly_items:
+        item["summary_id"] = f"monthly-training:{item.get('period_start')}"
+        item["updated_at"] = generated_at
+    muscle_items = [dict(value) for value in muscle_periods.values()]
+    for item in muscle_items:
+        item["summary_id"] = f"muscle-training:{item.get('period_type')}:{item.get('period_start')}:{item.get('muscle_group')}"
+        item["updated_at"] = generated_at
+        item["total_volume"] = round(_number(item.get("total_volume"), 0), 1)
+    pr_items = sorted(prs.values(), key=lambda item: (str(item.get("date") or ""), _number(item.get("estimated_1rm"), 0)), reverse=True)
     result = {
         "status": "ok",
-        "message": "Lightweight summaries rebuilt from bounded local cached workout rows.",
+        "message": "Training summaries rebuilt from bounded local cached workout rows.",
         "raw_rows_summarized": len(workouts),
         "weekly_summaries": len(weekly),
-        "monthly_summaries": 0,
+        "monthly_summaries": len(monthly),
+        "exercise_prs": len(pr_items),
+        "muscle_group_periods": len(muscle_items),
         "items": summary_items,
-        "generated_at": utc_now_iso(),
+        "monthly_items": monthly_items,
+        "exercise_pr_items": pr_items,
+        "muscle_group_items": muscle_items,
+        "generated_at": generated_at,
     }
     for item in summary_items:
         if item.get("period_start"):
             upsert_json_row("weekly_training_summary", "summary_id", str(item["summary_id"]), item)
+    for item in monthly_items:
+        if item.get("period_start"):
+            upsert_json_row("monthly_training_summary", "summary_id", str(item["summary_id"]), item)
+    for item in pr_items:
+        if item.get("pr_id"):
+            upsert_json_row("exercise_prs", "pr_id", str(item["pr_id"]), item)
+    for item in muscle_items:
+        if item.get("summary_id"):
+            upsert_json_row("muscle_group_training_summary", "summary_id", str(item["summary_id"]), item)
     insert_json_row(
         "training_summary_state",
         {
@@ -749,6 +850,8 @@ def rebuild_summaries() -> dict[str, Any]:
             "raw_rows_summarized": result["raw_rows_summarized"],
             "weekly_summaries": result["weekly_summaries"],
             "monthly_summaries": result["monthly_summaries"],
+            "exercise_prs": result["exercise_prs"],
+            "muscle_group_periods": result["muscle_group_periods"],
             "rebuilt_at": result["generated_at"],
         },
     )
@@ -759,6 +862,17 @@ def rebuild_summaries() -> dict[str, Any]:
 @router.get("/api/training/pr-history")
 def pr_history(exercise: str = "", limit: int = 200) -> dict[str, Any]:
     bounded = _bounded_int(limit, 200, 1, 1000)
+    cached_prs = _valid_rows(fetch_latest_json_rows("exercise_prs", limit=bounded))
+    if cached_prs:
+        filtered = [item for item in cached_prs if not exercise or str(item.get("exercise") or "").lower() == exercise.lower()]
+        exercise_options = sorted({str(row.get("exercise") or "").strip() for row in cached_prs if str(row.get("exercise") or "").strip()})
+        return {
+            "exercise": exercise,
+            "exercise_options": exercise_options,
+            "items": filtered[:bounded],
+            "raw_window_days": 365,
+            "debug": {"rows_read": len(cached_prs), "full_raw_hevy_scan": False, "source": "exercise_prs_cache"},
+        }
     rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
     best_by_exercise_date: dict[tuple[str, str], dict[str, Any]] = {}
     exercises: set[str] = set()

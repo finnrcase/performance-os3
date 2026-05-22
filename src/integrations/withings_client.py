@@ -484,7 +484,14 @@ def _fetch_measure_pages(access_token: str, request_body: dict) -> tuple[list[di
     return measure_groups, pages_fetched, pagination_complete
 
 
-def sync_withings_measurements(days: int | None = None, start_date: str | None = None, end_date: str | None = None, history: bool = False) -> dict:
+def sync_withings_measurements(
+    days: int | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    history: bool = False,
+    *,
+    include_rows: bool = False,
+) -> dict:
     end_dt = datetime.now(timezone.utc)
     default_days = DEFAULT_HISTORY_SYNC_DAYS if history else DEFAULT_SYNC_DAYS
     lookback_days = int(days or os.getenv("WITHINGS_SYNC_LOOKBACK_DAYS", str(default_days)) or default_days)
@@ -503,6 +510,7 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         "startdate": start_ts,
         "enddate": end_ts,
     }
+    history_strategy = "date_window"
     try:
         measure_groups, pages_fetched, pagination_complete = _fetch_measure_pages(str(access_token), request_body)
     except WithingsIntegrationError:
@@ -510,6 +518,22 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         if isinstance(access_token, dict):
             access_token = str(access_token.get("access_token", ""))
         measure_groups, pages_fetched, pagination_complete = _fetch_measure_pages(str(access_token), request_body)
+
+    if history and not start_date and not end_date and pages_fetched == 1 and len(measure_groups) <= 5:
+        unbounded_body = {
+            "action": "getmeas",
+            "category": 1,
+            "meastypes": WITHINGS_REQUESTED_MEASTYPES,
+        }
+        try:
+            unbounded_groups, unbounded_pages, unbounded_complete = _fetch_measure_pages(str(access_token), unbounded_body)
+            if len(unbounded_groups) > len(measure_groups):
+                measure_groups = unbounded_groups
+                pages_fetched = unbounded_pages
+                pagination_complete = unbounded_complete
+                history_strategy = "unbounded_fallback"
+        except WithingsIntegrationError as exc:
+            logger.warning("Withings unbounded history fallback failed after date-window sync: %s", exc)
 
     rows = _measurement_rows(measure_groups)
     result = upsert_withings_measurements(rows)
@@ -535,7 +559,7 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
             "needs_reconnect": False,
         }
     )
-    return {
+    response = {
         "status": "ok",
         "imported_measurements": imported,
         "created_measurements": result["created"],
@@ -553,7 +577,11 @@ def sync_withings_measurements(days: int | None = None, start_date: str | None =
         "start_date": datetime.fromtimestamp(start_ts, tz=timezone.utc).date().isoformat(),
         "end_date": datetime.fromtimestamp(end_ts, tz=timezone.utc).date().isoformat(),
         "history_sync": bool(history),
+        "history_strategy": history_strategy,
         "latest_measure_date": latest_date,
         "latest_measurement_date": latest_date,
         "last_synced_at": sync.get("last_synced_at", ""),
     }
+    if include_rows:
+        response["_measurement_rows"] = rows
+    return response

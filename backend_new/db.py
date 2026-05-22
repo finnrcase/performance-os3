@@ -34,6 +34,8 @@ SUPPORTED_JSONB_TABLES = {
     "raw_hevy_sets",
     "weekly_training_summary",
     "monthly_training_summary",
+    "exercise_prs",
+    "muscle_group_training_summary",
     "training_cache_metadata",
     "training_summary_state",
     "integration_sync_state",
@@ -1156,17 +1158,19 @@ def fetch_dashboard_core_bundle(
 
     blocks: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
-    core_tables = existing_tables(
-        {
-            "user_goal_settings",
-            "macro_targets",
-            "food_logs",
-            "body_metric_logs",
-            "training_cache_metadata",
-            "recovery_logs",
-            "sleep_logs",
-        }
-    )
+    core_table_names = {
+        "user_goal_settings",
+        "macro_targets",
+        "food_logs",
+        "body_metric_logs",
+        "training_cache_metadata",
+        "recovery_logs",
+        "sleep_logs",
+    }
+    # Optimistic fast path: production should have these lightweight JSONB
+    # tables. Avoid a separate table-metadata round trip on every cold
+    # dashboard miss; if a table is missing, the fallback below isolates blocks.
+    core_tables = set(core_table_names)
 
     def read_block(block_name: str, table: str, default: Any, query: Any) -> Any:
         block_started = time.perf_counter()
@@ -1303,6 +1307,7 @@ def fetch_dashboard_core_bundle(
             recovery_rows = sanitize_json(list(row[5] or []))
             sleep_rows = sanitize_json(list(row[6] or []))
         combined_duration = _duration_ms(combined_started)
+        logger.info("[dashboard_core] block=combined_snapshot duration_ms=%s", combined_duration)
         for block_name, table in (
             ("goals", "user_goal_settings"),
             ("targets", "macro_targets"),
@@ -1327,6 +1332,7 @@ def fetch_dashboard_core_bundle(
                 warnings.append(warning)
     except Exception:
         logger.exception("[dashboard_core] combined snapshot failed; falling back to isolated blocks")
+        core_tables = existing_tables(core_table_names)
         goals = latest_document_block("user_goal_settings", "goals")
         targets = latest_document_block("macro_targets", "targets")
         food_rows = rows_block(
@@ -1394,71 +1400,39 @@ def fetch_dashboard_core_bundle(
     if include_training_summary:
         block_started = time.perf_counter()
         training_summary = load_recent_training_summary(limit_workouts=CORE_TRAINING_WORKOUTS, days=CORE_TRAINING_DAYS, cached_metadata=cached_training_metadata)
+        training_duration = _duration_ms(block_started)
+        logger.info("[dashboard_core] block=training_summary_cache duration_ms=%s", training_duration)
         blocks.append(
             {
                 "block": "training_summary_cache",
                 "name": "training_summary_cache",
                 "table": "training_cache_metadata",
                 "status": "ok" if str(training_summary.get("status") or "") in {"ok", "not_configured"} else "warning",
-                "duration_ms": _duration_ms(block_started),
+                "duration_ms": training_duration,
                 "message": training_summary.get("message", ""),
                 "error_type": training_summary.get("error_type"),
             }
         )
 
-    count_tables = {
-        "nutrition": "food_logs",
-        "body_metrics": "body_metric_logs",
-        "training": "workout_logs",
-        "recovery": "recovery_logs",
-        "sleep": "sleep_logs",
-    }
-    counts = {key: 0 for key in count_tables}
     count_started = time.perf_counter()
-    try:
-        safe_count_tables = {key: _safe_table(table) for key, table in count_tables.items()}
-        placeholders = ", ".join(["(%s, %s)"] * len(safe_count_tables))
-        params: list[str] = []
-        for key, table in safe_count_tables.items():
-            params.extend([key, table])
-        with cursor(timeout_ms=1000) as cur:
-            cur.execute(
-                f"""
-                SELECT requested.metric, requested.table_name, to_regclass(requested.table_name) IS NOT NULL AS exists,
-                       COALESCE((
-                         SELECT reltuples::bigint
-                         FROM pg_class
-                         WHERE oid = to_regclass(requested.table_name)
-                       ), 0) AS estimate
-                FROM (VALUES {placeholders}) AS requested(metric, table_name)
-                """,
-                tuple(params),
-            )
-            count_rows_result = cur.fetchall()
-        for metric, table, exists, estimate in count_rows_result:
-            counts[str(metric)] = max(0, int(estimate or 0))
-            if not exists:
-                warnings.append(
-                    {
-                        "block": f"count_{metric}",
-                        "name": f"count_{metric}",
-                        "table": str(table),
-                        "status": "missing",
-                        "count_estimate": 0,
-                        "duration_ms": _duration_ms(count_started),
-                    }
-                )
-    except Exception as exc:
-        logger.exception("[dashboard_core] count block failed")
-        warnings.append(
-            {
-                **structured_error(exc, operation="dashboard_core_counts"),
-                "block": "dashboard_core_counts",
-                "name": "dashboard_core_counts",
-                "status": "warning",
-                "duration_ms": _duration_ms(count_started),
-            }
-        )
+    counts = {
+        "nutrition": len(food_rows),
+        "body_metrics": len(body_rows),
+        "training": max(0, int(training_summary.get("total_rows") or training_summary.get("recent_rows") or 0)),
+        "recovery": len(recovery_rows),
+        "sleep": len(sleep_rows),
+    }
+    count_duration = _duration_ms(count_started)
+    logger.info("[dashboard_core] block=derived_counts duration_ms=%s", count_duration)
+    blocks.append(
+        {
+            "block": "derived_counts",
+            "name": "derived_counts",
+            "status": "ok",
+            "source": "bounded_snapshot",
+            "duration_ms": count_duration,
+        }
+    )
 
     result = {
         "status": "ok",
@@ -1478,4 +1452,5 @@ def fetch_dashboard_core_bundle(
     }
     with _dashboard_core_cache_lock:
         _dashboard_core_cache[cache_key] = {"payload": copy.deepcopy(result), "_cached_epoch": time.time()}
+    logger.info("[dashboard_core] block=total duration_ms=%s cache=miss", result["duration_ms"])
     return result

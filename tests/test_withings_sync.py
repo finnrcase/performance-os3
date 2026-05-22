@@ -126,6 +126,124 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertEqual(captured_bodies[1]["offset"], "next-page")
         self.assertEqual(sorted(saved["source_id"].astype(str).tolist()), ["201", "202"])
 
+    def test_history_sync_retries_unbounded_when_date_window_is_shallow(self):
+        shallow = {
+            "status": 0,
+            "body": {
+                "measuregrps": [
+                    {
+                        "grpid": 301,
+                        "date": 1_715_769_600,
+                        "measures": [{"type": 1, "value": 70000, "unit": -3}],
+                    }
+                ],
+                "more": 0,
+            },
+        }
+        full = {
+            "status": 0,
+            "body": {
+                "measuregrps": [
+                    {
+                        "grpid": 301,
+                        "date": 1_715_769_600,
+                        "measures": [{"type": 1, "value": 70000, "unit": -3}],
+                    },
+                    {
+                        "grpid": 302,
+                        "date": 1_715_856_000,
+                        "measures": [{"type": 1, "value": 70500, "unit": -3}],
+                    },
+                    {
+                        "grpid": 303,
+                        "date": 1_715_942_400,
+                        "measures": [{"type": 1, "value": 71000, "unit": -3}],
+                    },
+                    {
+                        "grpid": 304,
+                        "date": 1_716_028_800,
+                        "measures": [{"type": 1, "value": 71500, "unit": -3}],
+                    },
+                    {
+                        "grpid": 305,
+                        "date": 1_716_115_200,
+                        "measures": [{"type": 1, "value": 72000, "unit": -3}],
+                    },
+                    {
+                        "grpid": 306,
+                        "date": 1_716_201_600,
+                        "measures": [{"type": 1, "value": 72500, "unit": -3}],
+                    },
+                ],
+                "more": 0,
+            },
+        }
+        captured_bodies = []
+
+        def fake_post(_url, body, **_kwargs):
+            captured_bodies.append(dict(body))
+            return shallow if len(captured_bodies) == 1 else full
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            metrics_path = Path(temp_dir) / "body_metrics.csv"
+            with patch.object(body_metrics_module, "BODY_METRICS_PATH", metrics_path), patch(
+                "src.integrations.withings_client.refresh_withings_token_if_needed",
+                return_value="token",
+            ), patch("src.integrations.withings_client._post_form", side_effect=fake_post), patch(
+                "src.integrations.withings_client._save_withings_sync_state",
+                side_effect=lambda updates: updates,
+            ):
+                result = withings_client.sync_withings_measurements(days=3650, history=True, include_rows=True)
+                saved = body_metrics_module.load_body_metrics()
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["history_strategy"], "unbounded_fallback")
+        self.assertEqual(result["withings_measurement_groups"], 6)
+        self.assertEqual(len(result["_measurement_rows"]), 6)
+        self.assertEqual(len(saved), 6)
+        self.assertIn("startdate", captured_bodies[0])
+        self.assertNotIn("startdate", captured_bodies[1])
+
+    def test_backend_new_sync_history_persists_withings_rows_to_body_metric_logs(self):
+        result = {
+            "status": "ok",
+            "imported_measurements": 1,
+            "created_measurements": 1,
+            "updated_measurements": 0,
+            "fetched_groups": 1,
+            "withings_measurement_groups": 1,
+            "earliest_date": "2026-05-20",
+            "latest_date": "2026-05-20",
+            "_measurement_rows": [
+                {
+                    "date": "2026-05-20",
+                    "bodyweight": 156.9,
+                    "source": "withings",
+                    "source_id": "withings-1",
+                }
+            ],
+        }
+        saved = []
+
+        def fake_upsert(table, key_field, key_value, data):
+            saved.append((table, key_field, key_value, data))
+            return data
+
+        with patch("src.integrations.withings_client.sync_withings_measurements", return_value=result), patch(
+            "backend_new.routes.integrations.upsert_json_row",
+            side_effect=fake_upsert,
+        ), patch("backend_new.routes.integrations.fetch_json_rows", return_value=[]):
+            response = self.client.post("/api/withings/sync-history", json={"days": 3650})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["db_persisted_rows"], 1)
+        self.assertEqual(saved[0][0], "body_metric_logs")
+        self.assertEqual(saved[0][1], "source_id")
+        self.assertEqual(saved[0][2], "withings-1")
+        self.assertEqual(saved[0][3]["body_metric_id"], "withings-1")
+
     def test_connect_route_redirects_to_withings_authorization(self):
         with patch.dict(
             "os.environ",

@@ -564,7 +564,7 @@ def _fallback_payload(today: str, blocks: list[dict[str, Any]], *, started: floa
 def dashboard_core() -> dict[str, Any]:
     started = time.perf_counter()
     today = _today_iso()
-    bundle = fetch_dashboard_core_bundle(today, body_limit=1000, food_limit=500, recovery_limit=500, sleep_limit=500, include_training_summary=True)
+    bundle = fetch_dashboard_core_bundle(today, body_limit=400, food_limit=200, recovery_limit=180, sleep_limit=180, include_training_summary=True)
     bundle_status = str(bundle.get("status") or "")
     bundle_ready = bundle_status in {"ok", "not_configured"}
     blocks = [
