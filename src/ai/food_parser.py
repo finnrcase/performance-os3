@@ -534,8 +534,20 @@ def _parse_model_json(response: Any) -> dict:
             if output_text:
                 break
     if not output_text:
+        logger.warning("[food_ai] failed step=json_extract error_type=EmptyOpenAIOutput message=OpenAI returned no text output")
         raise ValueError("OpenAI returned no text output.")
-    return json.loads(output_text)
+    try:
+        parsed = json.loads(output_text)
+    except json.JSONDecodeError as exc:
+        logger.exception(
+            "[food_ai] failed step=json_parse error_type=%s message=%s raw_excerpt=%s",
+            type(exc).__name__,
+            exc,
+            output_text[:240],
+        )
+        raise
+    logger.info("[food_ai] json_parse_success")
+    return parsed
 
 
 def _response_text(response: Any) -> str:
@@ -791,7 +803,7 @@ def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = N
     if model.startswith("gpt-5"):
         kwargs["reasoning"] = {"effort": reasoning_effort}
     logger.info(
-        "[food_analyzer] calling_openai model=%s model_source=%s fallback_model_used=%s reasoning_effort=%s image_input=%s",
+        "[food_ai] openai_request_start model=%s model_source=%s fallback_model_used=%s reasoning_effort=%s image_input=%s",
         model,
         model_info["model_source"],
         model_info["fallback_model_used"],
@@ -800,16 +812,18 @@ def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = N
     )
     try:
         response = client.responses.create(**kwargs)
-    except Exception:
+    except Exception as exc:
         logger.exception(
-            "[food_analyzer] openai_error model=%s fallback_model_used=%s latency_ms=%s",
+            "[food_ai] failed step=openai_request error_type=%s message=%s model=%s fallback_model_used=%s latency_ms=%s",
+            type(exc).__name__,
+            exc,
             model,
             model_info["fallback_model_used"],
             round((time.perf_counter() - started) * 1000, 1),
         )
         raise
     logger.info(
-        "[food_analyzer] openai_success model=%s fallback_model_used=%s latency_ms=%s",
+        "[food_ai] openai_request_success model=%s fallback_model_used=%s latency_ms=%s",
         model,
         model_info["fallback_model_used"],
         round((time.perf_counter() - started) * 1000, 1),
@@ -952,21 +966,25 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dic
         if not image_data_url:
             _cache_result(query, result)
         return result
-    except AuthenticationError:
+    except AuthenticationError as exc:
+        logger.warning("[food_ai] failed step=openai_auth error_type=%s message=%s", type(exc).__name__, exc)
         return _fallback_response(cleaned_text, "OpenAI API key is invalid.", "invalid_api_key")
-    except RateLimitError:
+    except RateLimitError as exc:
+        logger.warning("[food_ai] failed step=openai_rate_limit error_type=%s message=%s", type(exc).__name__, exc)
         return _fallback_response(
             cleaned_text,
             "OpenAI quota or rate limit reached. Check billing/quota and try again.",
             "quota_or_rate_limit",
         )
-    except APIConnectionError:
+    except APIConnectionError as exc:
+        logger.warning("[food_ai] failed step=openai_network error_type=%s message=%s", type(exc).__name__, exc)
         return _fallback_response(
             cleaned_text,
             "Could not reach OpenAI. Check network connectivity and try again.",
             "network_error",
         )
     except APIStatusError as exc:
+        logger.warning("[food_ai] failed step=openai_status error_type=%s status_code=%s message=%s", type(exc).__name__, exc.status_code, exc)
         if exc.status_code == 401:
             return _fallback_response(cleaned_text, "OpenAI API key is invalid.", "invalid_api_key")
         if exc.status_code == 429:
@@ -981,6 +999,7 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None) -> dic
             "api_error",
         )
     except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        logger.warning("[food_ai] failed step=json_parse error_type=%s message=%s", type(exc).__name__, exc)
         return _fallback_response(
             cleaned_text,
             f"OpenAI returned a malformed response: {exc}",

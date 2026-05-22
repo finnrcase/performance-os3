@@ -28,6 +28,15 @@ router = APIRouter(tags=["nutrition"])
 logger = logging.getLogger(__name__)
 
 TOTAL_FIELDS = ("calories", "protein", "carbs", "fat", "fiber")
+FOOD_AI_EMPTY_TOTALS = {
+    "calories": 0,
+    "protein_g": 0,
+    "carbs_g": 0,
+    "fat_g": 0,
+    "fiber_g": None,
+    "sugar_g": None,
+    "sodium_mg": None,
+}
 NUTRITION_LOGS_CACHE_TTL_SECONDS = 15
 _nutrition_logs_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
 _nutrition_logs_cache_lock = threading.RLock()
@@ -58,6 +67,139 @@ def _cache_nutrition_logs(cache_key: tuple[Any, ...], payload: dict[str, Any]) -
 def _invalidate_nutrition_logs_cache() -> None:
     with _nutrition_logs_cache_lock:
         _nutrition_logs_cache.clear()
+
+
+def _food_ai_item_to_api(item: dict[str, Any]) -> dict[str, Any]:
+    """Normalize parser internals or API-shaped items to the Food tab draft shape."""
+    quantity_value = item.get("quantity")
+    if not isinstance(quantity_value, (int, float)):
+        quantity_value = item.get("quantity_value")
+    return {
+        "name": item.get("name") or item.get("food_name") or item.get("display_name") or "",
+        "display_name": item.get("display_name") or item.get("name") or item.get("food_name") or "",
+        "normalized_name": item.get("normalized_name") or "",
+        "original_text": item.get("original_text") or item.get("food_name") or item.get("name") or "",
+        "quantity": quantity_value,
+        "unit": item.get("unit") or "",
+        "serving_description": item.get("serving_description") or item.get("quantity") or "",
+        "calories": item.get("calories", 0),
+        "protein_g": item.get("protein_g", item.get("protein", 0)),
+        "carbs_g": item.get("carbs_g", item.get("carbs", 0)),
+        "fat_g": item.get("fat_g", item.get("fat", 0)),
+        "fiber_g": item.get("fiber_g", item.get("fiber")),
+        "sugar_g": item.get("sugar_g", item.get("sugar")),
+        "sodium_mg": item.get("sodium_mg", item.get("sodium")),
+        "confidence": item.get("confidence") or "medium",
+        "source": item.get("source") or "openai_estimate",
+        "source_id": item.get("source_id") or None,
+        "source_url": item.get("source_url") or None,
+        "assumptions": item.get("assumptions") if isinstance(item.get("assumptions"), list) else [],
+        "needs_review": bool(item.get("needs_review", item.get("verification_needed", True))),
+    }
+
+
+def _food_ai_totals(items: list[dict[str, Any]], provided: dict[str, Any] | None = None) -> dict[str, Any]:
+    if isinstance(provided, dict) and provided:
+        return {
+            "calories": provided.get("calories", 0),
+            "protein_g": provided.get("protein_g", provided.get("protein", 0)),
+            "carbs_g": provided.get("carbs_g", provided.get("carbs", 0)),
+            "fat_g": provided.get("fat_g", provided.get("fat", 0)),
+            "fiber_g": provided.get("fiber_g", provided.get("fiber")),
+            "sugar_g": provided.get("sugar_g", provided.get("sugar")),
+            "sodium_mg": provided.get("sodium_mg", provided.get("sodium")),
+        }
+    totals = {
+        "calories": round(sum(float(item.get("calories") or 0) for item in items), 1),
+        "protein_g": round(sum(float(item.get("protein_g") or 0) for item in items), 1),
+        "carbs_g": round(sum(float(item.get("carbs_g") or 0) for item in items), 1),
+        "fat_g": round(sum(float(item.get("fat_g") or 0) for item in items), 1),
+    }
+    for key in ["fiber_g", "sugar_g", "sodium_mg"]:
+        values = [item.get(key) for item in items if item.get(key) is not None]
+        totals[key] = round(sum(float(value or 0) for value in values), 1) if values else None
+    return totals
+
+
+def _food_ai_response(
+    result: dict[str, Any],
+    analyzer_config: dict[str, Any],
+    steps: dict[str, Any],
+    started: float,
+) -> dict[str, Any]:
+    raw_items = result.get("items") if isinstance(result.get("items"), list) else result.get("foods")
+    items = [_food_ai_item_to_api(item) for item in raw_items] if isinstance(raw_items, list) else []
+    totals = _food_ai_totals(items, result.get("totals") if isinstance(result.get("totals"), dict) else result.get("total"))
+    debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
+    success = bool(result.get("success")) and bool(items)
+    merged_steps = {
+        **steps,
+        "parser_returned": True,
+        "json_parse_success": bool(success),
+        "returned_items": len(items),
+        "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+    response = {
+        **result,
+        "status": "ok" if success else "error",
+        "items": items,
+        "foods": items,
+        "totals": totals,
+        "total": totals,
+        "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
+        "success": success,
+        "message": result.get("message") or ("Parsed food text. Review before saving." if success else "AI food parsing failed."),
+        "error_code": result.get("error_code"),
+        "debug": {
+            **analyzer_config,
+            **debug,
+            "backend_endpoint_reached": True,
+            "failed_step": debug.get("failed_step") or (None if success else debug.get("parsing_status") or "parse"),
+            "duration_ms": merged_steps["duration_ms"],
+        },
+        "steps": merged_steps,
+    }
+    return response
+
+
+def _food_ai_error_response(
+    *,
+    analyzer_config: dict[str, Any] | None = None,
+    steps: dict[str, Any] | None = None,
+    started: float | None = None,
+    message: str,
+    error_code: str,
+    failed_step: str,
+    exc: Exception | None = None,
+) -> dict[str, Any]:
+    elapsed = round((time.perf_counter() - started) * 1000, 1) if started else 0
+    error_type = type(exc).__name__ if exc else error_code
+    return {
+        "status": "error",
+        "items": [],
+        "foods": [],
+        "totals": FOOD_AI_EMPTY_TOTALS,
+        "total": FOOD_AI_EMPTY_TOTALS,
+        "warnings": [],
+        "message": message,
+        "success": False,
+        "error_code": error_code,
+        "debug": {
+            **(analyzer_config or {}),
+            "backend_endpoint_reached": True,
+            "parsing_status": "error",
+            "failed_step": failed_step,
+            "error_type": error_type,
+            "message": message,
+            "duration_ms": elapsed,
+        },
+        "steps": {
+            **(steps or {}),
+            "failed_step": failed_step,
+            "error_type": error_type,
+            "duration_ms": elapsed,
+        },
+    }
 
 
 def _today_iso() -> str:
@@ -595,56 +737,84 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
 
 @router.post("/api/food/analyze-text")
 def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.perf_counter()
     text = str((payload or {}).get("text") or "").strip()
+    steps: dict[str, Any] = {"route_entered": True, "text_length": len(text)}
+    logger.info("[food_ai] route_entered endpoint=/api/food/analyze-text")
+    logger.info("[food_ai] text_length=%s", len(text))
     try:
         from src.ai.food_parser import analyze_food_text as analyze_text
         from src.ai.food_parser import openai_analyzer_config
         from src.ai.food_parser import get_openai_key_status
     except Exception as exc:
-        logger.exception("AI food parser import failed.")
-        return {
-            "items": [],
-            "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
-            "warnings": [],
-            "message": "AI food parsing is temporarily unavailable. You can still log foods manually.",
-            "success": False,
-            "error_code": "ai_parser_unavailable",
-            "debug": {"backend_endpoint_reached": True, "openai_key_configured": False, "model": "unknown", "parsing_status": "import_error", "error_type": type(exc).__name__},
-        }
+        logger.exception("[food_ai] failed step=import_parser error_type=%s message=%s", type(exc).__name__, exc)
+        return _food_ai_error_response(
+            steps=steps,
+            started=started,
+            message="AI food parsing is temporarily unavailable. You can still log foods manually.",
+            error_code="ai_parser_unavailable",
+            failed_step="import_parser",
+            exc=exc,
+        )
     analyzer_config = openai_analyzer_config()
+    steps["openai_configured"] = bool(analyzer_config.get("openai_key_configured"))
+    steps["model"] = analyzer_config.get("model")
+    logger.info("[food_ai] openai_configured=%s", steps["openai_configured"])
+    logger.info("[food_ai] model=%s", analyzer_config.get("model"))
     if not get_openai_key_status():
-        return {
-            "items": [],
-            "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
-            "warnings": [],
-            "message": "AI food parsing is not configured yet. You can still log foods manually.",
-            "success": False,
-            "error_code": "openai_not_configured",
-            "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "not_configured"},
-        }
+        logger.warning("[food_ai] failed step=config_check error_type=OpenAINotConfigured message=missing OpenAI key")
+        return _food_ai_error_response(
+            analyzer_config=analyzer_config,
+            steps=steps,
+            started=started,
+            message="AI food parsing is not configured yet. You can still log foods manually.",
+            error_code="openai_not_configured",
+            failed_step="config_check",
+        )
     try:
+        logger.info("[food_ai] parser_request_start")
         result = analyze_text(text)
-        result["debug"] = {**analyzer_config, **(result.get("debug") if isinstance(result.get("debug"), dict) else {})}
+        response = _food_ai_response(result, analyzer_config, steps, started)
         logger.info(
-            "[food_analyze_text] model=%s fallback_model_used=%s success=%s error_code=%s items=%s",
+            "[food_ai] parser_success model=%s fallback_model_used=%s success=%s error_code=%s",
             analyzer_config.get("model"),
             analyzer_config.get("fallback_model_used"),
-            result.get("success"),
-            result.get("error_code"),
-            len(result.get("items") or []),
+            response.get("success"),
+            response.get("error_code"),
         )
-        return result
+        logger.info("[food_ai] json_parse_success=%s", bool(response.get("success")))
+        logger.info("[food_ai] returned_items=%s", len(response.get("items") or []))
+        return response
     except Exception as exc:
-        logger.exception("AI food parsing failed.")
-        return {
-            "items": [],
-            "totals": {"calories": 0, "protein_g": 0, "carbs_g": 0, "fat_g": 0, "fiber_g": None, "sugar_g": None, "sodium_mg": None},
-            "warnings": [],
-            "message": "AI food parsing failed. You can still log foods manually.",
-            "success": False,
-            "error_code": "ai_parser_error",
-            "debug": {**analyzer_config, "backend_endpoint_reached": True, "parsing_status": "error", "error_type": type(exc).__name__},
-        }
+        logger.exception("[food_ai] failed step=analyze_text error_type=%s message=%s", type(exc).__name__, exc)
+        return _food_ai_error_response(
+            analyzer_config=analyzer_config,
+            steps=steps,
+            started=started,
+            message=f"AI parser failed at analyze_text: {exc}",
+            error_code="ai_parser_error",
+            failed_step="analyze_text",
+            exc=exc,
+        )
+
+
+@router.post("/api/debug/food-parser-test")
+def debug_food_parser_test(payload: dict[str, Any]) -> dict[str, Any]:
+    text = str((payload or {}).get("text") or "").strip() or "banana and protein shake"
+    result = analyze_food_text({"text": text})
+    debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
+    return {
+        "status": result.get("status") or ("ok" if result.get("success") else "error"),
+        "openai_connected": bool(debug.get("openai_key_configured")) and result.get("status") == "ok",
+        "items": result.get("items") or [],
+        "foods": result.get("foods") or result.get("items") or [],
+        "totals": result.get("totals") or FOOD_AI_EMPTY_TOTALS,
+        "raw_model_excerpt": "",
+        "steps": result.get("steps") or {},
+        "debug": debug,
+        "message": result.get("message") or "",
+        "error_code": result.get("error_code"),
+    }
 
 
 @router.post("/api/nutrition/label-upload")

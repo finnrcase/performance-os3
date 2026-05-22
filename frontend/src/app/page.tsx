@@ -1162,6 +1162,10 @@ type FoodParseResponse = {
     openai_key_configured?: boolean;
     model?: string;
     parsing_status?: string;
+    failed_step?: string | null;
+    error_type?: string;
+    message?: string;
+    duration_ms?: number;
   };
 };
 
@@ -1171,8 +1175,7 @@ type FoodAiFlowStep = {
   message: string;
 };
 
-type FoodAnalyzeResponse = {
-  items: Array<{
+type FoodAnalyzeItem = {
     name: string;
     display_name?: string;
     normalized_name?: string;
@@ -1193,21 +1196,30 @@ type FoodAnalyzeResponse = {
     source_url: string | null;
     assumptions: string[];
     needs_review: boolean;
-  }>;
-  totals: {
-    calories: number;
-    protein_g: number;
-    carbs_g: number;
-    fat_g: number;
-    fiber_g: number | null;
-    sugar_g: number | null;
-    sodium_mg: number | null;
-  };
+};
+
+type FoodAnalyzeTotals = {
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  fiber_g: number | null;
+  sugar_g: number | null;
+  sodium_mg: number | null;
+};
+
+type FoodAnalyzeResponse = {
+  status?: "ok" | "error" | string;
+  items?: FoodAnalyzeItem[];
+  foods?: FoodAnalyzeItem[];
+  totals: FoodAnalyzeTotals;
+  total?: FoodAnalyzeTotals;
   warnings: string[];
   message: string;
   success: boolean;
   error_code: string | null;
   debug: FoodParseResponse["debug"];
+  steps?: Record<string, unknown>;
 };
 
 type FoodBulkLogResponse = {
@@ -10118,7 +10130,7 @@ export default function Home() {
     setFoodAiFlow((items) => [...items.filter((item) => item.step !== step), { step, status, message }]);
   };
 
-  const draftFromAnalyzeItem = (item: FoodAnalyzeResponse["items"][number]): ParsedFood => ({
+  const draftFromAnalyzeItem = (item: FoodAnalyzeItem): ParsedFood => ({
     food_name: item.display_name || item.name,
     display_name: item.display_name || item.name,
     normalized_name: item.normalized_name,
@@ -10429,18 +10441,22 @@ export default function Home() {
               updateFoodAiFlowStep("Request", "pending", "POST /api/food/analyze-text");
               const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: cleanedText });
               updateFoodAiFlowStep("Request", "ok", `/api/food/analyze-text responded in ${Math.round(performance.now() - parseStarted)}ms.`);
-              if (!Array.isArray(analyzed.items)) {
-                throw new Error("Food analysis response did not include an items array.");
+              const analyzedItems = Array.isArray(analyzed.items) ? analyzed.items : Array.isArray(analyzed.foods) ? analyzed.foods : [];
+              if (!Array.isArray(analyzed.items) && !Array.isArray(analyzed.foods)) {
+                throw new Error("Food analysis response did not include an items or foods array.");
               }
-              const drafts = analyzed.items.map(draftFromAnalyzeItem);
-              updateFoodAiFlowStep("Parse result", analyzed.success && drafts.length ? "ok" : "error", `${drafts.length} parsed item(s). ${analyzed.error_code ? `Error code: ${analyzed.error_code}. ` : ""}${analyzed.message || ""}`);
+              const drafts = analyzedItems.map(draftFromAnalyzeItem);
+              const failedStep = analyzed.debug?.failed_step || analyzed.debug?.parsing_status || "parse";
+              const backendMessage = analyzed.message || analyzed.debug?.message || analyzed.error_code || "Food analysis failed.";
+              const totals = analyzed.totals ?? analyzed.total ?? { calories: 0, protein_g: 0, carbs_g: 0, fat_g: 0, fiber_g: null, sugar_g: null, sodium_mg: null };
+              updateFoodAiFlowStep("Parse result", analyzed.success && drafts.length ? "ok" : "error", `${drafts.length} parsed item(s). ${analyzed.error_code ? `Error code: ${analyzed.error_code}. ` : ""}${backendMessage}`);
               setParseResult({
                 foods: drafts,
                 total: {
-                  calories: analyzed.totals.calories,
-                  protein: analyzed.totals.protein_g,
-                  carbs: analyzed.totals.carbs_g,
-                  fat: analyzed.totals.fat_g,
+                  calories: totals.calories,
+                  protein: totals.protein_g,
+                  carbs: totals.carbs_g,
+                  fat: totals.fat_g,
                 },
                 source: "food_analyze_text",
                 cached: false,
@@ -10450,8 +10466,8 @@ export default function Home() {
                 debug: analyzed.debug,
               });
               setParsedFoods(drafts);
-              if (!analyzed.success) {
-                throw new Error(analyzed.message || analyzed.error_code || "Food analysis failed.");
+              if (!analyzed.success || analyzed.status === "error") {
+                throw new Error(`AI parser failed at ${failedStep}: ${backendMessage}`);
               }
               if (!drafts.length) {
                 throw new Error("Food analysis returned no parsed items.");

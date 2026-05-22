@@ -221,11 +221,77 @@ def test_food_analyze_text_and_bulk_log_flow_uses_current_routes():
 
     assert analyzed.status_code == 200
     assert analyzed.json()["success"] is True
+    assert analyzed.json()["status"] == "ok"
     assert len(analyzed.json()["items"]) == 2
+    assert len(analyzed.json()["foods"]) == 2
+    assert analyzed.json()["totals"] == analyzed.json()["total"]
+    assert analyzed.json()["steps"]["route_entered"] is True
+    assert analyzed.json()["steps"]["returned_items"] == 2
     assert saved.status_code == 200
     assert saved.json()["status"] == "ok"
     assert saved.json()["created"] == 2
     assert saved.json()["requested"] == 2
+
+
+def test_debug_food_parser_test_uses_same_parser_path():
+    config = {
+        "openai_key_configured": True,
+        "api_key_source": "environment",
+        "model": "gpt-5.5",
+        "model_source": "default",
+        "fallback_model_used": False,
+        "reasoning_effort": "medium",
+        "supports_structured_outputs": True,
+        "supports_image_input": True,
+        "model_error": "",
+    }
+    analyze_result = {
+        "items": [
+            {
+                "name": "Banana",
+                "display_name": "Banana",
+                "normalized_name": "banana",
+                "original_text": "banana",
+                "quantity": 1,
+                "unit": "medium",
+                "serving_description": "1 medium banana",
+                "calories": 105,
+                "protein_g": 1.3,
+                "carbs_g": 27,
+                "fat_g": 0.4,
+                "fiber_g": 3,
+                "sugar_g": 14,
+                "sodium_mg": 1,
+                "confidence": "high",
+                "source": "openai_estimate",
+                "source_id": None,
+                "source_url": None,
+                "assumptions": [],
+                "needs_review": False,
+            }
+        ],
+        "totals": {"calories": 105, "protein_g": 1.3, "carbs_g": 27, "fat_g": 0.4, "fiber_g": 3, "sugar_g": 14, "sodium_mg": 1},
+        "warnings": [],
+        "message": "Parsed with gpt-5.5. Review before saving.",
+        "success": True,
+        "error_code": None,
+        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-5.5", "parsing_status": "success"},
+    }
+    with (
+        patch("src.ai.food_parser.openai_analyzer_config", return_value=config),
+        patch("src.ai.food_parser.get_openai_key_status", return_value=True),
+        patch("src.ai.food_parser.analyze_food_text", return_value=analyze_result),
+    ):
+        response = client.post("/api/debug/food-parser-test", json={"text": "banana and protein shake"})
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert data["openai_connected"] is True
+    assert data["items"][0]["display_name"] == "Banana"
+    assert data["steps"]["route_entered"] is True
+    assert data["steps"]["returned_items"] == 1
+    assert "sk-" not in str(data)
 
 
 def test_food_log_bulk_rejects_empty_parsed_items():
