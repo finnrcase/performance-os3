@@ -9,8 +9,8 @@ from fastapi import APIRouter
 
 from backend_new.db import fetch_json_rows, fetch_latest_document, insert_json_row, upsert_json_row
 from backend_new.routes.dashboard import dashboard_core
-from backend_new.routes.goals import calculate_targets, fallback_goals
 from backend_new.routes.nutrition import _daily_summary_from_logs, _is_excluded, _today_iso
+from backend_new.services.recommendation_service import calculate_targets, canonical_goals, current_targets, fallback_goals
 from backend_new.utils import app_today_iso, utc_now_iso
 
 
@@ -44,23 +44,11 @@ def _frame(rows: list[dict[str, Any]]) -> Any:
 
 
 def _engine_goals(goals: dict[str, Any]) -> dict[str, Any]:
-    goal_type = str(goals.get("goal_type") or "lean_bulk").replace("_", " ").strip()
-    return {
-        **goals,
-        "goal_type": "Lean Bulk" if goal_type.lower() == "lean bulk" else goal_type.title(),
-        "activity_level": str(goals.get("activity_level") or "Moderate").replace("_", " ").title(),
-        "aggressiveness": str(goals.get("aggressiveness") or "Conservative").replace("_", " ").title(),
-    }
+    return canonical_goals(goals)
 
 
 def _current_targets(targets: dict[str, Any], goals: dict[str, Any]) -> dict[str, Any]:
-    if not targets or "_db_error" in targets:
-        return calculate_targets(goals)
-    calculated = calculate_targets(goals)
-    return {
-        **calculated,
-        **{key: value for key, value in targets.items() if value is not None and value != ""},
-    }
+    return current_targets(goals, targets)
 
 
 def _build_daily_summary(selected_date: str) -> dict[str, Any]:

@@ -5,115 +5,47 @@ from typing import Any
 from fastapi import APIRouter
 
 from backend_new.db import fetch_latest_document, insert_json_row
+from backend_new.services.recommendation_service import (
+    calculate_targets,
+    canonical_goals,
+    current_targets,
+    fallback_goals as service_fallback_goals,
+    lightweight_recommendation_preview,
+    saved_goals,
+    title_option,
+)
 from backend_new.utils import utc_now_iso
-from src.nutrition_targets import analyze_weight_trend, calculate_macro_targets
+from src.nutrition_targets import analyze_weight_trend
 
 router = APIRouter(tags=["goals"])
 
 
-def _to_float(value: Any, default: float = 0.0) -> float:
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed
-
-
 def fallback_goals() -> dict[str, Any]:
-    return {
-        "current_bodyweight": 180,
-        "goal_bodyweight": 185,
-        "timeline_weeks": 16,
-        "goal_type": "lean_bulk",
-        "training_frequency_per_week": 5,
-        "cardio_frequency_per_week": 1,
-        "estimated_body_fat": None,
-        "activity_level": "moderate",
-        "aggressiveness": "conservative",
-    }
+    return service_fallback_goals()
 
 
 def _title_option(value: Any, fallback: str) -> str:
-    normalized = str(value or fallback).replace("_", " ").strip().lower()
-    known = {
-        "lean bulk": "Lean Bulk",
-        "fat loss": "Cut",
-        "cut": "Cut",
-        "maintenance": "Maintain",
-        "maintain": "Maintain",
-        "recomposition": "Recomposition",
-        "performance / mile time": "Performance / Mile Time",
-        "performance": "Performance / Mile Time",
-        "low": "Low",
-        "light": "Low",
-        "moderate": "Moderate",
-        "high": "High",
-        "very high": "Very High",
-        "very active": "Very High",
-        "conservative": "Conservative",
-        "aggressive": "Aggressive",
-    }
-    return known.get(normalized, normalized.title() or fallback)
+    return title_option(value, fallback)
 
 
 def _canonical_goals(goals: dict[str, Any]) -> dict[str, Any]:
-    return {
-        **goals,
-        "goal_type": _title_option(goals.get("goal_type"), "Lean Bulk"),
-        "activity_level": _title_option(goals.get("activity_level"), "Moderate"),
-        "aggressiveness": _title_option(goals.get("aggressiveness"), "Conservative"),
-    }
-
-
-def calculate_targets(goals: dict[str, Any]) -> dict[str, Any]:
-    canonical = _canonical_goals({**fallback_goals(), **(goals or {})})
-    targets = calculate_macro_targets(canonical)
-    return {**targets, "updated_at": targets.get("updated_at") or utc_now_iso()}
-
-
-TARGET_FIELDS = {
-    "target_calories",
-    "maintenance_calories",
-    "calorie_adjustment",
-    "protein_grams",
-    "carb_grams",
-    "fat_grams",
-    "expected_weekly_weight_change",
-    "target_description",
-    "timeline_status",
-    "timeline_warning",
-    "updated_at",
-}
+    return canonical_goals(goals)
 
 
 def _simple_targets(goals: dict[str, Any], stored_targets: dict[str, Any]) -> dict[str, Any]:
-    calculated = calculate_targets(goals)
-    if not isinstance(stored_targets, dict) or "_db_error" in stored_targets:
-        return calculated
-    for field in TARGET_FIELDS:
-        if field in stored_targets and stored_targets[field] not in {None, ""}:
-            calculated[field] = stored_targets[field]
-    return calculated
+    return current_targets(goals, stored_targets)
 
 
 def _saved_goals() -> dict[str, Any]:
-    stored = fetch_latest_document("user_goal_settings", fallback_goals())
-    return {**fallback_goals(), **stored} if isinstance(stored, dict) else fallback_goals()
+    return saved_goals()
 
 
 def goals_payload() -> dict[str, Any]:
     goals = _saved_goals()
-    stored_targets = fetch_latest_document("macro_targets", {})
-    targets = _simple_targets(goals, stored_targets)
+    targets = current_targets(goals)
     weight_feedback = analyze_weight_trend(None, _canonical_goals(goals))
-    confidence = {
-        "nutrition": "low",
-        "body": "low",
-        "training": "low",
-        "recovery": "low",
-        "overall": "low",
-        "missing_data": ["Run the recommendation engine to refresh structured confidence."],
-    }
+    preview = lightweight_recommendation_preview(goals, targets)
+    confidence = preview["confidence"]
     return {
         "goals": goals,
         "targets": targets,
@@ -130,12 +62,15 @@ def goals_payload() -> dict[str, Any]:
             "recommended_target_calories": targets.get("target_calories"),
         },
         "adaptive_recommendation": {
+            **preview,
             "confidence": confidence,
             "confidenceLevel": confidence["overall"],
             "reasoning": ["Goals use the shared canonical target framework. Run the recommendation engine for the next suggested update."],
             "recommendedTargets": targets,
             "currentTarget": targets,
         },
+        "adaptive_recommendation_preview": preview,
+        "recommendation_trace": preview["recommendation_trace"],
         "recommendation_history": [],
         "debug": {
             "status": "ok",

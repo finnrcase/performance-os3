@@ -16,13 +16,27 @@ import pandas as pd
 from src.analytics.recovery_engine import analyze_recovery_signal
 from src.analytics.training_workload import analyze_hevy_performance_signal, analyze_training_workload
 from src.body_metrics import canonical_daily_bodyweights
-from src.nutrition_targets import align_macro_calories, calculate_bodyweight_trend_signal, calculate_macro_targets
+from src.nutrition_targets import (
+    CUT_RATE_RANGES,
+    align_macro_calories,
+    calculate_bodyweight_trend_signal,
+    calculate_macro_targets,
+)
 from src.paths import processed_data_path
 from src.storage import load_document, save_document
 from src.training_schedule import is_run_row, is_strength_row, load_training_schedule_profile, planned_training_for_date
 
 
 NUTRITION_RECOMMENDATION_HISTORY_PATH = processed_data_path("nutrition_recommendation_history.json")
+
+LEAN_GAIN_THRESHOLD_LB_PER_WEEK = 0.08
+FAT_GAIN_RISK_THRESHOLD_LB_PER_WEEK = 0.25
+BODY_FAT_GAIN_RISK_THRESHOLD_PCT_PER_WEEK = 0.2
+FAT_STABLE_THRESHOLD_LB_PER_WEEK = 0.18
+BODY_FAT_STABLE_THRESHOLD_PCT_PER_WEEK = 0.12
+BODY_COMP_OUTLIER_MAX_DAILY_PCT_CHANGE = 4.0
+NUTRITION_TARGET_BAND_CALORIES = 125
+NUTRITION_OVER_UNDER_THRESHOLD_CALORIES = 150
 
 
 def _to_float(value: Any, default: float | None = None) -> float | None:
@@ -162,7 +176,7 @@ def _nutrition_average(nutrition_df: pd.DataFrame | None, days: int = 14) -> dic
 def _clean_body_composition(body_metrics_df: pd.DataFrame | None, user_goals: dict) -> pd.DataFrame:
     df = canonical_daily_bodyweights(body_metrics_df)
     if df.empty:
-        return pd.DataFrame(columns=["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass"])
+        return pd.DataFrame(columns=["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass", "body_comp_outlier"])
     df["date"] = pd.to_datetime(df.get("date"), errors="coerce")
     df["bodyweight"] = pd.to_numeric(df.get("bodyweight"), errors="coerce")
     body_fat_column = _first_column(df, ["estimated_body_fat", "body_fat_percent", "bodyfat", "body_fat"])
@@ -170,21 +184,24 @@ def _clean_body_composition(body_metrics_df: pd.DataFrame | None, user_goals: di
         df["body_fat_percent"] = pd.to_numeric(df[body_fat_column], errors="coerce")
     else:
         df["body_fat_percent"] = pd.NA
-    fallback_body_fat = _to_float(user_goals.get("estimated_body_fat"))
-    if fallback_body_fat is not None:
-        df["body_fat_percent"] = df["body_fat_percent"].fillna(fallback_body_fat)
     df = df.dropna(subset=["bodyweight"]).copy()
     df["body_fat_percent"] = pd.to_numeric(df["body_fat_percent"], errors="coerce")
     df.loc[df["body_fat_percent"] <= 1, "body_fat_percent"] = df["body_fat_percent"] * 100
     valid_body_fat = df["body_fat_percent"].between(3, 60)
     df.loc[~valid_body_fat, "body_fat_percent"] = pd.NA
+    df["body_comp_outlier"] = False
+    if df["body_fat_percent"].notna().sum() >= 3:
+        body_fat_change = df["body_fat_percent"].diff().abs()
+        outliers = body_fat_change > BODY_COMP_OUTLIER_MAX_DAILY_PCT_CHANGE
+        df.loc[outliers, ["body_fat_percent"]] = pd.NA
+        df.loc[outliers, "body_comp_outlier"] = True
     lean_mass_column = _first_column(df, ["lean_mass", "fat_free_mass"])
     fat_mass_column = _first_column(df, ["fat_mass"])
     measured_lean = pd.to_numeric(df[lean_mass_column], errors="coerce") if lean_mass_column else pd.Series(float("nan"), index=df.index, dtype="float64")
     measured_fat = pd.to_numeric(df[fat_mass_column], errors="coerce") if fat_mass_column else pd.Series(float("nan"), index=df.index, dtype="float64")
     df["lean_mass"] = measured_lean.combine_first(df["bodyweight"] * (1 - (df["body_fat_percent"] / 100)))
     df["fat_mass"] = measured_fat.combine_first(df["bodyweight"] * (df["body_fat_percent"] / 100))
-    return df[["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass"]].sort_values("date")
+    return df[["date", "bodyweight", "body_fat_percent", "lean_mass", "fat_mass", "body_comp_outlier"]].sort_values("date")
 
 
 def _window_average(df: pd.DataFrame, column: str, days: int) -> float | None:
@@ -233,6 +250,18 @@ def _body_composition_trends(body_metrics_df: pd.DataFrame | None, user_goals: d
         "body_fat_percent_trend_14": None,
         "body_fat_percent_trend_28": None,
         "lean_gain_quality": "unknown",
+        "body_comp_confidence": "low",
+        "body_fat_trend_source": "measured_body_metric_rows",
+        "saved_body_fat_estimate": _to_float(user_goals.get("estimated_body_fat")),
+        "saved_body_fat_used_for_trend": False,
+        "dropped_body_comp_outliers": 0,
+        "thresholds": {
+            "lean_gain_threshold_lb_per_week": LEAN_GAIN_THRESHOLD_LB_PER_WEEK,
+            "fat_gain_risk_threshold_lb_per_week": FAT_GAIN_RISK_THRESHOLD_LB_PER_WEEK,
+            "body_fat_gain_risk_threshold_pct_per_week": BODY_FAT_GAIN_RISK_THRESHOLD_PCT_PER_WEEK,
+            "fat_stable_threshold_lb_per_week": FAT_STABLE_THRESHOLD_LB_PER_WEEK,
+            "body_fat_stable_threshold_pct_per_week": BODY_FAT_STABLE_THRESHOLD_PCT_PER_WEEK,
+        },
     }
     if df.empty:
         return empty
@@ -241,6 +270,7 @@ def _body_composition_trends(body_metrics_df: pd.DataFrame | None, user_goals: d
         **empty,
         "data_points": int(len(df)),
         "body_fat_data_points": int(df["body_fat_percent"].notna().sum()),
+        "dropped_body_comp_outliers": int(df.get("body_comp_outlier", pd.Series(dtype=bool)).fillna(False).sum()),
         "latest_bodyweight": round(float(latest["bodyweight"]), 2),
         "latest_body_fat_percent": round(float(latest["body_fat_percent"]), 2) if pd.notna(latest["body_fat_percent"]) else None,
         "latest_lean_mass": round(float(latest["lean_mass"]), 2) if pd.notna(latest["lean_mass"]) else None,
@@ -261,13 +291,20 @@ def _body_composition_trends(body_metrics_df: pd.DataFrame | None, user_goals: d
     fat_trend = output["fat_mass_trend_14"] if output["fat_mass_trend_14"] is not None else output["fat_mass_trend_28"]
     body_fat_trend = output["body_fat_percent_trend_14"] if output["body_fat_percent_trend_14"] is not None else output["body_fat_percent_trend_28"]
 
+    if output["body_fat_data_points"] >= 10:
+        output["body_comp_confidence"] = "high"
+    elif output["body_fat_data_points"] >= 4:
+        output["body_comp_confidence"] = "medium"
+    else:
+        output["body_comp_confidence"] = "low"
+
     if output["body_fat_data_points"] < 4:
         quality = "body fat missing"
         status = "body composition incomplete"
-    elif (lean_trend or 0) > 0.08 and (fat_trend or 0) <= 0.18 and (body_fat_trend or 0) <= 0.12:
+    elif (lean_trend or 0) > LEAN_GAIN_THRESHOLD_LB_PER_WEEK and (fat_trend or 0) <= FAT_STABLE_THRESHOLD_LB_PER_WEEK and (body_fat_trend or 0) <= BODY_FAT_STABLE_THRESHOLD_PCT_PER_WEEK:
         quality = "lean mass improving"
         status = "lean gain"
-    elif (fat_trend or 0) >= 0.25 or (body_fat_trend or 0) >= 0.2:
+    elif (fat_trend or 0) >= FAT_GAIN_RISK_THRESHOLD_LB_PER_WEEK or (body_fat_trend or 0) >= BODY_FAT_GAIN_RISK_THRESHOLD_PCT_PER_WEEK:
         quality = "fat gain rising"
         status = "fat gain risk"
     elif (lean_trend or 0) <= -0.05 and (fat_trend or 0) >= 0.1:
@@ -767,10 +804,202 @@ def _nutrition_signal(nutrition_average: dict, current: dict, analysis_day: pd.T
     }
 
 
+def _goal_family(user_goals: dict) -> str:
+    normalized = str(user_goals.get("goal_type") or "lean bulk").replace("_", " ").strip().lower()
+    if normalized in {"lean bulk", "bulk", "gain", "gain weight"}:
+        return "lean_bulk"
+    if normalized in {"cut", "fat loss", "lose weight", "weight loss"}:
+        return "cut"
+    if normalized in {"recomposition", "recomp", "body recomposition"}:
+        return "recomp"
+    if normalized in {"maintenance", "maintain", "hold"}:
+        return "maintenance"
+    return "performance" if "performance" in normalized else "maintenance"
+
+
+def _goal_weight_signal(base_signal: dict, user_goals: dict) -> dict:
+    family = _goal_family(user_goals)
+    weekly_pct = _to_float(base_signal.get("weekly_change_pct"))
+    signal = {**base_signal, "goal_type": family}
+    if weekly_pct is None:
+        return signal
+
+    if family == "cut":
+        aggressiveness = str(user_goals.get("aggressiveness") or "Conservative").title()
+        cut_range = CUT_RATE_RANGES.get(aggressiveness, CUT_RATE_RANGES["Conservative"])
+        faster_loss = min(cut_range)
+        slower_loss = max(cut_range)
+        signal["target_weekly_change_low"] = faster_loss
+        signal["target_weekly_change_high"] = slower_loss
+        if weekly_pct < faster_loss:
+            signal.update(
+                {
+                    "status": "losing too fast",
+                    "calorie_adjustment": 100,
+                    "reason": f"Loss is faster than the cut target range of {faster_loss:.2f}% to {slower_loss:.2f}%/week.",
+                }
+            )
+        elif weekly_pct > slower_loss:
+            signal.update(
+                {
+                    "status": "losing too slowly",
+                    "calorie_adjustment": -100,
+                    "reason": f"Loss is slower than the cut target range of {faster_loss:.2f}% to {slower_loss:.2f}%/week.",
+                }
+            )
+        else:
+            signal.update(
+                {
+                    "status": "losing in target range",
+                    "calorie_adjustment": 0,
+                    "reason": f"Loss is inside the cut target range of {faster_loss:.2f}% to {slower_loss:.2f}%/week.",
+                }
+            )
+    elif family in {"recomp", "maintenance", "performance"}:
+        stable_band = 0.2 if family == "recomp" else 0.25
+        signal["target_weekly_change_low"] = -stable_band
+        signal["target_weekly_change_high"] = stable_band
+        if weekly_pct > stable_band:
+            signal.update(
+                {
+                    "status": "gaining too fast",
+                    "calorie_adjustment": -75,
+                    "reason": f"Weight is rising faster than the {family.replace('_', ' ')} stability band of ±{stable_band:.2f}%/week.",
+                }
+            )
+        elif weekly_pct < -stable_band:
+            signal.update(
+                {
+                    "status": "losing too fast",
+                    "calorie_adjustment": 75,
+                    "reason": f"Weight is falling faster than the {family.replace('_', ' ')} stability band of ±{stable_band:.2f}%/week.",
+                }
+            )
+        else:
+            signal.update(
+                {
+                    "status": "stable in target range",
+                    "calorie_adjustment": 0,
+                    "reason": f"Weight is inside the {family.replace('_', ' ')} stability band of ±{stable_band:.2f}%/week.",
+                }
+            )
+    return signal
+
+
+def _nutrition_state(nutrition_signal: dict, confidence_info: dict) -> str:
+    logged_days = int(nutrition_signal.get("logged_days_14") or 0)
+    missing_days = int(nutrition_signal.get("missing_days_14") or 0)
+    delta = _to_float(nutrition_signal.get("calorie_delta_vs_target"))
+    adherence = str(nutrition_signal.get("adherence") or "unknown")
+    if logged_days < 5:
+        return "insufficient_data"
+    if confidence_info.get("nutrition") == "low" or missing_days > 5:
+        return "inconsistent"
+    if delta is None:
+        return "insufficient_data"
+    if delta >= NUTRITION_OVER_UNDER_THRESHOLD_CALORIES:
+        return "over_target"
+    if delta <= -NUTRITION_OVER_UNDER_THRESHOLD_CALORIES:
+        return "under_target"
+    if adherence == "inconsistent":
+        return "inconsistent"
+    return "on_target" if abs(delta) <= NUTRITION_TARGET_BAND_CALORIES else "inconsistent"
+
+
+def _training_state(performance_signal: dict) -> str:
+    label = str(performance_signal.get("label") or "insufficient data")
+    if label in {"improving", "strong"}:
+        return "improving"
+    if label in {"declining", "fatigue/performance stagnation"}:
+        return "declining"
+    if label in {"stable"}:
+        return "stable"
+    return "insufficient_data"
+
+
+def _recovery_state(recovery_signal: dict) -> str:
+    status = str(recovery_signal.get("status") or "insufficient data")
+    if status in {"good", "normal"}:
+        return "good"
+    if status == "strained":
+        return "strained"
+    if status == "poor":
+        return "poor"
+    return "insufficient_data"
+
+
+def _body_comp_state(
+    *,
+    body_composition: dict,
+    weight_status: str,
+    performance_label: str,
+    fat_gain_rising: bool,
+    lean_mass_improving: bool,
+    fat_stable: bool,
+) -> str:
+    if fat_gain_rising:
+        return "fat_gain_risk"
+    if lean_mass_improving and fat_stable:
+        return "recomp_success" if weight_status in {"stable in target range", "gaining in target range"} else "lean_gain"
+    if weight_status in {"gaining too slowly", "losing too fast"} and performance_label in {"declining", "fatigue/performance stagnation", "stable"}:
+        return "underfueling"
+    if body_composition.get("body_fat_data_points", 0) < 4:
+        return "insufficient_data"
+    if weight_status in {"stable in target range", "gaining too slowly", "losing too slowly"} and performance_label == "stable":
+        return "plateau"
+    return "lean_gain" if str(body_composition.get("status")) == "lean gain" else "insufficient_data"
+
+
+def _decision_states(
+    *,
+    goal_type: str,
+    body_comp_state: str,
+    nutrition_state: str,
+    training_state: str,
+    recovery_state: str,
+    calorie_delta: int,
+) -> dict:
+    return {
+        "goal_type": goal_type,
+        "body_comp_state": body_comp_state,
+        "nutrition_state": nutrition_state,
+        "training_state": training_state,
+        "recovery_state": recovery_state,
+        "decision": "increase" if calorie_delta > 0 else "decrease" if calorie_delta < 0 else "hold",
+    }
+
+
+def _trace_thresholds(
+    *,
+    weight_signal: dict,
+    body_composition: dict,
+    nutrition_signal: dict,
+) -> dict:
+    return {
+        "weekly_weight_change_pct": weight_signal.get("weekly_change_pct"),
+        "target_weekly_change_pct_range": [
+            weight_signal.get("target_weekly_change_low"),
+            weight_signal.get("target_weekly_change_high"),
+        ],
+        "fat_mass_trend_lb_per_week": body_composition.get("fat_mass_trend_14") if body_composition.get("fat_mass_trend_14") is not None else body_composition.get("fat_mass_trend_28"),
+        "fat_gain_risk_threshold": FAT_GAIN_RISK_THRESHOLD_LB_PER_WEEK,
+        "body_fat_percent_trend_pct_per_week": body_composition.get("body_fat_percent_trend_14") if body_composition.get("body_fat_percent_trend_14") is not None else body_composition.get("body_fat_percent_trend_28"),
+        "body_fat_gain_risk_threshold": BODY_FAT_GAIN_RISK_THRESHOLD_PCT_PER_WEEK,
+        "lean_mass_trend_lb_per_week": body_composition.get("lean_mass_trend_14") if body_composition.get("lean_mass_trend_14") is not None else body_composition.get("lean_mass_trend_28"),
+        "lean_gain_threshold": LEAN_GAIN_THRESHOLD_LB_PER_WEEK,
+        "actual_avg_calories": nutrition_signal.get("average_calories"),
+        "target_calories": nutrition_signal.get("target_calories"),
+        "nutrition_logged_days_14": nutrition_signal.get("logged_days_14"),
+        "nutrition_missing_days_14": nutrition_signal.get("missing_days_14"),
+    }
+
+
 def _build_recommendation_trace(
     *,
     changes: dict,
     reasoning: list[str],
+    states: dict,
+    thresholds: dict,
     body_composition: dict,
     weight_signal: dict,
     nutrition_signal: dict,
@@ -792,9 +1021,11 @@ def _build_recommendation_trace(
     if confidence.get("overall") == "low":
         what_would_change.insert(0, "Higher confidence would require enough finalized food days, canonical weigh-ins, recent Hevy data, and recovery/sleep logs.")
     return {
+        **states,
         "decision": decision,
         "calorie_change": calorie_change,
         "main_reasons": reasoning[:5],
+        "thresholds": thresholds,
         "body_comp_signal": body_composition,
         "weight_signal": weight_signal,
         "nutrition_signal": nutrition_signal,
@@ -1050,7 +1281,7 @@ def build_adaptive_nutrition_recommendation(
         "fat_grams": _current_value(current_targets, "fat_grams", base_targets["fat_grams"]),
     }
 
-    weight_signal = calculate_bodyweight_trend_signal(body_metrics_df, user_goals)
+    weight_signal = _goal_weight_signal(calculate_bodyweight_trend_signal(body_metrics_df, user_goals), user_goals)
     performance_signal = analyze_hevy_performance_signal(training_df)
     recovery_signal = analyze_recovery_signal(
         recovery_df,
@@ -1095,12 +1326,13 @@ def build_adaptive_nutrition_recommendation(
     carb_bias_grams = 0
 
     weight_status = str(weight_signal.get("status") or "insufficient data")
+    goal_type = _goal_family(user_goals)
     performance_label = str(performance_signal.get("label") or "insufficient data")
     recovery_status = str(recovery_signal.get("status") or "insufficient data")
     composition_quality = str(body_composition.get("lean_gain_quality") or "unknown")
     fat_gain_rising = composition_quality in {"fat gain rising", "poor partitioning"} or body_composition.get("status") == "fat gain risk"
-    lean_mass_improving = (body_composition.get("lean_mass_trend_14") or body_composition.get("lean_mass_trend_28") or 0) > 0.08
-    fat_stable = not fat_gain_rising and (body_composition.get("fat_mass_trend_14") is None or (body_composition.get("fat_mass_trend_14") or 0) <= 0.18)
+    lean_mass_improving = (body_composition.get("lean_mass_trend_14") or body_composition.get("lean_mass_trend_28") or 0) > LEAN_GAIN_THRESHOLD_LB_PER_WEEK
+    fat_stable = not fat_gain_rising and (body_composition.get("fat_mass_trend_14") is None or (body_composition.get("fat_mass_trend_14") or 0) <= FAT_STABLE_THRESHOLD_LB_PER_WEEK)
     recovery_good = recovery_status in {"good", "normal", "insufficient data"}
     recovery_poor = recovery_status in {"poor", "strained"}
     performance_soft = performance_label in {"declining", "fatigue/performance stagnation", "stable"}
@@ -1110,11 +1342,59 @@ def build_adaptive_nutrition_recommendation(
     if body_composition["body_fat_data_points"] < 4 and confidence_level == "high":
         confidence_level = "medium"
     confidence_info = {**confidence_info, "overall": confidence_level}
+    nutrition_state_label = _nutrition_state(nutrition_signal, confidence_info)
+    if nutrition_state_label == "inconsistent" and confidence_level == "high":
+        confidence_level = "medium"
+        confidence_info = {**confidence_info, "overall": confidence_level}
+        warnings.append("Nutrition logging/adherence is inconsistent, so recommendation confidence is capped at medium.")
 
     if confidence_level == "low":
         calorie_delta = 0
         reasoning.append("Recommendation confidence is low, so active baseline targets stay stable while data quality improves.")
         warnings.append("Log more weight, food, lifting, recovery, and body fat data before larger calorie changes.")
+    elif goal_type == "cut":
+        if weight_status == "losing too fast" or (performance_label in {"declining", "fatigue/performance stagnation"} and recovery_poor):
+            calorie_delta = 75
+            carb_bias_grams += 15
+            reasoning.append("Cut progress is too aggressive for performance/recovery, so calories rise slightly to protect lean mass.")
+        elif weight_status == "losing too slowly" and nutrition_state_label not in {"under_target", "insufficient_data", "inconsistent"} and not recovery_poor:
+            calorie_delta = -100
+            reasoning.append("Cut progress is slower than target while logged intake is not below target, so calories come down slightly.")
+        elif fat_gain_rising and nutrition_state_label == "over_target":
+            calorie_delta = -125
+            reasoning.append("Fat gain is rising during a cut and logged intake is over target, so calories decrease conservatively.")
+        else:
+            calorie_delta = 0
+            reasoning.append("Cut targets hold because the system is prioritizing lean-mass retention and avoiding noisy overcorrection.")
+    elif goal_type == "recomp":
+        if fat_gain_rising and nutrition_state_label != "under_target":
+            calorie_delta = -75
+            reasoning.append("Recomp is drifting toward fat gain, so calories edge down while protein stays high.")
+        elif weight_status == "losing too fast" and performance_soft and not fat_gain_rising:
+            calorie_delta = 75
+            carb_bias_grams += 20
+            reasoning.append("Recomp weight loss is too fast with soft performance, so a small carb-biased increase protects training.")
+        elif lean_mass_improving and fat_stable:
+            calorie_delta = 0
+            reasoning.append("Recomp signal is positive: lean mass is improving or stable while fat gain is controlled.")
+        else:
+            calorie_delta = 0
+            reasoning.append("Recomp targets hold until body composition, adherence, and performance point clearly in one direction.")
+    elif goal_type in {"maintenance", "performance"}:
+        if fat_gain_rising or weight_status == "gaining too fast":
+            calorie_delta = -75
+            reasoning.append("Maintenance/performance weight or fat gain is drifting high, so calories reduce slightly.")
+        elif weight_status == "losing too fast" and performance_soft:
+            calorie_delta = 75
+            carb_bias_grams += 15
+            reasoning.append("Maintenance/performance intake looks low for current output, so calories rise slightly.")
+        elif performance_label in {"declining", "fatigue/performance stagnation"} and recovery_good and not fat_gain_rising:
+            calorie_delta = 75
+            carb_bias_grams += 20
+            reasoning.append("Performance is soft without fat gain, so the system nudges carbs before changing bodyweight goals.")
+        else:
+            calorie_delta = 0
+            reasoning.append("Maintenance/performance targets hold because bodyweight and output do not justify a bigger change.")
     elif fat_gain_rising and performance_label in {"declining", "fatigue/performance stagnation", "stable", "insufficient data"}:
         calorie_delta = -150
         carb_bias_grams -= 10
@@ -1160,6 +1440,15 @@ def build_adaptive_nutrition_recommendation(
         calorie_delta = 0
         reasoning.append("No clear lean-mass or fat-gain signal justifies changing baseline calories today.")
 
+    if calorie_delta > 0 and nutrition_state_label == "over_target":
+        calorie_delta = 0
+        carb_bias_grams = max(0, carb_bias_grams)
+        reasoning.append("Logged calories are already above target, so the engine holds instead of adding more food.")
+    if calorie_delta < 0 and nutrition_state_label in {"insufficient_data", "inconsistent"}:
+        calorie_delta = 0
+        reasoning.append("Nutrition data is incomplete/inconsistent, so the engine avoids cutting calories from uncertain intake data.")
+        warnings.append("Finalize more nutrition days before using intake data to justify a calorie decrease.")
+
     if running_load.get("interference_risk") == "elevated":
         warnings.append("Running load may be interfering with lifting; watch long runs near lower-body sessions.")
         if not fat_gain_rising and weight_status != "gaining too fast" and confidence_level != "low":
@@ -1169,6 +1458,12 @@ def build_adaptive_nutrition_recommendation(
     if training_load["status"] in {"high", "unusually high"} and recovery_status not in {"poor"} and confidence_level != "low":
         carb_bias_grams += 10
         reasoning.append("Recent Hevy workload is high enough to favor carbohydrate availability.")
+    if calorie_delta > 0 and nutrition_state_label == "over_target":
+        calorie_delta = 0
+        reasoning.append("Even with workload demand, logged intake is already above target, so baseline calories hold.")
+    if calorie_delta < 0 and nutrition_state_label in {"insufficient_data", "inconsistent"}:
+        calorie_delta = 0
+        reasoning.append("Even with risk signals, incomplete nutrition logging blocks a calorie decrease until intake confidence improves.")
     if body_composition["body_fat_data_points"] < 4:
         warnings.append("Body fat data is limited, so lean-mass versus fat-gain confidence is reduced.")
 
@@ -1229,6 +1524,29 @@ def build_adaptive_nutrition_recommendation(
         "dayType": day_type,
         "historicalLearning": {"detectedTrends": detected_trends},
     }
+    body_comp_state_label = _body_comp_state(
+        body_composition=body_composition,
+        weight_status=weight_status,
+        performance_label=performance_label,
+        fat_gain_rising=fat_gain_rising,
+        lean_mass_improving=lean_mass_improving,
+        fat_stable=fat_stable,
+    )
+    states = _decision_states(
+        goal_type=goal_type,
+        body_comp_state=body_comp_state_label,
+        nutrition_state=nutrition_state_label,
+        training_state=_training_state(performance_signal),
+        recovery_state=_recovery_state(recovery_signal),
+        calorie_delta=changes["calories"],
+    )
+    thresholds = _trace_thresholds(
+        weight_signal=weight_signal,
+        body_composition=body_composition,
+        nutrition_signal=nutrition_signal,
+    )
+    signals["states"] = states
+    signals["thresholds"] = thresholds
     next_review = (analysis_day + timedelta(days=7)).date().isoformat()
     confidence_message = (
         f"Recommendation confidence: {confidence_level.capitalize()}. "
@@ -1239,6 +1557,8 @@ def build_adaptive_nutrition_recommendation(
     trace = _build_recommendation_trace(
         changes=changes,
         reasoning=reasoning,
+        states=states,
+        thresholds=thresholds,
         body_composition=body_composition,
         weight_signal=weight_signal,
         nutrition_signal=nutrition_signal,
@@ -1276,6 +1596,11 @@ def build_adaptive_nutrition_recommendation(
         "dataQualityScore": data_quality["score"],
         "reasoning": reasoning[:8],
         "signals": signals,
+        "states": states,
+        "body_comp_state": states["body_comp_state"],
+        "nutrition_state": states["nutrition_state"],
+        "training_state": states["training_state"],
+        "recovery_state": states["recovery_state"],
         "recommendation_trace": trace,
         "structured_suggestions": structured_suggestions,
         "workout_recovery_suggestions": structured_suggestions,

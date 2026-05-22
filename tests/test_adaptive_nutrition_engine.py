@@ -414,9 +414,43 @@ class AdaptiveNutritionEngineTest(unittest.TestCase):
         self.assertIn("recommendation_trace", recommendation)
         self.assertIn(recommendation["recommendation_trace"]["decision"], {"hold", "increase", "decrease"})
         self.assertIn("nutrition_signal", recommendation["recommendation_trace"])
+        self.assertIn("thresholds", recommendation["recommendation_trace"])
+        self.assertIn("body_comp_state", recommendation)
+        self.assertIn("nutrition_state", recommendation)
+        self.assertIn("training_state", recommendation)
+        self.assertIn("recovery_state", recommendation)
         self.assertIn("missing_data", recommendation["confidence"])
         self.assertIn("overall", recommendation["confidence"])
         self.assertTrue(recommendation["structured_suggestions"])
+
+    def test_cut_goal_explicitly_avoids_overly_fast_loss(self):
+        recommendation = build_adaptive_nutrition_recommendation(
+            user_goals={**GOALS, "goal_type": "Cut"},
+            body_metrics_df=_body_comp(-0.2, 0, days=28, start="2026-04-17"),
+            nutrition_df=_nutrition(),
+            training_df=_training_series("declining"),
+            recovery_df=_recovery(quality="poor"),
+            current_targets={**CURRENT, "target_calories": 2400, "carb_grams": 276},
+            today="2026-05-14",
+        )
+
+        self.assertEqual(recommendation["states"]["goal_type"], "cut")
+        self.assertEqual(recommendation["signals"]["weight"]["status"], "losing too fast")
+        self.assertGreaterEqual(recommendation["calorieAdjustment"], 0)
+
+    def test_logged_over_target_blocks_calorie_increase(self):
+        recommendation = build_adaptive_nutrition_recommendation(
+            user_goals=GOALS,
+            body_metrics_df=_body(0.02),
+            nutrition_df=_nutrition(days=14, start="2026-05-01", calories=3150),
+            training_df=_training_series("declining"),
+            recovery_df=_recovery(),
+            current_targets=CURRENT,
+            today="2026-05-14",
+        )
+
+        self.assertEqual(recommendation["nutrition_state"], "over_target")
+        self.assertLessEqual(recommendation["calorieAdjustment"], 0)
 
 
 if __name__ == "__main__":
