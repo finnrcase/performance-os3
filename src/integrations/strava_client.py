@@ -1,8 +1,9 @@
 """
 Strava integration for importing runs into the local training log.
 
-This module uses Strava OAuth2. Tokens are stored locally in the app's
-gitignored settings file and are never returned to the frontend.
+This module uses Strava OAuth2. Tokens are stored in backend_new integration
+storage when available, with a local settings fallback, and are never returned
+to the frontend.
 """
 
 from __future__ import annotations
@@ -18,7 +19,8 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from src.config import load_settings, save_settings
+from src.config import load_settings as _file_load_settings
+from src.config import save_settings as _file_save_settings
 from src.storage import mark_dataframe_deletes
 from src.training import TRAINING_COLUMNS, load_training_log, save_training_log
 
@@ -51,6 +53,49 @@ class StravaIntegrationError(Exception):
 
 class StravaReconnectRequired(StravaIntegrationError):
     """Raised when saved Strava tokens are invalid and OAuth must be run again."""
+
+
+def _merge_settings(base: dict, stored: dict) -> dict:
+    merged = dict(base or {})
+    stored = dict(stored or {})
+    merged.update({key: value for key, value in stored.items() if key not in {"integrations", "metadata"}})
+    merged["integrations"] = {**dict((base or {}).get("integrations") or {}), **dict(stored.get("integrations") or {})}
+    merged["metadata"] = {**dict((base or {}).get("metadata") or {}), **dict(stored.get("metadata") or {})}
+    return merged
+
+
+def load_settings() -> dict:
+    """Load settings from backend_new DB storage, falling back to legacy local file."""
+    file_settings = _file_load_settings()
+    try:
+        from backend_new.db import fetch_latest_document
+
+        stored = fetch_latest_document("api_connections", {})
+        if isinstance(stored, dict) and stored and "_db_error" not in stored:
+            return _merge_settings(file_settings, stored)
+    except Exception:
+        logger.exception("Could not read backend_new Strava settings storage; using local settings fallback.")
+    return file_settings
+
+
+def save_settings(settings: dict) -> None:
+    """Persist settings where backend_new status routes read them.
+
+    The file fallback keeps local/dev compatibility, but production status reads
+    api_connections, so OAuth token writes must land there first.
+    """
+    payload = dict(settings or {})
+    payload["settings_key"] = "primary"
+    try:
+        from backend_new.db import upsert_json_row
+
+        saved = upsert_json_row("api_connections", "settings_key", "primary", payload)
+        if isinstance(saved, dict) and saved.get("_db_error"):
+            raise RuntimeError(saved["_db_error"].get("message") or "DB save failed")
+        return
+    except Exception:
+        logger.exception("Could not save backend_new Strava settings storage; using local settings fallback.")
+    _file_save_settings(settings)
 
 
 def _read_dotenv_value(key: str) -> str:

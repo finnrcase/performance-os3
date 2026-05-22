@@ -7,6 +7,7 @@ data. It does not create schema, import data, or run integration syncs.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import copy
 from datetime import date, datetime, timedelta, timezone
 import logging
 import math
@@ -48,6 +49,7 @@ MAX_CORE_TRAINING_ROWS = 250
 CORE_TRAINING_DAYS = 90
 CORE_TRAINING_WORKOUTS = 5
 CORE_TRAINING_CACHE_KEY = "core_training_summary"
+DASHBOARD_CORE_CACHE_TTL_SECONDS = 20
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +64,8 @@ class UnsafeTableName(ValueError):
 
 _connection: Any | None = None
 _connection_lock = threading.RLock()
+_dashboard_core_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+_dashboard_core_cache_lock = threading.RLock()
 
 
 def _duration_ms(started: float) -> float:
@@ -131,10 +135,64 @@ def _safe_json_key(key: str | None) -> str | None:
     return key
 
 
+def invalidate_dashboard_core_cache() -> None:
+    with _dashboard_core_cache_lock:
+        _dashboard_core_cache.clear()
+
+
+def _dashboard_core_cache_key(
+    today: str,
+    *,
+    food_limit: int,
+    body_limit: int,
+    recovery_limit: int,
+    sleep_limit: int,
+    include_training_summary: bool,
+) -> tuple[Any, ...]:
+    return (
+        str(today),
+        _bounded_limit(food_limit),
+        _bounded_limit(body_limit),
+        _bounded_limit(recovery_limit),
+        _bounded_limit(sleep_limit),
+        bool(include_training_summary),
+    )
+
+
 def _jsonb(value: dict[str, Any]) -> Any:
     from psycopg.types.json import Jsonb
 
     return Jsonb(sanitize_json(value))
+
+
+def ensure_jsonb_table(table: str) -> dict[str, Any]:
+    """Create one of the supported JSONB tables on demand.
+
+    This is intentionally called by write paths, not startup, so deployment and
+    health checks remain side-effect free.
+    """
+    started = time.perf_counter()
+    try:
+        safe_table = _safe_table(table)
+        with cursor(timeout_ms=2500) as cur:
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {safe_table} (
+                    id BIGSERIAL PRIMARY KEY,
+                    data JSONB NOT NULL DEFAULT '{{}}'::jsonb,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                    row_order BIGSERIAL
+                )
+                """
+            )
+            cur.execute(f"CREATE INDEX IF NOT EXISTS {safe_table}_updated_at_idx ON {safe_table} (updated_at DESC, id DESC)")
+        return {"status": "ok", "table": safe_table, "duration_ms": _duration_ms(started)}
+    except DatabaseNotConfigured:
+        return {"status": "not_configured", "table": table, "duration_ms": _duration_ms(started)}
+    except Exception as exc:
+        logger.exception("[db] ensure_jsonb_table failed table=%s", table)
+        return {**structured_error(exc, operation="ensure_jsonb_table"), "table": table, "duration_ms": _duration_ms(started)}
 
 
 def get_connection() -> Any:
@@ -398,6 +456,31 @@ def _training_row_volume(row: dict[str, Any]) -> float:
     return _number(row.get("sets"), 0) * _number(row.get("reps"), 0) * _number(row.get("weight"), 0)
 
 
+def _training_row_reps(row: dict[str, Any]) -> int:
+    return max(0, int(_number(row.get("sets"), 0))) * max(0, int(_number(row.get("reps"), 0)))
+
+
+def _infer_training_muscle_group(exercise: Any) -> str:
+    name = str(exercise or "").lower()
+    terms = [
+        ("Chest", ("bench", "chest press", "fly", "pec", "push up", "push-up", "incline press")),
+        ("Back", ("row", "pulldown", "pull down", "pullup", "pull-up", "chin", "lat ", "shrug")),
+        ("Shoulders", ("overhead press", "shoulder press", "lateral raise", "front raise", "rear delt", "face pull", "arnold")),
+        ("Biceps", ("curl", "preacher", "hammer curl")),
+        ("Triceps", ("triceps", "skullcrusher", "skull crusher", "pushdown", "push down", "dip", "extension")),
+        ("Quads", ("squat", "leg press", "leg extension", "lunge", "split squat", "hack squat")),
+        ("Hamstrings", ("leg curl", "hamstring", "romanian", "rdl", "good morning")),
+        ("Glutes", ("hip thrust", "glute", "kickback")),
+        ("Calves", ("calf",)),
+        ("Core", ("crunch", "plank", "sit up", "sit-up", "cable crunch", "leg raise")),
+        ("Cardio", ("run", "treadmill", "bike", "cycling", "elliptical", "stair", "rower", "swim")),
+    ]
+    for group, needles in terms:
+        if any(needle in name for needle in needles):
+            return group
+    return ""
+
+
 def _cache_age_seconds(cached: dict[str, Any]) -> float | None:
     timestamp = str(cached.get("core_cached_at") or cached.get("updated_at") or "")
     if not timestamp:
@@ -425,6 +508,14 @@ def _summarize_training_rows(rows: list[dict[str, Any]], *, limit_workouts: int,
         first = workout_rows[0] if workout_rows else {}
         workout_type = str(first.get("workout_type") or first.get("title") or first.get("name") or "Workout")
         sources = sorted({str(row.get("source") or "manual") for row in workout_rows if row.get("source")})
+        muscle_groups = sorted(
+            {
+                group
+                for row in workout_rows
+                for group in (str(row.get("muscle_group") or "").strip(), _infer_training_muscle_group(row.get("exercise")))
+                if group
+            }
+        )
         classification = classify_workout(workout_rows)
         has_run = bool(classification.get("kind") in {"run", "cardio", "lift_cardio"})
         has_lift = bool(classification.get("has_lift"))
@@ -441,7 +532,9 @@ def _summarize_training_rows(rows: list[dict[str, Any]], *, limit_workouts: int,
                     "matched_cardio_terms": classification.get("matched_cardio_terms") or [],
                     "reason": classification.get("reason") or "",
                 },
+                "muscle_groups": muscle_groups,
                 "total_sets": int(sum(max(0, int(_number(row.get("sets"), 0))) for row in workout_rows)),
+                "total_reps": int(sum(_training_row_reps(row) for row in workout_rows)),
                 "total_volume": round(sum(_training_row_volume(row) for row in workout_rows), 1),
                 "duration_minutes": round(max([_number(row.get("duration_minutes"), 0) for row in workout_rows] or [0]), 1),
                 "source": ", ".join(sources) if sources else "manual",
@@ -469,6 +562,7 @@ def _summarize_training_rows(rows: list[dict[str, Any]], *, limit_workouts: int,
         "recent_volume_summary": {
             "total_volume": round(sum(_number(item.get("total_volume"), 0) for item in recent), 1),
             "total_sets": int(sum(_number(item.get("total_sets"), 0) for item in recent)),
+            "total_reps": int(sum(_number(item.get("total_reps"), 0) for item in recent)),
             "duration_minutes": round(sum(_number(item.get("duration_minutes"), 0) for item in recent), 1),
         },
         "latest_flags": {
@@ -569,7 +663,7 @@ def load_recent_training_summary(
             "days": bounded_days,
             "limit_workouts": bounded_workouts,
             "max_core_training_rows": MAX_CORE_TRAINING_ROWS,
-            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "duration_minutes": 0},
+            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "total_reps": 0, "duration_minutes": 0},
             "latest_flags": {"has_run": False, "has_lift": False},
             "items": [],
             "full_raw_hevy_scan": False,
@@ -590,7 +684,7 @@ def load_recent_training_summary(
             "days": bounded_days,
             "limit_workouts": bounded_workouts,
             "max_core_training_rows": MAX_CORE_TRAINING_ROWS,
-            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "duration_minutes": 0},
+            "recent_volume_summary": {"total_volume": 0, "total_sets": 0, "total_reps": 0, "duration_minutes": 0},
             "latest_flags": {"has_run": False, "has_lift": False},
             "items": [],
             "full_raw_hevy_scan": False,
@@ -603,12 +697,16 @@ def insert_json_row(table: str, data: dict[str, Any]) -> dict[str, Any]:
     payload = sanitize_json(dict(data))
     try:
         safe_table = _safe_table(table)
+        ensure_result = ensure_jsonb_table(safe_table)
+        if ensure_result.get("status") == "error":
+            raise RuntimeError(ensure_result.get("message") or "Could not ensure JSONB table.")
         with cursor(timeout_ms=1500) as cur:
             cur.execute(
                 f"INSERT INTO {safe_table} (data) VALUES (%s) RETURNING data",
                 (_jsonb(payload),),
             )
             row = cur.fetchone()
+            invalidate_dashboard_core_cache()
             return sanitize_json(dict(row[0])) if row else payload
     except DatabaseNotConfigured:
         return payload
@@ -621,6 +719,9 @@ def upsert_json_row(table: str, key_field: str, key_value: str, data: dict[str, 
     payload = sanitize_json(dict(data))
     try:
         safe_table = _safe_table(table)
+        ensure_result = ensure_jsonb_table(safe_table)
+        if ensure_result.get("status") == "error":
+            raise RuntimeError(ensure_result.get("message") or "Could not ensure JSONB table.")
         safe_key = _safe_json_key(key_field)
         if safe_key is None:
             raise ValueError("key_field is required.")
@@ -637,12 +738,14 @@ def upsert_json_row(table: str, key_field: str, key_value: str, data: dict[str, 
             )
             row = cur.fetchone()
             if row:
+                invalidate_dashboard_core_cache()
                 return sanitize_json(dict(row[0]))
             cur.execute(
                 f"INSERT INTO {safe_table} (data) VALUES (%s) RETURNING data",
                 (_jsonb(payload),),
             )
             inserted = cur.fetchone()
+            invalidate_dashboard_core_cache()
             return sanitize_json(dict(inserted[0])) if inserted else payload
     except DatabaseNotConfigured:
         return payload
@@ -655,6 +758,9 @@ def update_json_rows_for_value(table: str, field: str, value: str, patch: dict[s
     payload = sanitize_json(dict(patch))
     try:
         safe_table = _safe_table(table)
+        ensure_result = ensure_jsonb_table(safe_table)
+        if ensure_result.get("status") == "error":
+            raise RuntimeError(ensure_result.get("message") or "Could not ensure JSONB table.")
         safe_field = _safe_json_key(field)
         if safe_field is None:
             raise ValueError("field is required.")
@@ -668,6 +774,8 @@ def update_json_rows_for_value(table: str, field: str, value: str, patch: dict[s
                 (_jsonb(payload), safe_field, str(value)),
             )
             updated = int(getattr(cur, "rowcount", 0) or 0)
+        if updated:
+            invalidate_dashboard_core_cache()
         return {
             "status": "ok",
             "table": safe_table,
@@ -716,6 +824,17 @@ def move_workout_date_rows(
 
     try:
         safe_table = _safe_table(table)
+        if not table_exists(safe_table):
+            return {
+                "status": "ok",
+                "table": safe_table,
+                "workout_id": workout_id,
+                "old_dates": [],
+                "old_date": "",
+                "new_date": normalized_date,
+                "updated_rows": 0,
+                "duration_ms": _duration_ms(started),
+            }
         safe_fields = tuple(field for field in (_safe_json_key(field) for field in match_fields) if field)
         if not safe_fields:
             raise ValueError("At least one match field is required.")
@@ -748,6 +867,8 @@ def move_workout_date_rows(
                     (_jsonb(payload), row_id),
                 )
                 updated_rows += int(getattr(cur, "rowcount", 0) or 0)
+        if updated_rows:
+            invalidate_dashboard_core_cache()
         return {
             "status": "ok",
             "table": safe_table,
@@ -783,6 +904,8 @@ def delete_json_row(table: str, key_field: str, key_value: str) -> dict[str, Any
         with cursor(timeout_ms=1500) as cur:
             cur.execute(f"DELETE FROM {safe_table} WHERE data->>%s = %s", (safe_key, str(key_value)))
             deleted = int(getattr(cur, "rowcount", 0) or 0)
+        if deleted:
+            invalidate_dashboard_core_cache()
         return {
             "status": "ok",
             "deleted": deleted,
@@ -844,6 +967,69 @@ def count_rows(table: str) -> dict[str, Any]:
         }
 
 
+def count_rows_many(tables: list[str] | tuple[str, ...] | set[str]) -> dict[str, dict[str, Any]]:
+    started = time.perf_counter()
+    safe_tables = sorted({_safe_table(table) for table in tables})
+    defaults = {
+        table: {
+            "status": "not_configured" if not database_url() else "missing",
+            "table": table,
+            "count_estimate": 0,
+            "exact": False,
+            "duration_ms": 0,
+        }
+        for table in safe_tables
+    }
+    if not safe_tables:
+        return {}
+    if not database_url():
+        duration = _duration_ms(started)
+        return {table: {**value, "duration_ms": duration} for table, value in defaults.items()}
+    try:
+        placeholders = ", ".join(["(%s)"] * len(safe_tables))
+        with cursor(timeout_ms=1500) as cur:
+            cur.execute(
+                f"""
+                SELECT requested.table_name,
+                       to_regclass(requested.table_name) IS NOT NULL AS exists,
+                       COALESCE((
+                         SELECT reltuples::bigint
+                         FROM pg_class
+                         WHERE oid = to_regclass(requested.table_name)
+                       ), 0) AS estimate
+                FROM (VALUES {placeholders}) AS requested(table_name)
+                """,
+                tuple(safe_tables),
+            )
+            rows = cur.fetchall()
+        duration = _duration_ms(started)
+        return {
+            str(table): {
+                "status": "ok" if exists else "missing",
+                "table": str(table),
+                "count_estimate": max(0, int(estimate or 0)),
+                "exact": False,
+                "duration_ms": duration,
+            }
+            for table, exists, estimate in rows
+        }
+    except DatabaseNotConfigured:
+        duration = _duration_ms(started)
+        return {table: {**value, "duration_ms": duration} for table, value in defaults.items()}
+    except Exception as exc:
+        duration = _duration_ms(started)
+        return {
+            table: {
+                **structured_error(exc, operation="count_rows_many"),
+                "table": table,
+                "count_estimate": 0,
+                "exact": False,
+                "duration_ms": duration,
+            }
+            for table in safe_tables
+        }
+
+
 def fetch_dashboard_core_bundle(
     today: str,
     *,
@@ -887,6 +1073,22 @@ def fetch_dashboard_core_bundle(
             "warnings": [],
             "duration_ms": _duration_ms(started),
         }
+
+    cache_key = _dashboard_core_cache_key(
+        today,
+        food_limit=food_limit,
+        body_limit=body_limit,
+        recovery_limit=recovery_limit,
+        sleep_limit=sleep_limit,
+        include_training_summary=include_training_summary,
+    )
+    with _dashboard_core_cache_lock:
+        cached = _dashboard_core_cache.get(cache_key)
+        if cached and time.time() - float(cached.get("_cached_epoch", 0)) <= DASHBOARD_CORE_CACHE_TTL_SECONDS:
+            payload = copy.deepcopy(cached.get("payload", {}))
+            payload["cache"] = {"status": "hit", "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS}
+            payload["duration_ms"] = _duration_ms(started)
+            return payload
 
     blocks: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
@@ -960,68 +1162,169 @@ def fetch_dashboard_core_bundle(
 
         return read_block(block_name, table, [], query)
 
-    goals = latest_document_block("user_goal_settings", "goals")
-    targets = latest_document_block("macro_targets", "targets")
-    food_rows = rows_block(
-        "food_logs",
-        "today_food_rows",
-        """
-        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
-        FROM (
-          SELECT data
-          FROM food_logs
-          WHERE COALESCE(data->>'date', '') = %s
-            AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
-          ORDER BY row_order DESC, id DESC
-          LIMIT %s
-        ) rows
-        """,
-        (today, _bounded_limit(food_limit)),
-    )
-    body_rows = rows_block(
-        "body_metric_logs",
-        "body_metric_rows",
-        """
-        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
-        FROM (
-          SELECT data
-          FROM body_metric_logs
-          WHERE COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
-          ORDER BY id DESC
-          LIMIT %s
-        ) rows
-        """,
-        (_bounded_limit(body_limit),),
-    )
-    cached_training_metadata = latest_document_block("training_cache_metadata", "training_cache_metadata")
-    recovery_rows = rows_block(
-        "recovery_logs",
-        "recovery_rows",
-        """
-        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
-        FROM (
-          SELECT data
-          FROM recovery_logs
-          ORDER BY data->>'date' DESC, row_order DESC, id DESC
-          LIMIT %s
-        ) rows
-        """,
-        (_bounded_limit(recovery_limit),),
-    )
-    sleep_rows = rows_block(
-        "sleep_logs",
-        "sleep_rows",
-        """
-        SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
-        FROM (
-          SELECT data
-          FROM sleep_logs
-          ORDER BY data->>'date' DESC, row_order DESC, id DESC
-          LIMIT %s
-        ) rows
-        """,
-        (_bounded_limit(sleep_limit),),
-    )
+    goals: dict[str, Any] = {}
+    targets: dict[str, Any] = {}
+    food_rows: list[dict[str, Any]] = []
+    body_rows: list[dict[str, Any]] = []
+    cached_training_metadata: dict[str, Any] = {}
+    recovery_rows: list[dict[str, Any]] = []
+    sleep_rows: list[dict[str, Any]] = []
+    combined_started = time.perf_counter()
+    try:
+        expressions = [
+            "(SELECT data FROM user_goal_settings ORDER BY updated_at DESC, id DESC LIMIT 1)" if "user_goal_settings" in core_tables else "'{}'::jsonb",
+            "(SELECT data FROM macro_targets ORDER BY updated_at DESC, id DESC LIMIT 1)" if "macro_targets" in core_tables else "'{}'::jsonb",
+            """
+            (SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+             FROM (
+               SELECT data
+               FROM food_logs
+               WHERE COALESCE(data->>'date', '') = %s
+                 AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+               ORDER BY row_order DESC, id DESC
+               LIMIT %s
+             ) rows)
+            """ if "food_logs" in core_tables else "'[]'::jsonb",
+            """
+            (SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+             FROM (
+               SELECT data
+               FROM body_metric_logs
+               WHERE COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+               ORDER BY id DESC
+               LIMIT %s
+             ) rows)
+            """ if "body_metric_logs" in core_tables else "'[]'::jsonb",
+            "(SELECT data FROM training_cache_metadata ORDER BY updated_at DESC, id DESC LIMIT 1)" if "training_cache_metadata" in core_tables else "'{}'::jsonb",
+            """
+            (SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+             FROM (
+               SELECT data
+               FROM recovery_logs
+               ORDER BY data->>'date' DESC, row_order DESC, id DESC
+               LIMIT %s
+             ) rows)
+            """ if "recovery_logs" in core_tables else "'[]'::jsonb",
+            """
+            (SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+             FROM (
+               SELECT data
+               FROM sleep_logs
+               ORDER BY data->>'date' DESC, row_order DESC, id DESC
+               LIMIT %s
+             ) rows)
+            """ if "sleep_logs" in core_tables else "'[]'::jsonb",
+        ]
+        params: list[Any] = []
+        if "food_logs" in core_tables:
+            params.extend([today, _bounded_limit(food_limit)])
+        if "body_metric_logs" in core_tables:
+            params.append(_bounded_limit(body_limit))
+        if "recovery_logs" in core_tables:
+            params.append(_bounded_limit(recovery_limit))
+        if "sleep_logs" in core_tables:
+            params.append(_bounded_limit(sleep_limit))
+        with cursor(timeout_ms=2500) as cur:
+            cur.execute(
+                "SELECT " + ", ".join(f"{expression} AS col_{index}" for index, expression in enumerate(expressions)),
+                tuple(params),
+            )
+            row = cur.fetchone()
+        if row:
+            goals = sanitize_json(dict(row[0] or {}))
+            targets = sanitize_json(dict(row[1] or {}))
+            food_rows = sanitize_json(list(row[2] or []))
+            body_rows = sanitize_json(list(row[3] or []))
+            cached_training_metadata = sanitize_json(dict(row[4] or {}))
+            recovery_rows = sanitize_json(list(row[5] or []))
+            sleep_rows = sanitize_json(list(row[6] or []))
+        combined_duration = _duration_ms(combined_started)
+        for block_name, table in (
+            ("goals", "user_goal_settings"),
+            ("targets", "macro_targets"),
+            ("today_food_rows", "food_logs"),
+            ("body_metric_rows", "body_metric_logs"),
+            ("training_cache_metadata", "training_cache_metadata"),
+            ("recovery_rows", "recovery_logs"),
+            ("sleep_rows", "sleep_logs"),
+        ):
+            if table in core_tables:
+                blocks.append({"block": block_name, "name": block_name, "table": table, "status": "ok", "duration_ms": combined_duration, "source": "combined_snapshot"})
+            else:
+                warning = {
+                    "block": block_name,
+                    "name": block_name,
+                    "table": table,
+                    "status": "warning",
+                    "message": f"Optional table {table} is missing; using empty/default data.",
+                    "duration_ms": combined_duration,
+                }
+                blocks.append(warning)
+                warnings.append(warning)
+    except Exception:
+        logger.exception("[dashboard_core] combined snapshot failed; falling back to isolated blocks")
+        goals = latest_document_block("user_goal_settings", "goals")
+        targets = latest_document_block("macro_targets", "targets")
+        food_rows = rows_block(
+            "food_logs",
+            "today_food_rows",
+            """
+            SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+            FROM (
+              SELECT data
+              FROM food_logs
+              WHERE COALESCE(data->>'date', '') = %s
+                AND COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+              ORDER BY row_order DESC, id DESC
+              LIMIT %s
+            ) rows
+            """,
+            (today, _bounded_limit(food_limit)),
+        )
+        body_rows = rows_block(
+            "body_metric_logs",
+            "body_metric_rows",
+            """
+            SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+            FROM (
+              SELECT data
+              FROM body_metric_logs
+              WHERE COALESCE(data->>'excluded_from_analytics', 'false') <> 'true'
+              ORDER BY id DESC
+              LIMIT %s
+            ) rows
+            """,
+            (_bounded_limit(body_limit),),
+        )
+        cached_training_metadata = latest_document_block("training_cache_metadata", "training_cache_metadata")
+        recovery_rows = rows_block(
+            "recovery_logs",
+            "recovery_rows",
+            """
+            SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+            FROM (
+              SELECT data
+              FROM recovery_logs
+              ORDER BY data->>'date' DESC, row_order DESC, id DESC
+              LIMIT %s
+            ) rows
+            """,
+            (_bounded_limit(recovery_limit),),
+        )
+        sleep_rows = rows_block(
+            "sleep_logs",
+            "sleep_rows",
+            """
+            SELECT COALESCE(jsonb_agg(data), '[]'::jsonb)
+            FROM (
+              SELECT data
+              FROM sleep_logs
+              ORDER BY data->>'date' DESC, row_order DESC, id DESC
+              LIMIT %s
+            ) rows
+            """,
+            (_bounded_limit(sleep_limit),),
+        )
 
     training_summary = empty_training_summary
     if include_training_summary:
@@ -1093,7 +1396,7 @@ def fetch_dashboard_core_bundle(
             }
         )
 
-    return {
+    result = {
         "status": "ok",
         "goals": goals,
         "targets": targets,
@@ -1106,5 +1409,9 @@ def fetch_dashboard_core_bundle(
         "counts": counts,
         "blocks": blocks,
         "warnings": warnings,
+        "cache": {"status": "miss", "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS},
         "duration_ms": _duration_ms(started),
     }
+    with _dashboard_core_cache_lock:
+        _dashboard_core_cache[cache_key] = {"payload": copy.deepcopy(result), "_cached_epoch": time.time()}
+    return result

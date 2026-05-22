@@ -7,10 +7,10 @@ from uuid import uuid4
 
 from fastapi import APIRouter
 
-from backend_new.db import fetch_json_rows, fetch_json_rows_for_value, fetch_latest_document, insert_json_row, upsert_json_row
+from backend_new.db import fetch_json_rows, fetch_latest_document, insert_json_row, upsert_json_row
 from backend_new.routes.dashboard import dashboard_core
 from backend_new.routes.goals import calculate_targets, fallback_goals
-from backend_new.routes.nutrition import _is_excluded, _nutrition_value, _round, _target_payload, _today_iso, _totals
+from backend_new.routes.nutrition import _daily_summary_from_logs, _is_excluded, _today_iso
 from backend_new.utils import utc_now_iso
 
 
@@ -63,57 +63,14 @@ def _current_targets(targets: dict[str, Any], goals: dict[str, Any]) -> dict[str
     }
 
 
-def _target_from_payload(targets: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "target_calories": targets.get("calories"),
-        "protein_grams": targets.get("protein"),
-        "carb_grams": targets.get("carbs"),
-        "fat_grams": targets.get("fat"),
-    }
-
-
 def _build_daily_summary(selected_date: str) -> dict[str, Any]:
-    food_rows = [row for row in _clean_rows(fetch_json_rows_for_value("food_logs", "date", selected_date, limit=1000)) if not _is_excluded(row)]
-    totals = _totals(food_rows)
-    targets = _target_from_payload(_target_payload())
-    total_calories = _nutrition_value(totals, "calories")
-    total_protein = _nutrition_value(totals, "protein")
-    total_carbs = _nutrition_value(totals, "carbs")
-    total_fat = _nutrition_value(totals, "fat")
-    target_calories = targets.get("target_calories")
-    target_protein = targets.get("protein_grams")
-    target_carbs = targets.get("carb_grams")
-    target_fat = targets.get("fat_grams")
-    return {
-        "date": selected_date,
-        "summary_id": f"nutrition-summary:{selected_date}",
-        "finalized": True,
-        "status": "finalized",
-        "nutrition_logged": bool(food_rows),
-        "logged_day": bool(food_rows),
-        "items_count": len(food_rows),
-        "total_calories": total_calories,
-        "total_protein": total_protein,
-        "total_carbs": total_carbs,
-        "total_fat": total_fat,
-        "fiber": totals.get("fiber"),
-        "target_calories": target_calories,
-        "target_protein": target_protein,
-        "target_carbs": target_carbs,
-        "target_fat": target_fat,
-        "calories_delta": _round(total_calories - float(target_calories)) if target_calories else None,
-        "protein_delta": _round(total_protein - float(target_protein)) if target_protein else None,
-        "carbs_delta": _round(total_carbs - float(target_carbs)) if target_carbs else None,
-        "fat_delta": _round(total_fat - float(target_fat)) if target_fat else None,
-        "adherence_score": None,
-        "notes": "Finalized from raw food logs. Missing days are not synthesized as zero.",
-        "finalized_at": utc_now_iso(),
-        "updated_at": utc_now_iso(),
-    }
+    return _daily_summary_from_logs(selected_date, finalized=True)
 
 
 def _finalize_day(selected_date: str) -> dict[str, Any]:
     summary = _build_daily_summary(selected_date)
+    if not summary.get("nutrition_logged"):
+        return {**summary, "finalized": False, "status": "missing", "not_saved": True}
     saved = upsert_json_row("daily_nutrition_summary", "date", selected_date, summary)
     return saved if isinstance(saved, dict) else summary
 
@@ -129,7 +86,12 @@ def _load_engine_inputs(selected_date: str, finalized_summary: dict[str, Any] | 
     goals = _engine_goals({**fallback_goals(), **fetch_latest_document("user_goal_settings", {})})
     targets = _current_targets(fetch_latest_document("macro_targets", {}), goals)
     nutrition_rows = _load_daily_summaries()
-    if finalized_summary and not any(str(row.get("date") or "") == selected_date for row in nutrition_rows):
+    if (
+        finalized_summary
+        and finalized_summary.get("nutrition_logged")
+        and not finalized_summary.get("not_saved")
+        and not any(str(row.get("date") or "") == selected_date for row in nutrition_rows)
+    ):
         nutrition_rows.append(finalized_summary)
         nutrition_rows.sort(key=lambda row: str(row.get("date") or ""))
     return {
@@ -213,8 +175,8 @@ def _dashboard_with_recommendation(recommendation: dict[str, Any], lean_bulk: di
     return dashboard
 
 
-@router.post("/api/nutrition/finalize-day")
-def finalize_nutrition_day(date: str | None = None) -> dict[str, Any]:
+@router.post("/api/recommendations/finalize-day")
+def finalize_nutrition_day_for_recommendations(date: str | None = None) -> dict[str, Any]:
     selected_date = str(date or _today_iso())
     summary = _finalize_day(selected_date)
     return {

@@ -92,6 +92,38 @@ def test_strava_callback_exchanges_code_and_redirects_to_frontend():
     exchange.assert_called_once_with("abc123")
 
 
+def test_strava_token_save_uses_backend_new_api_connections_storage():
+    from src.integrations import strava_client
+
+    saved_payloads = []
+
+    def fake_upsert(table, key_field, key_value, data):
+        saved_payloads.append((table, key_field, key_value, data))
+        return data
+
+    with (
+        patch("src.integrations.strava_client._file_load_settings", return_value={"integrations": {}, "metadata": {}}),
+        patch("backend_new.db.upsert_json_row", side_effect=fake_upsert),
+    ):
+        tokens = strava_client._save_strava_tokens(
+            {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": 123,
+                "scope": "read,activity:read_all",
+                "athlete": {"id": 42},
+            }
+        )
+
+    assert tokens["refresh_token"] == "refresh"
+    assert saved_payloads
+    table, key_field, key_value, data = saved_payloads[-1]
+    assert table == "api_connections"
+    assert key_field == "settings_key"
+    assert key_value == "primary"
+    assert data["metadata"]["strava_tokens"]["refresh_token"] == "refresh"
+
+
 def test_manual_strava_import_returns_counts_and_refreshes_summary_cache():
     result = {
         "imported_runs": 1,

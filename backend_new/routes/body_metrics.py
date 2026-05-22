@@ -112,6 +112,67 @@ def _canonical_public_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]
     return _sort_by_date(items)
 
 
+def _body_comp_trends(items: list[dict[str, Any]]) -> dict[str, Any]:
+    if not items:
+        return {
+            "windows": {},
+            "summary": "No canonical body-composition data yet.",
+            "confidence": {"body_comp": "low", "missing_data": ["No canonical bodyweight/body-composition rows available."]},
+        }
+    latest_date = str(items[-1].get("date") or "")
+    windows: dict[str, Any] = {}
+    missing: list[str] = []
+    try:
+        latest_day = date.fromisoformat(latest_date[:10])
+    except ValueError:
+        latest_day = date.today()
+    fields = ("bodyweight", "body_fat_percent", "lean_mass", "fat_mass", "muscle_mass")
+    for days in (7, 14, 28):
+        cutoff = (latest_day.toordinal() - days)
+        window_rows = []
+        for item in items:
+            try:
+                item_day = date.fromisoformat(str(item.get("date") or "")[:10])
+            except ValueError:
+                continue
+            if item_day.toordinal() >= cutoff:
+                window_rows.append(item)
+        changes: dict[str, float | None] = {}
+        for field in fields:
+            values = [(_number_or_none(row.get(field)), row) for row in window_rows if _number_or_none(row.get(field)) is not None]
+            if len(values) >= 2 and values[0][0] is not None and values[-1][0] is not None:
+                changes[f"{field}_change"] = round(float(values[-1][0]) - float(values[0][0]), 2)
+            else:
+                changes[f"{field}_change"] = None
+        windows[f"{days}d"] = {
+            "days": days,
+            "data_points": len(window_rows),
+            **changes,
+        }
+    body_comp_points = sum(1 for item in items if _number_or_none(item.get("body_fat_percent")) is not None or _number_or_none(item.get("lean_mass")) is not None)
+    if body_comp_points < 4:
+        missing.append("Need more Withings/body-composition rows for reliable lean-mass and fat-mass trends.")
+    confidence = "high" if body_comp_points >= 14 else "medium" if body_comp_points >= 6 else "low"
+    recent_28 = windows.get("28d", {})
+    lean_change = recent_28.get("lean_mass_change")
+    fat_change = recent_28.get("fat_mass_change")
+    summary_parts = []
+    if lean_change is not None:
+        summary_parts.append(f"lean mass {lean_change:+.2f} lb over 28d")
+    if fat_change is not None:
+        summary_parts.append(f"fat mass {fat_change:+.2f} lb over 28d")
+    return {
+        "windows": windows,
+        "summary": "; ".join(summary_parts) if summary_parts else "Bodyweight is canonical; body-composition trend confidence is limited.",
+        "confidence": {
+            "body_comp": confidence,
+            "data_points": body_comp_points,
+            "missing_data": missing,
+            "rule": "lowest_weight_per_day",
+        },
+    }
+
+
 def _find_metric(metric_id: str) -> dict[str, Any] | None:
     for field in ("body_metric_id", "id", "source_id"):
         rows = fetch_json_rows_for_value("body_metric_logs", field, metric_id, limit=1)
@@ -132,6 +193,7 @@ def get_body_metrics(limit: int = 1000) -> dict[str, Any]:
         "items": canonical_items,
         "canonical_items": canonical_items,
         "raw_items": raw_items,
+        "body_comp_trends": _body_comp_trends(canonical_items),
         "excluded_raw_count": len(rows) - len(analytics_rows),
         "status": "ok",
         "debug": canonical_bodyweight_debug(rows),

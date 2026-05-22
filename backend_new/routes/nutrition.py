@@ -83,6 +83,120 @@ def _target_payload() -> dict[str, Any]:
     }
 
 
+def _target_summary_payload() -> dict[str, Any]:
+    targets = _target_payload()
+    return {
+        "target_calories": targets.get("calories"),
+        "target_protein": targets.get("protein"),
+        "target_carbs": targets.get("carbs"),
+        "target_fat": targets.get("fat"),
+    }
+
+
+def _adherence_score(totals: dict[str, Any], targets: dict[str, Any], *, logged: bool) -> int | None:
+    if not logged:
+        return None
+    scores: list[float] = []
+    total_calories = _number(totals.get("calories"), 0)
+    total_protein = _number(totals.get("protein"), 0)
+    target_calories = _number(targets.get("target_calories"), 0)
+    target_protein = _number(targets.get("target_protein"), 0)
+    if target_calories > 0:
+        scores.append(max(0.0, 100.0 - (abs(total_calories - target_calories) / target_calories * 100.0)))
+    if target_protein > 0:
+        scores.append(min(100.0, max(0.0, total_protein / target_protein * 100.0)))
+    if not scores:
+        return None
+    return int(round(sum(scores) / len(scores)))
+
+
+def _daily_summary_from_logs(selected_date: str, *, finalized: bool) -> dict[str, Any]:
+    food_rows = [
+        row
+        for row in fetch_json_rows_for_value("food_logs", "date", selected_date, limit=1000)
+        if isinstance(row, dict) and "_db_error" not in row and not _is_excluded(row)
+    ]
+    totals = _totals(food_rows)
+    targets = _target_summary_payload()
+    logged = bool(food_rows)
+    target_calories = targets.get("target_calories")
+    target_protein = targets.get("target_protein")
+    target_carbs = targets.get("target_carbs")
+    target_fat = targets.get("target_fat")
+    total_calories = _nutrition_value(totals, "calories")
+    total_protein = _nutrition_value(totals, "protein")
+    total_carbs = _nutrition_value(totals, "carbs")
+    total_fat = _nutrition_value(totals, "fat")
+    now = utc_now_iso()
+    return {
+        "date": selected_date,
+        "summary_id": f"nutrition-summary:{selected_date}",
+        "finalized": finalized,
+        "status": "finalized" if finalized else "draft",
+        "nutrition_logged": logged,
+        "logged_day": logged,
+        "items_count": len(food_rows),
+        "total_calories": total_calories,
+        "total_protein": total_protein,
+        "total_carbs": total_carbs,
+        "total_fat": total_fat,
+        "fiber": totals.get("fiber"),
+        "target_calories": target_calories,
+        "target_protein": target_protein,
+        "target_carbs": target_carbs,
+        "target_fat": target_fat,
+        "calories_delta": _round(total_calories - float(target_calories)) if target_calories else None,
+        "protein_delta": _round(total_protein - float(target_protein)) if target_protein else None,
+        "carbs_delta": _round(total_carbs - float(target_carbs)) if target_carbs else None,
+        "fat_delta": _round(total_fat - float(target_fat)) if target_fat else None,
+        "adherence_score": _adherence_score(totals, targets, logged=logged),
+        "confidence": "medium" if logged and target_calories else "low",
+        "confidence_factors": {
+            "logged_items": len(food_rows),
+            "targets_present": bool(target_calories and target_protein),
+            "missing_days_are_zero": False,
+        },
+        "notes": "Finalized from raw food logs. Missing days are not synthesized as zero.",
+        "finalized_at": now if finalized else None,
+        "updated_at": now,
+    }
+
+
+def _history_adherence(items: list[dict[str, Any]]) -> dict[str, Any]:
+    logged = [item for item in items if item.get("nutrition_logged") or item.get("logged_day")]
+    calories = [_number(item.get("total_calories"), 0) for item in logged if item.get("total_calories") is not None]
+    protein = [_number(item.get("total_protein"), 0) for item in logged if item.get("total_protein") is not None]
+    target_calories = [_number(item.get("target_calories"), 0) for item in logged if _number(item.get("target_calories"), 0) > 0]
+    target_protein = [_number(item.get("target_protein"), 0) for item in logged if _number(item.get("target_protein"), 0) > 0]
+    scores = [_number(item.get("adherence_score"), 0) for item in logged if item.get("adherence_score") is not None]
+    dates = sorted({str(item.get("date") or "")[:10] for item in logged if item.get("date")})
+    missing_days = 0
+    if len(dates) >= 2:
+        start = date.fromisoformat(dates[0])
+        end = date.fromisoformat(dates[-1])
+        missing_days = max(0, (end - start).days + 1 - len(dates))
+    confidence = "high" if len(logged) >= 14 and missing_days <= 1 else "medium" if len(logged) >= 7 and missing_days <= 3 else "low"
+    avg_calories = round(sum(calories) / len(calories), 1) if calories else None
+    avg_target_calories = round(sum(target_calories) / len(target_calories), 1) if target_calories else None
+    avg_protein = round(sum(protein) / len(protein), 1) if protein else None
+    avg_target_protein = round(sum(target_protein) / len(target_protein), 1) if target_protein else None
+    return {
+        "average_calories": avg_calories,
+        "average_target_calories": avg_target_calories,
+        "average_calories_delta": _round((avg_calories or 0) - avg_target_calories) if avg_calories is not None and avg_target_calories else None,
+        "average_protein": avg_protein,
+        "average_target_protein": avg_target_protein,
+        "average_protein_delta": _round((avg_protein or 0) - avg_target_protein) if avg_protein is not None and avg_target_protein else None,
+        "days_over_target": sum(1 for item in logged if item.get("calories_delta") is not None and _number(item.get("calories_delta"), 0) > 0),
+        "days_under_target": sum(1 for item in logged if item.get("calories_delta") is not None and _number(item.get("calories_delta"), 0) < 0),
+        "consistency_score": int(round(sum(scores) / len(scores))) if scores else None,
+        "logged_days": len(logged),
+        "missing_days": missing_days,
+        "confidence": confidence,
+        "data_quality_note": "Only logged/finalized days are included; missing days lower confidence and are not counted as zero.",
+    }
+
+
 def _normalize_food_log(payload: dict[str, Any], *, food_log_id: str | None = None) -> dict[str, Any]:
     now = utc_now_iso()
     item = dict(payload)
@@ -274,22 +388,31 @@ def get_nutrition_history(limit: int = 500) -> dict[str, Any]:
     items.sort(key=lambda row: row["date"], reverse=True)
     return {
         "items": items,
-        "adherence": {
-            "average_calories": None,
-            "average_target_calories": None,
-            "average_calories_delta": None,
-            "average_protein": None,
-            "average_target_protein": None,
-            "average_protein_delta": None,
-            "days_over_target": 0,
-            "days_under_target": 0,
-            "consistency_score": None,
-            "logged_days": len(items),
-            "missing_days": 0,
-            "confidence": "low",
-            "data_quality_note": "Only logged days are returned; missing days are not synthesized as zero.",
-        },
+        "adherence": _history_adherence(items),
     }
+
+
+@router.post("/api/nutrition/finalize-day")
+def finalize_nutrition_day(payload: dict[str, Any] | None = None, date: str | None = None) -> dict[str, Any]:
+    raw_date = date or (payload or {}).get("date") or _today_iso()
+    selected_date = _normalize_history_date(str(raw_date))
+    summary = _daily_summary_from_logs(selected_date, finalized=True)
+    if not summary.get("nutrition_logged"):
+        return {
+            "status": "skipped",
+            "date": selected_date,
+            "summary": {**summary, "finalized": False, "status": "missing"},
+            "message": "No food logs exist for this date, so no zero-calorie summary was created.",
+        }
+    saved = upsert_json_row("daily_nutrition_summary", "date", selected_date, summary)
+    if isinstance(saved, dict) and saved.get("_db_error"):
+        raise HTTPException(status_code=500, detail=saved["_db_error"])
+    return {"status": "ok", "date": selected_date, "summary": saved}
+
+
+@router.post("/api/nutrition/history/{history_date}/finalize")
+def finalize_nutrition_history_day(history_date: str) -> dict[str, Any]:
+    return finalize_nutrition_day({"date": history_date})
 
 
 @router.post("/api/nutrition/history/{history_date}/exclude")

@@ -41,7 +41,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { CSSProperties, FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 
 function apiUrl(path: string) {
@@ -59,7 +59,6 @@ const navigation = [
 ] as const;
 
 type PageId = (typeof navigation)[number]["id"];
-type SidebarNavHighlight = { top: number; height: number; ready: boolean };
 type MobileNavHighlight = { left: number; top: number; width: number; height: number; ready: boolean };
 type FoodIconType = "bagel" | "protein_bar" | "oats" | "protein_shake" | "chicken";
 type AccentTheme = "lime" | "pink" | "purple" | "orange" | "blue" | "rainbow";
@@ -9181,11 +9180,8 @@ export default function Home() {
   const [rateLimited, setRateLimited] = useState(false);
   const [startupDebug, setStartupDebug] = useState<StartupDebugEntry[]>([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
-  const sidebarNavRef = useRef<HTMLElement | null>(null);
-  const sidebarItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const mobileNavRef = useRef<HTMLDivElement | null>(null);
   const mobileItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
-  const [sidebarHighlight, setSidebarHighlight] = useState<SidebarNavHighlight>({ top: 0, height: 0, ready: false });
   const [mobileHighlight, setMobileHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
@@ -9193,15 +9189,6 @@ export default function Home() {
 
   useLayoutEffect(() => {
     const measureActiveNavItems = () => {
-      const sidebarItem = sidebarItemRefs.current[activePage];
-      if (sidebarItem && sidebarNavRef.current) {
-        setSidebarHighlight({
-          top: sidebarItem.offsetTop,
-          height: sidebarItem.offsetHeight,
-          ready: true,
-        });
-      }
-
       const mobileItem = mobileItemRefs.current[activePage];
       if (mobileItem && mobileNavRef.current) {
         setMobileHighlight({
@@ -9225,6 +9212,7 @@ export default function Home() {
   }, [accentTheme]);
 
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
+  const activeNavIndex = Math.max(0, navigation.findIndex((item) => item.id === activePage));
   const strengthTrendPath = useCallback((exercise = selectedExercise) => {
     const params = new URLSearchParams();
     if (exercise) {
@@ -10814,14 +10802,14 @@ export default function Home() {
               <p className="text-xs text-zinc-500">Local-first dashboard</p>
             </div>
           </div>
-          <nav ref={sidebarNavRef} className="relative">
+          <nav
+            className="relative"
+            style={{ "--active-index": activeNavIndex, "--sidebar-tab-step": "3rem" } as CSSProperties}
+          >
             <span
               aria-hidden="true"
-              className={cx(
-                "accent-active pointer-events-none absolute left-0 right-0 rounded-lg transition-[transform,height,opacity] duration-200 ease-out",
-                sidebarHighlight.ready ? "opacity-100" : "opacity-0",
-              )}
-              style={{ height: sidebarHighlight.height, transform: `translateY(${sidebarHighlight.top}px)` }}
+              className="accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-transform duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none"
+              style={{ transform: "translateY(calc(var(--active-index) * var(--sidebar-tab-step)))" }}
             />
             <div className="space-y-2">
               {navigation.map((item) => {
@@ -10829,12 +10817,9 @@ export default function Home() {
                 return (
                   <button
                     key={item.id}
-                    ref={(node) => {
-                      sidebarItemRefs.current[item.id] = node;
-                    }}
                     onClick={() => setActivePage(item.id)}
                     data-testid={`nav-${item.id}`}
-                    className={cx("relative z-10 flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
+                    className={cx("relative z-10 flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
                   >
                     <Icon className="h-4 w-4" />
                     {item.label}

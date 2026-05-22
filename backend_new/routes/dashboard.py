@@ -10,7 +10,6 @@ import pandas as pd
 
 from backend_new.db import fetch_dashboard_core_bundle
 from backend_new.routes.goals import calculate_targets, fallback_goals
-from backend_new.routes.training import _history_payload
 from backend_new.utils import utc_now_iso
 from src.body_metrics import canonical_daily_bodyweights
 from src.analytics.recovery_engine import calculate_recovery_score
@@ -565,7 +564,7 @@ def _fallback_payload(today: str, blocks: list[dict[str, Any]], *, started: floa
 def dashboard_core() -> dict[str, Any]:
     started = time.perf_counter()
     today = _today_iso()
-    bundle = fetch_dashboard_core_bundle(today, body_limit=1000, food_limit=500, recovery_limit=500, sleep_limit=500, include_training_summary=False)
+    bundle = fetch_dashboard_core_bundle(today, body_limit=1000, food_limit=500, recovery_limit=500, sleep_limit=500, include_training_summary=True)
     bundle_status = str(bundle.get("status") or "")
     bundle_ready = bundle_status in {"ok", "not_configured"}
     blocks = [
@@ -587,10 +586,9 @@ def dashboard_core() -> dict[str, Any]:
     body_rows = bundle.get("body_rows") if isinstance(bundle.get("body_rows"), list) else []
     recovery_rows = bundle.get("recovery_rows") if isinstance(bundle.get("recovery_rows"), list) else []
     sleep_rows = bundle.get("sleep_rows") if isinstance(bundle.get("sleep_rows"), list) else []
-    training_history = _history_payload(limit=25, days=180)
-    training_items = training_history.get("items") if isinstance(training_history.get("items"), list) else []
-    training_rows = _training_rows_from_history(training_items)
     training_summary = bundle.get("training_summary") if isinstance(bundle.get("training_summary"), dict) else {}
+    training_items = training_summary.get("items") if isinstance(training_summary.get("items"), list) else []
+    training_rows = _training_rows_from_history(training_items)
     goals = {**fallback_goals(), **(bundle.get("goals") if isinstance(bundle.get("goals"), dict) else {})}
     targets = _simple_targets(goals, bundle.get("targets") if isinstance(bundle.get("targets"), dict) else {})
     nutrition_today = _totals(food_rows)
@@ -600,7 +598,7 @@ def dashboard_core() -> dict[str, Any]:
         latest_workout = training_summary.get("latest_workout")
     if latest_workout is None:
         latest_workout = _latest_workout(training_rows)
-    training_status = str(training_history.get("status") or training_summary.get("status") or "ok")
+    training_status = str(training_summary.get("status") or "ok")
     training_available = training_status in {"ok", "not_configured", "not_loaded"}
     recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows)
     counts = {**(bundle.get("counts") if isinstance(bundle.get("counts"), dict) else {})}
@@ -617,11 +615,11 @@ def dashboard_core() -> dict[str, Any]:
                 "block": "load_training",
                 "name": "load_training",
                 "status": "ok" if training_available else "degraded",
-                "rows": training_history.get("debug", {}).get("raw_rows_read", len(training_rows)) if isinstance(training_history.get("debug"), dict) else len(training_rows),
-                "total_rows": counts.get("training", 0),
-                "duration_ms": training_history.get("debug", {}).get("duration_ms", 0) if isinstance(training_history.get("debug"), dict) else 0,
-                "source": "training_history",
-                "message": training_history.get("message", ""),
+                "rows": training_summary.get("recent_rows", len(training_rows)),
+                "total_rows": training_summary.get("total_rows", counts.get("training", 0)),
+                "duration_ms": training_summary.get("duration_ms", 0),
+                "source": training_summary.get("source", "training_cache_metadata"),
+                "message": training_summary.get("message", ""),
                 "full_raw_hevy_scan": False,
             },
             {
@@ -690,12 +688,12 @@ def dashboard_core() -> dict[str, Any]:
             "required_blocks_failed": [],
             "generated_at": utc_now_iso(),
             "total_duration_ms": total_duration_ms,
-            "training_read_limit": training_history.get("debug", {}).get("read_limit", 0) if isinstance(training_history.get("debug"), dict) else 0,
-            "training_core_limit": training_history.get("limit", 0),
-            "training_core_days": training_history.get("days", 180),
-            "training_recent_rows": training_history.get("debug", {}).get("raw_rows_read", 0) if isinstance(training_history.get("debug"), dict) else len(training_rows),
+            "training_read_limit": training_summary.get("max_core_training_rows", 0),
+            "training_core_limit": training_summary.get("limit_workouts", 0),
+            "training_core_days": training_summary.get("days", 90),
+            "training_recent_rows": training_summary.get("recent_rows", len(training_rows)),
             "training_total_rows": counts.get("training", training_summary.get("total_rows", 0)),
-            "training_summary_source": "training_history",
+            "training_summary_source": training_summary.get("source", "training_cache_metadata"),
             "full_training_history_scanned": False,
             "external_api_checks": False,
             "syncs": False,

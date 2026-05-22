@@ -21,6 +21,7 @@ from backend_new.db import (
     insert_json_row,
     load_recent_training_summary,
     move_workout_date_rows,
+    upsert_json_row,
 )
 from backend_new.utils import json_safe, utc_now_iso
 from src.training_schedule import classify_workout
@@ -64,6 +65,31 @@ def _volume(row: dict[str, Any]) -> float:
     return _number(row.get("sets"), 0) * _number(row.get("reps"), 0) * _number(row.get("weight"), 0)
 
 
+def _total_reps(row: dict[str, Any]) -> int:
+    return max(0, _int(row.get("sets"), 0)) * max(0, _int(row.get("reps"), 0))
+
+
+def _infer_muscle_group(exercise: Any) -> str:
+    name = str(exercise or "").lower()
+    terms = [
+        ("Chest", ("bench", "chest press", "fly", "pec", "push up", "push-up", "incline press")),
+        ("Back", ("row", "pulldown", "pull down", "pullup", "pull-up", "chin", "lat ", "shrug")),
+        ("Shoulders", ("overhead press", "shoulder press", "lateral raise", "front raise", "rear delt", "face pull", "arnold")),
+        ("Biceps", ("curl", "preacher", "hammer curl")),
+        ("Triceps", ("triceps", "skullcrusher", "skull crusher", "pushdown", "push down", "dip", "extension")),
+        ("Quads", ("squat", "leg press", "leg extension", "lunge", "split squat", "hack squat")),
+        ("Hamstrings", ("leg curl", "hamstring", "romanian", "rdl", "good morning")),
+        ("Glutes", ("hip thrust", "glute", "kickback")),
+        ("Calves", ("calf",)),
+        ("Core", ("crunch", "plank", "sit up", "sit-up", "ab ", "cable crunch", "raise")),
+        ("Cardio", ("run", "treadmill", "bike", "cycling", "elliptical", "stair", "rower", "swim")),
+    ]
+    for group, needles in terms:
+        if any(needle in name for needle in needles):
+            return group
+    return ""
+
+
 def _workout_title(rows: list[dict[str, Any]]) -> str:
     for row in rows:
         notes = str(row.get("notes") or "")
@@ -98,10 +124,23 @@ def _group_workouts(rows: list[dict[str, Any]], *, cutoff: str) -> list[dict[str
     items: list[dict[str, Any]] = []
     for (workout_date, workout_id), workout_rows in grouped.items():
         exercises = list(dict.fromkeys(str(row.get("exercise") or "").strip() for row in workout_rows if str(row.get("exercise") or "").strip()))
-        muscle_groups = sorted({str(row.get("muscle_group") or "").strip() for row in workout_rows if str(row.get("muscle_group") or "").strip()})
+        muscle_groups = sorted(
+            {
+                group
+                for row in workout_rows
+                for group in (str(row.get("muscle_group") or "").strip(), _infer_muscle_group(row.get("exercise")))
+                if group
+            }
+        )
         sources = sorted({str(row.get("source") or "manual").strip() for row in workout_rows})
         classification = classify_workout(workout_rows)
         kind = str(classification.get("kind") or "unknown")
+        details = sorted(workout_rows, key=lambda row: (str(row.get("exercise") or ""), _int(row.get("set_number"), 0)))
+        for row in details:
+            if not str(row.get("muscle_group") or "").strip():
+                inferred = _infer_muscle_group(row.get("exercise"))
+                if inferred:
+                    row["muscle_group"] = inferred
         items.append(
             {
                 "date": workout_date,
@@ -119,10 +158,11 @@ def _group_workouts(rows: list[dict[str, Any]], *, cutoff: str) -> list[dict[str
                 "muscle_groups": muscle_groups,
                 "exercise_names": exercises,
                 "total_sets": int(sum(max(0, _int(row.get("sets"), 0)) for row in workout_rows)),
+                "total_reps": int(sum(_total_reps(row) for row in workout_rows)),
                 "total_volume": round(sum(_volume(row) for row in workout_rows), 1),
                 "duration_minutes": round(max([_number(row.get("duration_minutes"), 0) for row in workout_rows] or [0]), 1),
                 "source": ", ".join(sources) if sources else "manual",
-                "details": sorted(workout_rows, key=lambda row: (str(row.get("exercise") or ""), _int(row.get("set_number"), 0))),
+                "details": details,
             }
         )
     return sorted(items, key=lambda item: (str(item.get("date") or ""), str(item.get("workout_id") or "")), reverse=True)
@@ -399,10 +439,11 @@ def training_summary(window: str = "weekly", period: str = "all") -> dict[str, A
                 "period_label": workout_date,
                 "workout_count": 1,
                 "total_sets": workout.get("total_sets", 0),
-                "total_reps": 0,
+                "total_reps": workout.get("total_reps", 0),
                 "total_volume": workout.get("total_volume", 0),
                 "duration_minutes": workout.get("duration_minutes", 0),
                 "latest_workout_date": workout_date,
+                "muscle_groups": workout.get("muscle_groups", []),
             }
         )
     return {
@@ -658,24 +699,48 @@ def export_normalized(limit: int = 5000) -> Response:
 def rebuild_summaries() -> dict[str, Any]:
     history = _history_payload(limit=200, days=365)
     workouts = history.get("items", [])
-    weekly: dict[str, dict[str, Any]] = defaultdict(lambda: {"workout_count": 0, "total_sets": 0, "total_volume": 0.0, "duration_minutes": 0.0})
+    weekly: dict[str, dict[str, Any]] = defaultdict(
+        lambda: {
+            "workout_count": 0,
+            "total_sets": 0,
+            "total_reps": 0,
+            "total_volume": 0.0,
+            "duration_minutes": 0.0,
+            "muscle_groups": [],
+        }
+    )
     for workout in workouts:
-        week = str(workout.get("date") or "")[:10]
+        workout_date = str(workout.get("date") or "")[:10]
+        try:
+            week = (date.fromisoformat(workout_date) - timedelta(days=date.fromisoformat(workout_date).weekday())).isoformat()
+        except ValueError:
+            week = workout_date
         bucket = weekly[week]
         bucket["period_start"] = week
+        bucket["period_label"] = week
         bucket["workout_count"] += 1
         bucket["total_sets"] += _int(workout.get("total_sets"), 0)
+        bucket["total_reps"] += _int(workout.get("total_reps"), 0)
         bucket["total_volume"] += _number(workout.get("total_volume"), 0)
         bucket["duration_minutes"] += _number(workout.get("duration_minutes"), 0)
+        bucket["latest_workout_date"] = max(str(bucket.get("latest_workout_date") or ""), workout_date)
+        bucket["muscle_groups"] = sorted(set(bucket["muscle_groups"]) | set(workout.get("muscle_groups") or []))
+    summary_items = [dict(value) for value in weekly.values()]
+    for item in summary_items:
+        item["summary_id"] = f"weekly-training:{item.get('period_start')}"
+        item["updated_at"] = utc_now_iso()
     result = {
         "status": "ok",
         "message": "Lightweight summaries rebuilt from bounded local cached workout rows.",
         "raw_rows_summarized": len(workouts),
         "weekly_summaries": len(weekly),
         "monthly_summaries": 0,
-        "items": [dict(value) for value in weekly.values()],
+        "items": summary_items,
         "generated_at": utc_now_iso(),
     }
+    for item in summary_items:
+        if item.get("period_start"):
+            upsert_json_row("weekly_training_summary", "summary_id", str(item["summary_id"]), item)
     insert_json_row(
         "training_summary_state",
         {
