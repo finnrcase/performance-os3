@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import datetime, timezone
 import logging
+import re
 import time
 from typing import Any, Callable
 
@@ -354,18 +355,294 @@ def _pct_change(current: float, average: float) -> float | None:
     return round(((current - average) / average) * 100, 1)
 
 
-def _quality_rating(volume_pct: float | None, sets_pct: float | None, sample_size: int) -> tuple[str, int | None, str, str]:
-    if sample_size <= 0 or (volume_pct is None and sets_pct is None):
-        return "Insufficient data", None, "gray", "low"
-    values = [value for value in (volume_pct, sets_pct) if value is not None]
-    if any(value >= 10 for value in values):
-        return "Strong", 88, "bright_green", "high" if sample_size >= 4 else "medium"
-    if any(value <= -15 for value in values):
-        return "Light", 58, "orange", "high" if sample_size >= 4 else "medium"
-    return "Solid", 78, "green", "high" if sample_size >= 4 else "medium"
+def _clean_training_text(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
 
 
-def _workout_quality_payload(training_items: list[dict[str, Any]]) -> dict[str, Any]:
+def _workout_title_from_item(item: dict[str, Any]) -> str:
+    title = str(item.get("workout_type") or item.get("title") or "").strip()
+    if title:
+        return title
+    details = item.get("details") if isinstance(item.get("details"), list) else []
+    for row in details:
+        notes = str(row.get("notes") or "")
+        if "workout_title=" in notes:
+            return notes.split("workout_title=", 1)[1].split("|", 1)[0].strip()
+    return "Lift"
+
+
+def _normalized_workout_split(item: dict[str, Any]) -> str:
+    title = _clean_training_text(_workout_title_from_item(item))
+    split_terms = [
+        ("push", ("push", "pressing", "chest shoulders triceps")),
+        ("pull", ("pull", "back biceps")),
+        ("upper", ("upper", "upper body")),
+        ("lower", ("lower", "lower body")),
+        ("legs", ("legs", "leg", "squat")),
+    ]
+    for split, needles in split_terms:
+        if any(needle in title for needle in needles):
+            return split
+    return ""
+
+
+def _normalized_workout_title(item: dict[str, Any]) -> str:
+    text = _clean_training_text(_workout_title_from_item(item))
+    stop_words = {"workout", "session", "day", "training", "lift", "strength"}
+    words = [word for word in text.split() if word not in stop_words]
+    return " ".join(words)
+
+
+def _normalize_exercise_name(value: Any) -> str:
+    text = _clean_training_text(value)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _is_cardio_set(row: dict[str, Any]) -> bool:
+    exercise = _clean_training_text(row.get("exercise"))
+    group = _clean_training_text(row.get("muscle_group"))
+    cardio_terms = ("run", "treadmill", "bike", "cycling", "elliptical", "stair", "rower", "swim", "cardio")
+    return group == "cardio" or any(term in exercise for term in cardio_terms)
+
+
+def _is_warmup_set(row: dict[str, Any]) -> bool:
+    labels = " ".join(
+        str(row.get(key) or "")
+        for key in ("type", "set_type", "setType", "kind", "set_kind", "notes")
+    ).lower()
+    return bool(row.get("is_warmup")) or "warmup" in labels or "warm up" in labels
+
+
+def _workout_set_rows(item: dict[str, Any]) -> list[dict[str, Any]]:
+    details = item.get("details") if isinstance(item.get("details"), list) else []
+    raw_sets: list[dict[str, Any]] = []
+    for order, row in enumerate(details):
+        if not isinstance(row, dict):
+            continue
+        exercise = str(row.get("exercise") or "").strip()
+        reps = _number(row.get("reps"), 0)
+        weight = _number(row.get("weight"), 0)
+        set_count = int(max(0, _number(row.get("sets"), 1)))
+        if not exercise or reps <= 0 or weight <= 0 or set_count <= 0:
+            continue
+        if _is_warmup_set(row) or _is_cardio_set(row):
+            continue
+        explicit_index = int(max(0, _number(row.get("set_number", row.get("set_index", row.get("index", 0))), 0)))
+        for offset in range(set_count):
+            raw_sets.append(
+                {
+                    "exercise": exercise,
+                    "exercise_key": _normalize_exercise_name(exercise),
+                    "muscle_group": str(row.get("muscle_group") or "").strip(),
+                    "weight": weight,
+                    "reps": reps,
+                    "volume": weight * reps,
+                    "explicit_index": explicit_index + offset if explicit_index else None,
+                    "order": order + offset / max(1, set_count),
+                    "workout_id": item.get("workout_id") or "",
+                    "date": item.get("date") or "",
+                }
+            )
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in raw_sets:
+        grouped[row["exercise_key"]].append(row)
+    positioned: list[dict[str, Any]] = []
+    for exercise_sets in grouped.values():
+        exercise_sets.sort(key=lambda row: (row.get("explicit_index") is None, row.get("explicit_index") or row.get("order") or 0, row.get("order") or 0))
+        for index, row in enumerate(exercise_sets, start=1):
+            row["set_index"] = int(row.get("explicit_index") or index)
+            positioned.append(row)
+    return sorted(positioned, key=lambda row: (str(row.get("exercise") or ""), int(row.get("set_index") or 0), float(row.get("order") or 0)))
+
+
+def _workout_exercise_keys(item: dict[str, Any]) -> set[str]:
+    from_sets = {row["exercise_key"] for row in _workout_set_rows(item) if row.get("exercise_key")}
+    if from_sets:
+        return from_sets
+    exercises = item.get("exercise_names") if isinstance(item.get("exercise_names"), list) else []
+    return {_normalize_exercise_name(exercise) for exercise in exercises if _normalize_exercise_name(exercise)}
+
+
+def _similar_lift_workouts(latest: dict[str, Any], previous: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], str, str]:
+    split = _normalized_workout_split(latest)
+    if split:
+        matches = [item for item in previous if _normalized_workout_split(item) == split]
+        if matches:
+            return matches[:7], "normalized_split", split
+
+    title = _normalized_workout_title(latest)
+    if title:
+        matches = [item for item in previous if _normalized_workout_title(item) == title]
+        if matches:
+            return matches[:7], "normalized_title", title
+
+    latest_exercises = _workout_exercise_keys(latest)
+    if not latest_exercises:
+        return [], "none", ""
+    threshold = max(1, min(2, round(len(latest_exercises) * 0.4)))
+    matches = []
+    for item in previous:
+        overlap = latest_exercises & _workout_exercise_keys(item)
+        if len(overlap) >= threshold:
+            matches.append({**item, "_exercise_overlap": len(overlap)})
+    return matches[:7], "exercise_overlap" if matches else "none", f"{len(latest_exercises)} exercise(s)"
+
+
+def _average(values: list[float]) -> float | None:
+    return sum(values) / len(values) if values else None
+
+
+def _format_pct_decimal(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    sign = "+" if value >= 0 else ""
+    return f"{sign}{value * 100:.0f}%"
+
+
+def _pct_decimal(current: float, average: float | None) -> float | None:
+    if average is None or average <= 0:
+        return None
+    return (current - average) / average
+
+
+def _historical_set_for_index(sets: list[dict[str, Any]], set_index: int) -> dict[str, Any] | None:
+    exact = [row for row in sets if int(row.get("set_index") or 0) == set_index]
+    if exact:
+        return exact[-1]
+    lower = [row for row in sets if int(row.get("set_index") or 0) <= set_index]
+    if lower:
+        return sorted(lower, key=lambda row: int(row.get("set_index") or 0))[-1]
+    return None
+
+
+def _exercise_quality_rating(avg_pct: float | None, top_pct: float | None, reps_delta: float | None) -> str:
+    values = [value for value in (avg_pct, top_pct) if value is not None]
+    if not values:
+        return "Insufficient comparison data"
+    score_pct = sum(values) / len(values)
+    if score_pct >= 0.06 or (top_pct is not None and top_pct >= 0.08):
+        return "Improved"
+    if score_pct >= -0.04 or (reps_delta is not None and reps_delta >= 1):
+        return "Stable"
+    if score_pct >= -0.12:
+        return "Lighter"
+    return "Needs review"
+
+
+def _exercise_breakdown_for_workout(today_sets: list[dict[str, Any]], similar_workouts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    historical_by_workout: list[dict[str, list[dict[str, Any]]]] = []
+    for workout in similar_workouts:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in _workout_set_rows(workout):
+            grouped[str(row.get("exercise_key") or "")].append(row)
+        if grouped:
+            historical_by_workout.append(grouped)
+
+    today_grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    exercise_names: dict[str, str] = {}
+    for row in today_sets:
+        key = str(row.get("exercise_key") or "")
+        if not key:
+            continue
+        today_grouped[key].append(row)
+        exercise_names.setdefault(key, str(row.get("exercise") or "Exercise"))
+
+    breakdown: list[dict[str, Any]] = []
+    for exercise_key, sets in today_grouped.items():
+        sets.sort(key=lambda row: int(row.get("set_index") or 0))
+        set_pcts = []
+        same_weight_rep_deltas = []
+        for today_set in sets:
+            historical_volumes = []
+            for workout_sets in historical_by_workout:
+                candidate = _historical_set_for_index(workout_sets.get(exercise_key, []), int(today_set.get("set_index") or 0))
+                if candidate is not None:
+                    historical_volumes.append(float(candidate.get("volume") or 0))
+            historical_avg = _average([value for value in historical_volumes if value > 0])
+            set_pct = _pct_decimal(float(today_set.get("volume") or 0), historical_avg)
+            if set_pct is not None:
+                set_pcts.append(set_pct)
+
+            matching_reps = []
+            today_weight = float(today_set.get("weight") or 0)
+            tolerance = max(0.5, today_weight * 0.005)
+            for workout_sets in historical_by_workout:
+                for historical_set in workout_sets.get(exercise_key, []):
+                    if abs(float(historical_set.get("weight") or 0) - today_weight) <= tolerance:
+                        matching_reps.append(float(historical_set.get("reps") or 0))
+            avg_reps = _average([value for value in matching_reps if value > 0])
+            if avg_reps is not None:
+                same_weight_rep_deltas.append(float(today_set.get("reps") or 0) - avg_reps)
+
+        top_today = max((float(row.get("volume") or 0) for row in sets), default=0)
+        historical_top_sets = []
+        historical_average_sets = []
+        for workout_sets in historical_by_workout:
+            prior_sets = workout_sets.get(exercise_key, [])
+            if prior_sets:
+                historical_top_sets.append(max(float(row.get("volume") or 0) for row in prior_sets))
+                historical_average_sets.append(sum(float(row.get("volume") or 0) for row in prior_sets) / len(prior_sets))
+        top_pct = _pct_decimal(top_today, _average([value for value in historical_top_sets if value > 0]))
+        avg_set_pct = _average(set_pcts)
+        if avg_set_pct is None:
+            avg_today = sum(float(row.get("volume") or 0) for row in sets) / len(sets)
+            avg_set_pct = _pct_decimal(avg_today, _average([value for value in historical_average_sets if value > 0]))
+        reps_delta = _average(same_weight_rep_deltas)
+        score_pct_values = [value for value in (avg_set_pct, top_pct) if value is not None]
+        score_pct = _average(score_pct_values)
+        if score_pct is not None and reps_delta is not None:
+            score_pct += max(-0.03, min(0.03, reps_delta * 0.01))
+        breakdown.append(
+            {
+                "exercise": exercise_names[exercise_key],
+                "sets_compared": len(set_pcts),
+                "avg_set_volume_pct_change": round(avg_set_pct, 3) if avg_set_pct is not None else None,
+                "top_set_pct_change": round(top_pct, 3) if top_pct is not None else None,
+                "reps_at_same_weight_delta": round(reps_delta, 1) if reps_delta is not None else None,
+                "rating": _exercise_quality_rating(avg_set_pct, top_pct, reps_delta),
+                "_score_pct": score_pct,
+            }
+        )
+    return sorted(
+        breakdown,
+        key=lambda item: (
+            item.get("_score_pct") is None,
+            -abs(float(item.get("_score_pct") or 0)),
+            str(item.get("exercise") or ""),
+        ),
+    )
+
+
+def _workout_score_rating(score: int | None) -> tuple[str, str]:
+    if score is None:
+        return "Insufficient comparison data", "gray"
+    if score >= 90:
+        return "Excellent", "bright_green"
+    if score >= 75:
+        return "Strong", "green"
+    if score >= 60:
+        return "Solid", "green"
+    if score >= 40:
+        return "Light", "orange"
+    return "Needs review", "red"
+
+
+def _workout_has_deload_note(item: dict[str, Any]) -> bool:
+    text = _clean_training_text(_workout_title_from_item(item))
+    details = item.get("details") if isinstance(item.get("details"), list) else []
+    text += " " + " ".join(_clean_training_text(row.get("notes")) for row in details if isinstance(row, dict))
+    return any(term in text for term in ("deload", "light", "recovery", "easy", "technique"))
+
+
+def _poor_recovery(latest_recovery: dict[str, Any] | None) -> bool:
+    if not isinstance(latest_recovery, dict):
+        return False
+    score = latest_recovery.get("recovery_score")
+    classification = _clean_training_text(latest_recovery.get("classification"))
+    return (score not in {None, ""} and _number(score, 100) < 50) or classification in {"poor", "red", "low"}
+
+
+def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recovery: dict[str, Any] | None = None) -> dict[str, Any]:
     lifts = [dict(item) for item in training_items if _is_lift_history_item(item)]
     if not lifts:
         return {
@@ -377,54 +654,60 @@ def _workout_quality_payload(training_items: list[dict[str, Any]]) -> dict[str, 
             "confidence": "low",
             "summary": "No recent lifting workout found.",
             "explanation": "No recent lifting workout found.",
+            "comparison_basis": "last_7_similar_workouts",
+            "similar_workouts_used": 0,
+            "exercise_breakdown": [],
             "comparison": {
-                "basis": "recent_similar_lifts",
-                "volume_vs_average_pct": None,
-                "sets_vs_average_pct": None,
+                "basis": "last_7_similar_workouts",
+                "avg_set_volume_pct_change": None,
                 "sample_size": 0,
             },
-            "debug": {"source": "/api/training/history", "latest_lift_found": False},
+            "debug": {"source": "/api/training/history", "latest_lift_found": False, "matched_by": "none", "excluded_cardio": True},
             "source": "/api/training/history",
         }
 
     latest = lifts[0]
     latest_date = str(latest.get("date") or "")[:10]
     latest_id = str(latest.get("workout_id") or "")
-    title = str(latest.get("workout_type") or "Lift").strip() or "Lift"
+    title = _workout_title_from_item(latest)
     total_sets = int(max(0, _number(latest.get("total_sets"), 0)))
     total_reps = _workout_reps(latest)
     total_volume = _round(_number(latest.get("total_volume"), 0))
     duration = _round(_number(latest.get("duration_minutes"), 0))
     muscle_groups = _workout_muscle_groups(latest)
-    latest_muscles = set(muscle_groups)
-    title_key = title.lower()
-
     previous = [
         item
         for item in lifts[1:]
         if str(item.get("workout_id") or "") != latest_id and str(item.get("date") or "")[:10] < latest_date
     ]
-    similar = [item for item in previous if str(item.get("workout_type") or "").strip().lower() == title_key]
-    if not similar and latest_muscles:
-        similar = [item for item in previous if latest_muscles & set(_workout_muscle_groups(item))]
-    similar = similar[:6]
+    previous = sorted(previous, key=lambda item: (str(item.get("date") or "")[:10], str(item.get("workout_id") or "")), reverse=True)
+    similar, matched_by, match_label = _similar_lift_workouts(latest, previous)
     sample_size = len(similar)
-    average_volume = sum(_number(item.get("total_volume"), 0) for item in similar) / sample_size if sample_size else 0
-    average_sets = sum(_number(item.get("total_sets"), 0) for item in similar) / sample_size if sample_size else 0
-    volume_pct = _pct_change(_number(total_volume, 0), average_volume)
-    sets_pct = _pct_change(total_sets, average_sets)
-    rating, score, color, confidence = _quality_rating(volume_pct, sets_pct, sample_size)
-    summary_parts = [
-        f"{total_sets:,} sets",
-        f"{total_reps:,} reps",
-        f"{_number(total_volume, 0):,.0f} lb volume",
-        f"{_number(duration, 0):,.0f} min" if _number(duration, 0) > 0 else "duration pending",
-    ]
-    comparison_text = (
-        f"Compared with {sample_size} recent similar lift{'s' if sample_size != 1 else ''}."
-        if sample_size
-        else "No comparable recent lifts yet."
-    )
+    today_sets = _workout_set_rows(latest)
+    exercise_breakdown = _exercise_breakdown_for_workout(today_sets, similar)
+    comparable = [item for item in exercise_breakdown if item.get("_score_pct") is not None]
+    avg_progression = _average([float(item["_score_pct"]) for item in comparable])
+    compared_sets = sum(int(item.get("sets_compared") or 0) for item in exercise_breakdown)
+    score = None
+    if avg_progression is not None and comparable:
+        improved = sum(1 for item in comparable if float(item.get("_score_pct") or 0) >= 0.025)
+        declined = sum(1 for item in comparable if float(item.get("_score_pct") or 0) <= -0.06)
+        consistency_adjustment = ((improved - declined) / len(comparable)) * 4
+        score = int(round(max(20, min(98, 67 + avg_progression * 240 + consistency_adjustment))))
+        if score < 55 and (_workout_has_deload_note(latest) or _poor_recovery(latest_recovery)):
+            score = 55
+    rating, color = _workout_score_rating(score)
+    confidence = "high" if sample_size >= 7 and compared_sets >= max(3, len(comparable) * 2) else "medium" if sample_size >= 3 and compared_sets else "low"
+    split_label = match_label.title() if matched_by == "normalized_split" and match_label else "similar"
+    if avg_progression is None:
+        summary = "Insufficient comparison data for set-level workout quality."
+        comparison_text = "Need prior similar lifting workouts with comparable weighted sets."
+    else:
+        workout_noun = "workout" if sample_size == 1 else "workouts"
+        workout_label = f"{split_label} {workout_noun}" if split_label != "similar" else f"similar {workout_noun}"
+        summary = f"Average set volume {_format_pct_decimal(avg_progression)} vs last {sample_size} {workout_label}."
+        comparison_text = f"{compared_sets} set comparison{'s' if compared_sets != 1 else ''} across {len(comparable)} exercise{'s' if len(comparable) != 1 else ''}."
+    visible_breakdown = [{key: value for key, value in item.items() if key != "_score_pct"} for item in exercise_breakdown]
     return {
         "status": "ok",
         "date": latest_date,
@@ -438,17 +721,19 @@ def _workout_quality_payload(training_items: list[dict[str, Any]]) -> dict[str, 
         "score_label": f"{score}/100" if score is not None else rating,
         "color": color,
         "confidence": confidence,
-        "summary": " | ".join(summary_parts),
-        "explanation": f"{title} on {latest_date}: " + " | ".join(summary_parts),
+        "summary": summary,
+        "explanation": summary,
         "total_sets": total_sets,
         "total_reps": total_reps,
         "total_volume": total_volume,
         "duration_minutes": duration,
         "muscle_groups": muscle_groups,
+        "comparison_basis": "last_7_similar_workouts",
+        "similar_workouts_used": sample_size,
+        "exercise_breakdown": visible_breakdown,
         "comparison": {
-            "basis": "recent_similar_lifts",
-            "volume_vs_average_pct": volume_pct,
-            "sets_vs_average_pct": sets_pct,
+            "basis": "last_7_similar_workouts",
+            "avg_set_volume_pct_change": round(avg_progression, 3) if avg_progression is not None else None,
             "sample_size": sample_size,
             "summary": comparison_text,
         },
@@ -457,6 +742,11 @@ def _workout_quality_payload(training_items: list[dict[str, Any]]) -> dict[str, 
             "latest_lift_found": True,
             "history_items_checked": len(training_items),
             "lift_items_checked": len(lifts),
+            "matched_by": matched_by,
+            "match_label": match_label,
+            "excluded_cardio": True,
+            "today_sets_scored": len(today_sets),
+            "sets_compared": compared_sets,
         },
         "source": "/api/training/history",
     }
@@ -1460,7 +1750,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     }
     lean_bulk_decision = _lean_bulk_placeholder(targets)
     lift_performance = _lift_performance_payload(today=today, latest_workout=latest_workout, training_items=training_items, training_rows=training_rows)
-    workout_quality = _workout_quality_payload(training_items)
+    workout_quality = _workout_quality_payload(training_items, latest_recovery=latest_recovery)
     optimization_signals = _optimization_signals_payload(
         nutrition_history_items=nutrition_history_items,
         training_items=training_items,

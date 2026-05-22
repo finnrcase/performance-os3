@@ -1031,8 +1031,19 @@ type DashboardData = {
     total_volume?: number;
     duration_minutes?: number;
     muscle_groups?: string[];
+    comparison_basis?: string;
+    similar_workouts_used?: number;
+    exercise_breakdown?: Array<{
+      exercise: string;
+      sets_compared: number;
+      avg_set_volume_pct_change?: number | null;
+      top_set_pct_change?: number | null;
+      reps_at_same_weight_delta?: number | null;
+      rating: string;
+    }>;
     comparison: string | {
       basis?: string;
+      avg_set_volume_pct_change?: number | null;
       volume_vs_average_pct?: number | null;
       sets_vs_average_pct?: number | null;
       sample_size?: number;
@@ -1041,6 +1052,8 @@ type DashboardData = {
     debug?: {
       source?: string;
       latest_lift_found?: boolean;
+      matched_by?: string;
+      excluded_cardio?: boolean;
     };
     source: string;
   };
@@ -3380,11 +3393,17 @@ function workoutQualityScoreText(score?: number | null) {
   return score <= 10 ? score.toFixed(1) : `${Math.round(score)}`;
 }
 
+function formatWorkoutQualityPct(value?: number | null) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return "";
+  return `${value >= 0 ? "+" : ""}${Math.round(value * 100)}%`;
+}
+
 function workoutQualityComparisonText(comparison?: DashboardData["workout_quality"]["comparison"]) {
   if (!comparison) return "";
   if (typeof comparison === "string") return comparison;
   if (comparison.summary) return comparison.summary;
   const pieces = [
+    typeof comparison.avg_set_volume_pct_change === "number" ? `avg set ${formatWorkoutQualityPct(comparison.avg_set_volume_pct_change)}` : "",
     typeof comparison.volume_vs_average_pct === "number" ? `volume ${comparison.volume_vs_average_pct > 0 ? "+" : ""}${comparison.volume_vs_average_pct}%` : "",
     typeof comparison.sets_vs_average_pct === "number" ? `sets ${comparison.sets_vs_average_pct > 0 ? "+" : ""}${comparison.sets_vs_average_pct}%` : "",
     typeof comparison.sample_size === "number" ? `${comparison.sample_size} similar` : "",
@@ -3537,6 +3556,11 @@ function Dashboard({
     workoutQuality?.date,
     workoutQuality?.classification_label ?? workoutQuality?.classification,
   ].filter(Boolean).join(" · ");
+  const qualityExerciseChanges = (workoutQuality?.exercise_breakdown ?? [])
+    .filter((item) => typeof item.avg_set_volume_pct_change === "number")
+    .slice(0, 3)
+    .map((item) => `${item.exercise} ${formatWorkoutQualityPct(item.avg_set_volume_pct_change)}`)
+    .join(", ");
   const todaysAction = data?.todays_action;
   const actionStyles = todaysActionStyles(todaysAction?.color ?? "gray");
   const personalLearning = data?.personal_learning;
@@ -3678,6 +3702,7 @@ function Dashboard({
           </div>
         </div>
         <p className="mt-4 text-sm leading-6 text-zinc-400">{workoutQuality?.summary ?? workoutQuality?.explanation ?? "No recent lifting workout found."}</p>
+        {qualityExerciseChanges ? <p className="mt-2 text-xs leading-5 text-zinc-500">{qualityExerciseChanges}</p> : null}
         <div className="mt-4 h-2 rounded-full bg-white/10">
           <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${qualityScorePercent}%` }} />
         </div>

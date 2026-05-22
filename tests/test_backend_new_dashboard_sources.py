@@ -1,6 +1,34 @@
 from backend_new.routes import body_metrics, dashboard, goals, nutrition, recovery, training
 
 
+def _detail(exercise: str, weight: float, reps: int, set_number: int, muscle_group: str = "Back") -> dict:
+    return {
+        "exercise": exercise,
+        "muscle_group": muscle_group,
+        "sets": 1,
+        "reps": reps,
+        "weight": weight,
+        "set_number": set_number,
+        "source": "hevy",
+    }
+
+
+def _lift_item(date: str, workout_id: str, title: str, details: list[dict], *, total_volume: float | None = None) -> dict:
+    return {
+        "date": date,
+        "workout_id": workout_id,
+        "workout_type": title,
+        "classification": "lift",
+        "classification_label": "Lift",
+        "total_sets": sum(int(row.get("sets") or 0) for row in details),
+        "total_reps": sum(int(row.get("sets") or 0) * int(row.get("reps") or 0) for row in details),
+        "total_volume": total_volume if total_volume is not None else sum(float(row.get("sets") or 0) * float(row.get("reps") or 0) * float(row.get("weight") or 0) for row in details),
+        "duration_minutes": 74,
+        "muscle_groups": sorted({row.get("muscle_group") for row in details if row.get("muscle_group")}),
+        "details": details,
+    }
+
+
 def test_dashboard_core_uses_tab_source_payloads(monkeypatch):
     today = "2026-05-21"
     requested_food_dates: list[str | None] = []
@@ -98,6 +126,16 @@ def test_dashboard_core_uses_tab_source_payloads(monkeypatch):
 
 
 def test_workout_quality_uses_latest_lift_not_newer_run():
+    latest_pull = [
+        _detail("Lat Pulldown (Cable)", 110, 10, 1, "Back"),
+        _detail("Lat Pulldown (Cable)", 110, 10, 2, "Back"),
+        _detail("Cable Row", 125, 8, 1, "Back"),
+    ]
+    prior_pull = [
+        _detail("Lat Pulldown (Cable)", 100, 10, 1, "Back"),
+        _detail("Lat Pulldown (Cable)", 100, 10, 2, "Back"),
+        _detail("Cable Row", 115, 8, 1, "Back"),
+    ]
     items = [
         {
             "date": "2026-05-22",
@@ -110,29 +148,8 @@ def test_workout_quality_uses_latest_lift_not_newer_run():
             "duration_minutes": 32,
             "muscle_groups": ["Cardio"],
         },
-        {
-            "date": "2026-05-21",
-            "workout_id": "lift-1",
-            "workout_type": "Pull day",
-            "classification": "lift",
-            "classification_label": "Lift",
-            "total_sets": 20,
-            "total_reps": 268,
-            "total_volume": 22055,
-            "duration_minutes": 74,
-            "muscle_groups": ["Back", "Biceps"],
-        },
-        {
-            "date": "2026-05-14",
-            "workout_id": "lift-0",
-            "workout_type": "Pull day",
-            "classification": "lift",
-            "total_sets": 19,
-            "total_reps": 240,
-            "total_volume": 21400,
-            "duration_minutes": 70,
-            "muscle_groups": ["Back", "Biceps"],
-        },
+        _lift_item("2026-05-21", "lift-1", "Pull day", latest_pull),
+        _lift_item("2026-05-14", "lift-0", "Pull day", prior_pull),
     ]
 
     payload = dashboard._workout_quality_payload(items)
@@ -141,14 +158,65 @@ def test_workout_quality_uses_latest_lift_not_newer_run():
     assert payload["date"] == "2026-05-21"
     assert payload["workout_id"] == "lift-1"
     assert payload["classification"] == "lift"
-    assert payload["rating"] == "Solid"
-    assert payload["total_sets"] == 20
-    assert payload["total_reps"] == 268
-    assert payload["total_volume"] == 22055
+    assert payload["rating"] in {"Strong", "Excellent"}
+    assert payload["score"] >= 75
+    assert payload["total_sets"] == 3
+    assert payload["total_reps"] == 28
+    assert payload["total_volume"] == 3200
     assert payload["duration_minutes"] == 74
-    assert payload["muscle_groups"] == ["Back", "Biceps"]
+    assert payload["muscle_groups"] == ["Back"]
+    assert payload["comparison_basis"] == "last_7_similar_workouts"
+    assert payload["similar_workouts_used"] == 1
     assert payload["comparison"]["sample_size"] == 1
+    assert payload["exercise_breakdown"][0]["sets_compared"] > 0
+    assert payload["debug"]["matched_by"] == "normalized_split"
     assert payload["debug"]["source"] == "/api/training/history"
+
+
+def test_workout_quality_scores_set_progression_against_last_7_matching_split():
+    latest = _lift_item(
+        "2026-05-21",
+        "pull-today",
+        "Pull day",
+        [
+            _detail("Lat Pulldown (Cable)", 106, 10, 1, "Back"),
+            _detail("Lat Pulldown (Cable)", 106, 10, 2, "Back"),
+            _detail("Cable Row", 126, 8, 1, "Back"),
+            _detail("Cable Row", 126, 8, 2, "Back"),
+        ],
+    )
+    prior_dates = ["2026-05-14", "2026-05-07", "2026-04-30", "2026-04-23", "2026-04-16", "2026-04-09", "2026-04-02", "2026-03-26"]
+    prior_pulls = [
+        _lift_item(
+            day,
+            f"pull-{index}",
+            "Pull day",
+            [
+                _detail("Lat Pulldown (Cable)", 100, 10, 1, "Back"),
+                _detail("Lat Pulldown (Cable)", 100, 10, 2, "Back"),
+                _detail("Cable Row", 120, 8, 1, "Back"),
+                _detail("Cable Row", 120, 8, 2, "Back"),
+                _detail("Deadlift", 315, 5, 1, "Back"),
+            ],
+        )
+        for index, day in enumerate(prior_dates)
+    ]
+    items = [
+        latest,
+        _lift_item("2026-05-20", "push-nearby", "Push day", [_detail("Bench Press", 225, 5, 1, "Chest")]),
+        *prior_pulls,
+    ]
+
+    payload = dashboard._workout_quality_payload(items)
+
+    assert payload["similar_workouts_used"] == 7
+    assert payload["debug"]["matched_by"] == "normalized_split"
+    assert payload["debug"]["match_label"] == "pull"
+    assert payload["score"] >= 75
+    assert payload["rating"] in {"Strong", "Excellent"}
+    assert "Average set volume +6%" in payload["summary"]
+    assert payload["exercise_breakdown"][0]["avg_set_volume_pct_change"] > 0
+    assert all(item["exercise"] != "Deadlift" for item in payload["exercise_breakdown"])
 
 
 def test_workout_quality_empty_when_no_lift_exists():
