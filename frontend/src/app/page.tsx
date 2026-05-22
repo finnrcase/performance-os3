@@ -2658,13 +2658,14 @@ function MacroDonutCard({
     );
   }
 
-  const macroRings = rows.filter((row) => row.label !== "Calories").slice(0, 4);
-  const circumference = 2 * Math.PI * 44;
+  const macroRings = rows.filter((row) => ["Protein", "Carbs", "Fat"].includes(row.label));
+  const caloriePercent = targets.target_calories > 0 ? Math.min(100, (totals.calories / targets.target_calories) * 100) : 0;
+  const calorieRadius = 48;
+  const calorieCircumference = 2 * Math.PI * calorieRadius;
   const strokeColors: Record<string, string> = {
-    Protein: "#2dd4bf",
-    Carbs: "#60a5fa",
-    Fat: "#f59e0b",
-    Fiber: "#86efac",
+    Protein: "#5eead4",
+    Carbs: "#93c5fd",
+    Fat: "#fbbf24",
   };
   const caloriesLeft = Math.max(0, Math.round(targets.target_calories - totals.calories));
   const caloriesOver = Math.max(0, Math.round(totals.calories - targets.target_calories));
@@ -2675,22 +2676,36 @@ function MacroDonutCard({
       <div className="grid gap-5 lg:grid-cols-[180px_minmax(0,1fr)] lg:items-center">
         <div className="flex items-center gap-5 lg:block">
           <div className="relative h-36 w-36 shrink-0 lg:mx-auto">
-            <svg className="-rotate-90" viewBox="0 0 112 112" aria-label="Daily macro completion">
+            <svg className="-rotate-90" viewBox="0 0 112 112" aria-label="Daily nutrition completion">
+              <circle cx="56" cy="56" r={calorieRadius} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="7" />
+              <circle
+                cx="56"
+                cy="56"
+                r={calorieRadius}
+                fill="none"
+                stroke="var(--accent-primary)"
+                strokeLinecap="round"
+                strokeWidth="7"
+                strokeDasharray={calorieCircumference}
+                strokeDashoffset={calorieCircumference - (calorieCircumference * caloriePercent) / 100}
+                className="transition-[stroke-dashoffset] duration-700 ease-out"
+              />
               {macroRings.map((row, index) => {
-                const radius = 44 - index * 7;
+                const radius = 36 - index * 8;
                 const ringCircumference = 2 * Math.PI * radius;
                 const percent = row.target > 0 ? Math.min(100, (row.consumed / row.target) * 100) : 0;
                 return (
                   <g key={row.label}>
-                    <circle cx="56" cy="56" r={radius} fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="5" />
+                    <circle cx="56" cy="56" r={radius} fill="none" stroke="rgba(255,255,255,0.035)" strokeWidth="3.5" />
                     <circle
                       cx="56"
                       cy="56"
                       r={radius}
                       fill="none"
                       stroke={strokeColors[row.label] ?? "var(--accent-primary)"}
+                      strokeOpacity="0.78"
                       strokeLinecap="round"
-                      strokeWidth="5"
+                      strokeWidth="3.5"
                       strokeDasharray={ringCircumference}
                       strokeDashoffset={ringCircumference - (ringCircumference * percent) / 100}
                       className="transition-[stroke-dashoffset] duration-700 ease-out"
@@ -2698,11 +2713,10 @@ function MacroDonutCard({
                   </g>
                 );
               })}
-              {!macroRings.length ? <circle cx="56" cy="56" r="44" fill="none" stroke="rgba(255,255,255,0.08)" strokeWidth="5" strokeDasharray={circumference} /> : null}
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
               <p className="text-2xl font-semibold text-white">{Math.round(targets.target_calories > 0 ? Math.min((totals.calories / targets.target_calories) * 100, 999) : 0)}%</p>
-              <p className="text-[11px] uppercase tracking-[0.14em] text-zinc-500">Macros</p>
+              <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">Daily</p>
             </div>
           </div>
           <div className="min-w-0 lg:mt-4 lg:text-center">
@@ -4358,6 +4372,13 @@ function FoodPage({
       setPendingPresetAction(null);
     }
   };
+  const showFoodAiDebugDetails = Boolean(
+    foodAiDebug?.exactError ||
+    foodAiFlow.some((item) => item.status === "error") ||
+    foodAiDebug?.analyzeResponseStatus === "error" ||
+    foodAiDebug?.logInsertStatus === "error" ||
+    foodAiDebug?.refreshStatus === "error",
+  );
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start" data-testid="food-page">
@@ -4780,7 +4801,7 @@ function FoodPage({
               <p>{parseResult.message}</p>
             </div>
           ) : null}
-          {foodAiFlow.length ? (
+          {showFoodAiDebugDetails && foodAiFlow.length ? (
             <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">AI food flow</p>
               <div className="mt-3 space-y-2">
@@ -4798,7 +4819,7 @@ function FoodPage({
               </div>
             </div>
           ) : null}
-          {foodAiDebug ? (
+          {showFoodAiDebugDetails && foodAiDebug ? (
             <div className="mt-4 rounded-lg border border-violet-300/20 bg-violet-300/[0.07] p-3">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200">Temporary parser debug</p>
               <div className="mt-3 grid gap-2 text-xs leading-5 text-zinc-300 sm:grid-cols-2">
