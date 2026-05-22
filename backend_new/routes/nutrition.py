@@ -134,12 +134,15 @@ def _food_ai_response(
     success = bool(result.get("success")) and bool(items)
     parser_source = str(result.get("source") or debug.get("parser_source") or "")
     parser_cached = bool(result.get("cached", debug.get("parser_cached", False)))
+    external_lookup_status = str(result.get("external_lookup_status") or debug.get("external_lookup_status") or "skipped")
     openai_called = parser_source == "openai" and not parser_cached
     merged_steps = {
         **steps,
         "parser_returned": True,
         "openai_called": openai_called,
         "model_used": analyzer_config.get("model"),
+        "parser_source": parser_source,
+        "external_lookup_status": external_lookup_status,
         "raw_items_count": len(raw_items) if isinstance(raw_items, list) else 0,
         "normalized_items_count": len(items),
         "json_parse_success": bool(success),
@@ -154,6 +157,8 @@ def _food_ai_response(
         "totals": totals,
         "total": totals,
         "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
+        "parser_source": parser_source,
+        "external_lookup_status": external_lookup_status,
         "success": success,
         "message": result.get("message") or ("Parsed food text. Review before saving." if success else "AI food parsing failed."),
         "error_code": result.get("error_code"),
@@ -163,6 +168,7 @@ def _food_ai_response(
             "backend_endpoint_reached": True,
             "parser_source": parser_source,
             "parser_cached": parser_cached,
+            "external_lookup_status": external_lookup_status,
             "openai_called": openai_called,
             "failed_step": debug.get("failed_step") or (None if success else debug.get("parsing_status") or "parse"),
             "duration_ms": merged_steps["duration_ms"],
@@ -198,6 +204,9 @@ def _food_ai_error_response(
             **(analyzer_config or {}),
             "backend_endpoint_reached": True,
             "parsing_status": "error",
+            "parser_source": "",
+            "external_lookup_status": "skipped",
+            "openai_called": False,
             "failed_step": failed_step,
             "error_type": error_type,
             "message": message,
@@ -205,6 +214,8 @@ def _food_ai_error_response(
         },
         "steps": {
             **(steps or {}),
+            "openai_called": False,
+            "external_lookup_status": "skipped",
             "failed_step": failed_step,
             "error_type": error_type,
             "duration_ms": elapsed,
@@ -747,7 +758,7 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
 def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     text = str((payload or {}).get("text") or "").strip()
-    force_openai = bool((payload or {}).get("force_openai"))
+    force_openai = bool((payload or {}).get("force_openai", True))
     steps: dict[str, Any] = {"route_entered": True, "text_length": len(text), "force_openai": force_openai}
     logger.info("[food_ai] route_entered endpoint=/api/food/analyze-text")
     logger.info("[food_ai] text_length=%s", len(text))
@@ -782,6 +793,7 @@ def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
         )
     try:
         logger.info("[food_ai] parser_request_start")
+        logger.info("[food_ai] pre_openai_step=openai_primary")
         result = analyze_text(text, force_openai=force_openai)
         response = _food_ai_response(result, analyzer_config, steps, started)
         logger.info(
@@ -823,6 +835,8 @@ def debug_food_parser_test(payload: dict[str, Any]) -> dict[str, Any]:
         "diagnostic_force_openai": True,
         "openai_called": bool(steps.get("openai_called") or debug.get("openai_called")),
         "model_used": steps.get("model_used") or debug.get("model") or "",
+        "parser_source": result.get("parser_source") or debug.get("parser_source") or result.get("source") or "",
+        "external_lookup_status": result.get("external_lookup_status") or debug.get("external_lookup_status") or "skipped",
         "raw_items_count": int(steps.get("raw_items_count") or len(foods)),
         "normalized_items_count": int(steps.get("normalized_items_count") or len(items)),
         "response_shape": {

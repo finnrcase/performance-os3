@@ -230,9 +230,9 @@ class WithingsSyncTest(unittest.TestCase):
             return data
 
         with patch("src.integrations.withings_client.sync_withings_measurements", return_value=result), patch(
-            "backend_new.routes.integrations.upsert_json_row",
+            "backend_new.routes.body_metrics.upsert_json_row",
             side_effect=fake_upsert,
-        ), patch("backend_new.routes.integrations.fetch_json_rows", return_value=[]):
+        ), patch("backend_new.routes.body_metrics.fetch_json_rows", return_value=[]):
             response = self.client.post("/api/withings/sync-history", json={"days": 3650})
 
         self.assertEqual(response.status_code, 200)
@@ -243,6 +243,66 @@ class WithingsSyncTest(unittest.TestCase):
         self.assertEqual(saved[0][1], "source_id")
         self.assertEqual(saved[0][2], "withings-1")
         self.assertEqual(saved[0][3]["body_metric_id"], "withings-1")
+
+    def test_body_metrics_withings_sync_endpoint_persists_and_reports_freshness(self):
+        result = {
+            "status": "ok",
+            "imported_measurements": 1,
+            "created_measurements": 1,
+            "updated_measurements": 0,
+            "fetched_groups": 1,
+            "withings_measurement_groups": 1,
+            "earliest_date": "2026-05-20",
+            "latest_date": "2026-05-20",
+            "latest_measure_date": "2026-05-20",
+            "last_synced_at": "2026-05-21T12:00:00+00:00",
+            "_measurement_rows": [
+                {
+                    "date": "2026-05-20",
+                    "bodyweight": 156.9,
+                    "source": "withings",
+                    "source_id": "withings-2",
+                    "notes": "source=withings | measured_at=2026-05-20T14:15:00+00:00",
+                }
+            ],
+        }
+        saved = []
+
+        def fake_upsert(table, key_field, key_value, data):
+            saved.append((table, key_field, key_value, data))
+            return data
+
+        def fake_fetch(_table, **_kwargs):
+            return [entry[3] for entry in saved]
+
+        with patch("src.integrations.withings_client.sync_withings_measurements", return_value=result), patch(
+            "backend_new.routes.body_metrics.upsert_json_row",
+            side_effect=fake_upsert,
+        ), patch("backend_new.routes.body_metrics.fetch_json_rows", side_effect=fake_fetch), patch(
+            "backend_new.routes.body_metrics.fetch_latest_document",
+            return_value={
+                "integrations": {},
+                "metadata": {
+                    "withings_tokens": {"access_token": "access", "refresh_token": "refresh"},
+                    "withings_sync": {"last_synced_at": "2026-05-21T12:00:00+00:00"},
+                },
+            },
+        ):
+            response = self.client.post("/api/body-metrics/sync/withings", json={"days": 30})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["db_persisted_rows"], 1)
+        self.assertTrue(payload["cache_invalidated"])
+        self.assertEqual(payload["freshness"]["raw_body_metric_rows"], 1)
+        self.assertEqual(payload["freshness"]["latest_raw_measurement_at"], "2026-05-20T14:15:00+00:00")
+        self.assertEqual(payload["freshness"]["canonical_daily_rows"], 1)
+        self.assertEqual(payload["freshness"]["latest_canonical_weight"], 156.9)
+        self.assertEqual(payload["freshness"]["latest_canonical_date"], "2026-05-20")
+        self.assertEqual(saved[0][0], "body_metric_logs")
+        self.assertEqual(saved[0][1], "source_id")
+        self.assertEqual(saved[0][2], "withings-2")
 
     def test_connect_route_redirects_to_withings_authorization(self):
         with patch.dict(

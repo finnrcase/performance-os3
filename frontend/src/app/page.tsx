@@ -275,6 +275,20 @@ type BodyMetricEntry = {
   notes: string;
 };
 
+type BodyMetricFreshnessDebug = {
+  withings_connected?: boolean;
+  last_withings_sync_at?: string;
+  raw_body_metric_rows?: number;
+  latest_raw_measurement_at?: string;
+  latest_raw_weight?: number | null;
+  canonical_daily_rows?: number;
+  latest_canonical_date?: string;
+  latest_canonical_weight?: number | null;
+  dates_with_multiple_weighins?: number;
+  dropped_invalid_rows?: number;
+  cache_invalidated?: boolean;
+};
+
 type RecoveryEntry = {
   date: string;
   sleep_hours: number;
@@ -920,6 +934,10 @@ type WithingsSyncResult = {
   pagination_complete?: boolean;
   latest_measure_date: string;
   last_synced_at: string;
+  freshness?: BodyMetricFreshnessDebug;
+  items?: BodyMetricEntry[];
+  canonical_items?: BodyMetricEntry[];
+  raw_items?: BodyMetricEntry[];
 };
 
 type DashboardData = {
@@ -1169,6 +1187,8 @@ type FoodParseResponse = {
     openai_called?: boolean;
     parser_source?: string;
     parser_cached?: boolean;
+    external_lookup_status?: string;
+    external_lookup_statuses?: string[];
   };
 };
 
@@ -1184,6 +1204,8 @@ type FoodAiDebugState = {
   diagnostic_force_openai?: boolean;
   openai_called?: boolean;
   model_used?: string;
+  parser_source?: string;
+  external_lookup_status?: string;
   raw_items_count?: number;
   normalized_items_count?: number;
   response_shape?: Record<string, unknown>;
@@ -1214,6 +1236,8 @@ type FoodParserDiagnosticResponse = {
   diagnostic_force_openai?: boolean;
   openai_called: boolean;
   model_used: string;
+  parser_source?: string;
+  external_lookup_status?: string;
   raw_items_count: number;
   normalized_items_count: number;
   response_shape: Record<string, unknown>;
@@ -1272,6 +1296,9 @@ type FoodAnalyzeResponse = {
   message: string;
   success: boolean;
   error_code: string | null;
+  source?: string;
+  parser_source?: string;
+  external_lookup_status?: string;
   debug: FoodParseResponse["debug"];
   steps?: Record<string, unknown>;
 };
@@ -4779,6 +4806,8 @@ function FoodPage({
                 <p><span className="font-semibold text-white">diagnostic_force_openai:</span> {foodAiDebug.diagnostic_force_openai === undefined ? "false" : String(foodAiDebug.diagnostic_force_openai)}</p>
                 <p><span className="font-semibold text-white">openai_called:</span> {foodAiDebug.openai_called === undefined ? "unknown" : String(foodAiDebug.openai_called)}</p>
                 <p><span className="font-semibold text-white">model_used:</span> {foodAiDebug.model_used || "unknown"}</p>
+                <p><span className="font-semibold text-white">parser_source:</span> {foodAiDebug.parser_source || "unknown"}</p>
+                <p><span className="font-semibold text-white">external_lookup_status:</span> {foodAiDebug.external_lookup_status || "unknown"}</p>
                 <p><span className="font-semibold text-white">raw_items_count:</span> {foodAiDebug.raw_items_count ?? "unknown"}</p>
                 <p><span className="font-semibold text-white">normalized_items_count:</span> {foodAiDebug.normalized_items_count ?? foodAiDebug.parsedItemCount ?? 0}</p>
                 <p><span className="font-semibold text-white">frontend_received_items:</span> {foodAiDebug.frontend_received_items === undefined ? "unknown" : String(foodAiDebug.frontend_received_items)}</p>
@@ -5348,6 +5377,7 @@ function RecoveryPage({
   setForms,
   onBodySubmit,
   onRecoverySubmit,
+  onSyncWeightNow,
   onSyncWithingsHistory,
 }: Readonly<{
   bodyMetrics: BodyMetricEntry[];
@@ -5359,6 +5389,7 @@ function RecoveryPage({
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onBodySubmit: (event: FormEvent) => void;
   onRecoverySubmit: (event: FormEvent) => void;
+  onSyncWeightNow: () => void;
   onSyncWithingsHistory: () => void;
 }>) {
   const [bodyCompositionTab, setBodyCompositionTab] = useState<BodyCompositionTab>("weight");
@@ -5476,7 +5507,10 @@ function RecoveryPage({
 
       <Card>
         <SectionHeader eyebrow="Withings" title="Body Composition Snapshot" />
-        <div className="mb-4 flex justify-end">
+        <div className="mb-4 flex justify-end gap-2">
+          <button onClick={onSyncWeightNow} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+            Sync Weight Now
+          </button>
           <button onClick={onSyncWithingsHistory} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
             Sync Withings History
           </button>
@@ -9828,6 +9862,39 @@ export default function Home() {
     return dashboardData;
   }, []);
 
+  const refreshBodyMetricsOnly = useCallback(async () => {
+    const data = await apiGet<{ items: BodyMetricEntry[]; canonical_items?: BodyMetricEntry[]; raw_items?: BodyMetricEntry[]; freshness?: BodyMetricFreshnessDebug }>("/api/body-metrics", DEFAULT_API_TIMEOUT_MS);
+    setBodyMetrics(data.canonical_items ?? data.items);
+    return data;
+  }, []);
+
+  const syncWeightNow = useCallback(async () => {
+    setApiError(null);
+    setMessage(null);
+    try {
+      const result = await apiSend<WithingsSyncResult>("/api/body-metrics/sync/withings", "POST", { days: 30 });
+      if (result.status === "error") {
+        throw new Error(result.message ?? "Withings weight sync failed.");
+      }
+      const [bodyData, updatedSettings] = await Promise.all([
+        refreshBodyMetricsOnly(),
+        apiGet<SettingsData>("/api/integrations/status?external_checks=false", SETTINGS_API_TIMEOUT_MS),
+      ]);
+      applySettingsData(updatedSettings);
+      await refreshDashboardCoreOnly();
+      const freshness = result.freshness ?? bodyData.freshness;
+      const created = Number(result.created_measurements ?? result.imported_rows ?? 0);
+      const updated = Number(result.updated_measurements ?? result.updated_rows ?? 0);
+      const skipped = Number(result.skipped_rows ?? 0);
+      const latestWeight = freshness?.latest_canonical_weight;
+      const latestDate = freshness?.latest_canonical_date || result.latest_date || result.latest_measure_date || "";
+      const latestText = latestWeight ? ` Latest canonical weight: ${formatWeight(latestWeight)}${latestDate ? ` on ${latestDate}` : ""}.` : "";
+      setMessage(`Weight sync complete: ${created} imported, ${updated} updated, ${skipped} skipped.${latestText}`);
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Withings weight sync failed.");
+    }
+  }, [applySettingsData, refreshBodyMetricsOnly, refreshDashboardCoreOnly]);
+
   useEffect(() => {
     const id = window.setTimeout(() => {
       void refreshAll();
@@ -10591,6 +10658,8 @@ export default function Home() {
                 analyzeResponseMs: Math.round(performance.now() - parseStarted),
                 openai_called: Boolean(analyzed.steps?.openai_called ?? analyzed.debug?.openai_called),
                 model_used: String(analyzed.steps?.model_used || analyzed.debug?.model || "unknown"),
+                parser_source: String(analyzed.parser_source || analyzed.debug?.parser_source || analyzed.source || "unknown"),
+                external_lookup_status: String(analyzed.external_lookup_status || analyzed.debug?.external_lookup_status || "unknown"),
                 raw_items_count: Number(analyzed.steps?.raw_items_count ?? analyzedItems.length),
                 normalized_items_count: analyzedItems.length,
                 response_shape: {
@@ -10905,6 +10974,7 @@ export default function Home() {
             setForms((state) => ({ ...state, recovery: { ...initialForms.recovery, date: todayString() } }));
           }, "Recovery check-in saved.")
         }
+        onSyncWeightNow={syncWeightNow}
         onSyncWithingsHistory={async () => {
           setApiError(null);
           setMessage(null);
@@ -11193,6 +11263,8 @@ export default function Home() {
               frontend_received_items: frontendReceivedItems,
               log_insert_attempted: false,
               log_insert_success: false,
+              parser_source: result.parser_source || result.debug?.parser_source || "unknown",
+              external_lookup_status: result.external_lookup_status || result.debug?.external_lookup_status || "unknown",
             };
             recordStartupDebug({
               key: "food_parser_diagnostic",
@@ -11213,6 +11285,8 @@ export default function Home() {
               diagnostic_force_openai: result.diagnostic_force_openai,
               openai_called: result.openai_called,
               model_used: result.model_used,
+              parser_source: diagnostic.parser_source,
+              external_lookup_status: diagnostic.external_lookup_status,
               raw_items_count: result.raw_items_count,
               normalized_items_count: result.normalized_items_count,
               response_shape: result.response_shape,

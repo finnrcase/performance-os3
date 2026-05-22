@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import math
 from typing import Any
 from uuid import uuid4
@@ -11,6 +11,8 @@ from backend_new.db import (
     delete_json_row,
     fetch_json_rows,
     fetch_json_rows_for_value,
+    fetch_latest_document,
+    invalidate_dashboard_core_cache,
     insert_json_row,
     upsert_json_row,
 )
@@ -29,6 +31,14 @@ NUMERIC_FIELDS = (
     "muscle_mass",
     "hydration",
     "bmi",
+)
+
+MEASUREMENT_TIME_FIELDS = (
+    "measured_at",
+    "measurement_at",
+    "measured_timestamp",
+    "timestamp",
+    "recorded_at",
 )
 
 
@@ -93,6 +103,175 @@ def _public_metric(item: dict[str, Any]) -> dict[str, Any]:
 
 def _sort_by_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(items, key=lambda row: str(row.get("date") or ""))
+
+
+def _settings_document() -> dict[str, Any]:
+    stored = fetch_latest_document("api_connections", {"integrations": {}, "metadata": {}})
+    if not isinstance(stored, dict):
+        return {"integrations": {}, "metadata": {}}
+    stored.setdefault("integrations", {})
+    stored.setdefault("metadata", {})
+    return stored
+
+
+def _parse_iso_timestamp(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except ValueError:
+        return None
+
+
+def _measurement_timestamp_text(row: dict[str, Any]) -> str:
+    for field in MEASUREMENT_TIME_FIELDS:
+        value = row.get(field)
+        if value:
+            return str(value)
+    notes = str(row.get("notes") or "")
+    for part in notes.split("|"):
+        part = part.strip()
+        if part.startswith("measured_at="):
+            return part.split("=", 1)[1].strip()
+    for field in ("created_at", "updated_at"):
+        value = row.get(field)
+        if value:
+            return str(value)
+    return str(row.get("date") or "")
+
+
+def _measurement_timestamp(row: dict[str, Any]) -> tuple[datetime | None, str]:
+    text = _measurement_timestamp_text(row)
+    parsed = _parse_iso_timestamp(text)
+    if parsed is None and row.get("date"):
+        parsed = _parse_iso_timestamp(f"{str(row.get('date'))[:10]}T00:00:00")
+    return parsed, text
+
+
+def _withings_connected(settings: dict[str, Any]) -> bool:
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    tokens = metadata.get("withings_tokens") if isinstance(metadata.get("withings_tokens"), dict) else {}
+    sync = metadata.get("withings_sync") if isinstance(metadata.get("withings_sync"), dict) else {}
+    return bool((tokens.get("refresh_token") or tokens.get("access_token")) and not sync.get("needs_reconnect"))
+
+
+def _latest_raw_weight(rows: list[dict[str, Any]]) -> tuple[str, float | None]:
+    latest_key: datetime | None = None
+    latest_text = ""
+    latest_weight: float | None = None
+    for row in rows:
+        if _is_excluded(row):
+            continue
+        bodyweight = _number_or_none(row.get("bodyweight"))
+        if bodyweight is None or bodyweight <= 0:
+            continue
+        parsed, text = _measurement_timestamp(row)
+        if latest_key is None or (parsed is not None and parsed > latest_key):
+            latest_key = parsed
+            latest_text = text
+            latest_weight = bodyweight
+    return latest_text, latest_weight
+
+
+def body_metric_freshness_debug(
+    rows: list[dict[str, Any]],
+    *,
+    cache_invalidated: bool = False,
+) -> dict[str, Any]:
+    clean_rows = [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+    analytics_rows = [row for row in clean_rows if not _is_excluded(row)]
+    debug = canonical_bodyweight_debug(clean_rows)
+    canonical_items = _canonical_public_metrics(analytics_rows)
+    latest_canonical = canonical_items[-1] if canonical_items else {}
+    latest_raw_measurement_at, latest_raw_weight = _latest_raw_weight(clean_rows)
+    settings = _settings_document()
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    sync = metadata.get("withings_sync") if isinstance(metadata.get("withings_sync"), dict) else {}
+    return {
+        "withings_connected": _withings_connected(settings),
+        "last_withings_sync_at": sync.get("last_synced_at", ""),
+        "raw_body_metric_rows": debug.get("raw_body_metric_rows", len(clean_rows)),
+        "latest_raw_measurement_at": latest_raw_measurement_at,
+        "latest_raw_weight": latest_raw_weight,
+        "canonical_daily_rows": debug.get("canonical_daily_weight_rows", len(canonical_items)),
+        "latest_canonical_date": latest_canonical.get("date", ""),
+        "latest_canonical_weight": latest_canonical.get("bodyweight"),
+        "dates_with_multiple_weighins": debug.get("dates_with_multiple_weighins", 0),
+        "dropped_invalid_rows": debug.get("dropped_invalid_rows", 0),
+        "cache_invalidated": cache_invalidated,
+        "rule": "lowest_weight_per_day",
+    }
+
+
+def persist_withings_rows_to_body_metric_logs(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    persisted = 0
+    errors: list[dict[str, Any]] = []
+    earliest = ""
+    latest = ""
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        source_id = str(row.get("source_id") or "").strip()
+        if not source_id:
+            continue
+        payload = {
+            **row,
+            "body_metric_id": str(row.get("body_metric_id") or source_id),
+            "id": str(row.get("id") or row.get("body_metric_id") or source_id),
+            "source": "withings",
+            "updated_at": utc_now_iso(),
+        }
+        saved = upsert_json_row("body_metric_logs", "source_id", source_id, payload)
+        if isinstance(saved, dict) and saved.get("_db_error"):
+            errors.append({"source_id": source_id, "error": saved.get("_db_error")})
+            continue
+        persisted += 1
+        row_date = str(payload.get("date") or "")[:10]
+        if row_date:
+            earliest = min([value for value in (earliest, row_date) if value], default=row_date)
+            latest = max(latest, row_date)
+    invalidate_dashboard_core_cache()
+    return {
+        "db_persisted_rows": persisted,
+        "db_persist_errors": errors[:5],
+        "db_persist_error_count": len(errors),
+        "earliest_db_date": earliest,
+        "latest_db_date": latest,
+        "cache_invalidated": True,
+    }
+
+
+def withings_body_metric_sync_response(result: dict[str, Any], *, items_limit: int) -> dict[str, Any]:
+    measurement_rows = result.pop("_measurement_rows", []) if isinstance(result.get("_measurement_rows"), list) else []
+    persist_result = persist_withings_rows_to_body_metric_logs(measurement_rows)
+    rows = fetch_json_rows("body_metric_logs", limit=items_limit, date_field="date")
+    clean_rows = rows if not (rows and "_db_error" in rows[0]) else []
+    analytics_rows = [row for row in clean_rows if not _is_excluded(row)]
+    canonical_items = _canonical_public_metrics(analytics_rows)
+    return {
+        **result,
+        **persist_result,
+        "items": canonical_items,
+        "canonical_items": canonical_items,
+        "raw_items": _sort_by_date([_public_metric(row) for row in analytics_rows]),
+        "freshness": body_metric_freshness_debug(clean_rows, cache_invalidated=True),
+    }
+
+
+def _withings_sync_error(message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "message": message,
+        "imported_measurements": 0,
+        "fetched_groups": 0,
+        "latest_measure_date": "",
+        "last_synced_at": "",
+        "freshness": body_metric_freshness_debug(fetch_json_rows("body_metric_logs", limit=1000, date_field="date")),
+    }
 
 
 def _canonical_public_metrics(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -203,7 +382,27 @@ def get_body_metrics(limit: int = 5000) -> dict[str, Any]:
         "rule": "lowest_weight_per_day",
         "status": "ok",
         "debug": debug,
+        "freshness": body_metric_freshness_debug(rows),
     }
+
+
+@router.post("/api/body-metrics/sync/withings")
+def sync_body_metrics_withings(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    payload = payload or {}
+    history = bool(payload.get("history"))
+    try:
+        from src.integrations.withings_client import DEFAULT_HISTORY_SYNC_DAYS, sync_withings_measurements
+
+        result = sync_withings_measurements(
+            days=payload.get("days") or (DEFAULT_HISTORY_SYNC_DAYS if history else None),
+            start_date=payload.get("start_date"),
+            end_date=payload.get("end_date"),
+            history=history,
+            include_rows=True,
+        )
+    except Exception as exc:
+        return _withings_sync_error(str(exc))
+    return withings_body_metric_sync_response(result, items_limit=5000 if history else 1000)
 
 
 @router.post("/api/body-metrics")

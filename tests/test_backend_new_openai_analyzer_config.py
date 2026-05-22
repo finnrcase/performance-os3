@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from io import BytesIO
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from fastapi.testclient import TestClient
 
@@ -315,6 +317,122 @@ def test_food_log_bulk_rejects_empty_parsed_items():
 
     assert response.status_code == 400
     assert response.json()["detail"]["code"] == "empty_food_bulk"
+
+
+def test_food_analyze_text_uses_openai_when_external_lookup_403s():
+    from src.ai import food_parser
+
+    openai_payload = {
+        "foods": [
+            {
+                "food_name": "Beans",
+                "display_name": "Beans",
+                "normalized_name": "beans",
+                "original_text": "beans",
+                "quantity": 1,
+                "unit": "cup",
+                "serving_description": "1 cup cooked beans",
+                "calories": 240,
+                "protein": 15,
+                "carbs": 44,
+                "fat": 1,
+                "fiber": 15,
+                "sugar": 1,
+                "sodium": 5,
+                "confidence": "medium",
+                "source": "openai_estimate",
+                "source_id": None,
+                "source_url": None,
+                "assumptions": ["Assumed one cup cooked beans."],
+                "needs_review": True,
+                "verification_needed": False,
+                "verification_reason": "",
+                "notes": "Estimate.",
+            }
+        ]
+    }
+    forbidden = HTTPError("https://api.nal.usda.gov/fdc/v1/foods/search", 403, "Forbidden", hdrs=None, fp=BytesIO(b""))
+
+    with (
+        patch("src.ai.food_parser._get_openai_api_key", return_value="sk-test"),
+        patch("src.ai.food_parser._call_openai", return_value=openai_payload),
+        patch("src.ai.food_parser.search_food_macros", side_effect=forbidden),
+    ):
+        result = food_parser.analyze_food_text("beans", force_openai=True)
+
+    assert result["success"] is True
+    assert result["items"][0]["display_name"] == "Beans"
+    assert result["parser_source"] == "openai"
+    assert result["external_lookup_status"] == "failed_403"
+    assert "external nutrition lookup failed: 403" in result["warnings"]
+
+
+def test_food_route_defaults_to_openai_primary_and_fails_open_on_lookup_403():
+    config = {
+        "openai_key_configured": True,
+        "api_key_source": "environment",
+        "model": "gpt-4.1",
+        "model_source": "env",
+        "fallback_model_used": False,
+        "reasoning_effort": "medium",
+        "supports_structured_outputs": True,
+        "supports_image_input": True,
+        "model_error": "",
+    }
+    analyze_result = {
+        "items": [
+            {
+                "name": "Beans",
+                "display_name": "Beans",
+                "normalized_name": "beans",
+                "original_text": "beans",
+                "quantity": 1,
+                "unit": "cup",
+                "serving_description": "1 cup cooked beans",
+                "calories": 240,
+                "protein_g": 15,
+                "carbs_g": 44,
+                "fat_g": 1,
+                "fiber_g": 15,
+                "sugar_g": 1,
+                "sodium_mg": 5,
+                "confidence": "medium",
+                "source": "openai_estimate",
+                "source_id": None,
+                "source_url": None,
+                "assumptions": ["Assumed one cup cooked beans."],
+                "needs_review": True,
+            }
+        ],
+        "totals": {"calories": 240, "protein_g": 15, "carbs_g": 44, "fat_g": 1, "fiber_g": 15, "sugar_g": 1, "sodium_mg": 5},
+        "warnings": ["external nutrition lookup failed: 403"],
+        "parser_source": "openai",
+        "external_lookup_status": "failed_403",
+        "source": "openai",
+        "cached": False,
+        "message": "Parsed with gpt-4.1. Review before saving.",
+        "success": True,
+        "error_code": None,
+        "debug": {"backend_endpoint_reached": True, "openai_key_configured": True, "model": "gpt-4.1", "parsing_status": "success", "parser_source": "openai", "external_lookup_status": "failed_403"},
+    }
+    with (
+        patch("src.ai.food_parser.openai_analyzer_config", return_value=config),
+        patch("src.ai.food_parser.get_openai_key_status", return_value=True),
+        patch("src.ai.food_parser.analyze_food_text", return_value=analyze_result) as analyze_mock,
+    ):
+        response = client.post("/api/food/analyze-text", json={"date": "2026-05-21", "text": "beans"})
+
+    data = response.json()
+    assert response.status_code == 200
+    assert data["status"] == "ok"
+    assert data["success"] is True
+    assert data["items"][0]["display_name"] == "Beans"
+    assert data["steps"]["openai_called"] is True
+    assert data["steps"]["force_openai"] is True
+    assert data["parser_source"] == "openai"
+    assert data["external_lookup_status"] == "failed_403"
+    assert "external nutrition lookup failed: 403" in data["warnings"]
+    analyze_mock.assert_called_once_with("beans", force_openai=True)
 
 
 def test_saved_food_match_does_not_hijack_multi_food_ai_parse():

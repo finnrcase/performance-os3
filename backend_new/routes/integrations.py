@@ -8,7 +8,8 @@ from urllib.parse import urlencode, urlparse
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from backend_new.db import fetch_json_rows, fetch_latest_document, insert_json_row, ping, upsert_json_row
+from backend_new.db import fetch_latest_document, insert_json_row, ping
+from backend_new.routes.body_metrics import withings_body_metric_sync_response
 from backend_new.routes.settings import settings_payload
 from backend_new.utils import utc_now_iso
 
@@ -75,51 +76,8 @@ def _withings_error(message: str) -> dict:
     }
 
 
-def _persist_withings_rows_to_db(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    persisted = 0
-    errors: list[dict[str, Any]] = []
-    earliest = ""
-    latest = ""
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        source_id = str(row.get("source_id") or "").strip()
-        if not source_id:
-            continue
-        payload = {
-            **row,
-            "body_metric_id": str(row.get("body_metric_id") or source_id),
-            "id": str(row.get("id") or row.get("body_metric_id") or source_id),
-            "source": "withings",
-            "updated_at": utc_now_iso(),
-        }
-        saved = upsert_json_row("body_metric_logs", "source_id", source_id, payload)
-        if isinstance(saved, dict) and saved.get("_db_error"):
-            errors.append({"source_id": source_id, "error": saved.get("_db_error")})
-            continue
-        persisted += 1
-        row_date = str(payload.get("date") or "")[:10]
-        if row_date:
-            earliest = min([value for value in (earliest, row_date) if value], default=row_date)
-            latest = max(latest, row_date)
-    return {
-        "db_persisted_rows": persisted,
-        "db_persist_errors": errors[:5],
-        "db_persist_error_count": len(errors),
-        "earliest_db_date": earliest,
-        "latest_db_date": latest,
-    }
-
-
 def _withings_sync_response(result: dict[str, Any], *, items_limit: int) -> dict[str, Any]:
-    measurement_rows = result.pop("_measurement_rows", []) if isinstance(result.get("_measurement_rows"), list) else []
-    persist_result = _persist_withings_rows_to_db(measurement_rows)
-    items = fetch_json_rows("body_metric_logs", limit=items_limit, date_field="date")
-    return {
-        **result,
-        **persist_result,
-        "items": items if not (items and "_db_error" in items[0]) else [],
-    }
+    return withings_body_metric_sync_response(result, items_limit=items_limit)
 
 
 def _settings_document() -> dict:

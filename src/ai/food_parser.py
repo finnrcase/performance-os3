@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -454,6 +455,20 @@ def _fallback_response(food_text: str, message: str, error_code: str) -> dict:
     )
 
 
+def _external_lookup_status_from_exception(exc: Exception) -> str:
+    if isinstance(exc, HTTPError):
+        return f"failed_{exc.code}"
+    match = re.search(r"\bHTTP Error\s+(\d{3})\b", str(exc), flags=re.IGNORECASE)
+    if match:
+        return f"failed_{match.group(1)}"
+    return "failed"
+
+
+def _external_lookup_warning(exc: Exception) -> str:
+    status = _external_lookup_status_from_exception(exc).replace("failed_", "")
+    return f"external nutrition lookup failed: {status}"
+
+
 def _cache_result(query: str, result: dict) -> None:
     foods = result.get("foods", [])
     first = foods[0] if foods else {}
@@ -875,11 +890,26 @@ def _api_totals(items: list[dict]) -> dict:
 def analyze_food_text(food_text: str, *, image_data_url: str | None = None, force_openai: bool = False) -> dict:
     """Return the richer Food tab analyze response shape."""
     parsed = parse_food_text(food_text, image_data_url=image_data_url, force_openai=force_openai)
-    warnings = []
+    warnings = list(parsed.get("warnings") or []) if isinstance(parsed.get("warnings"), list) else []
+    external_statuses = list(parsed.get("external_lookup_statuses") or []) if isinstance(parsed.get("external_lookup_statuses"), list) else []
     api_items = []
     for food in parsed.get("foods", []):
         normalized = _normalize_food(food, food.get("food_name", ""))
-        usda_match = search_food_macros(normalized["food_name"])
+        usda_match = None
+        try:
+            logger.info("[food_ai] external_lookup_started url_or_service=usda_fdc query=%s", normalized["food_name"])
+            usda_match = search_food_macros(normalized["food_name"])
+            external_statuses.append("ok" if usda_match else "skipped")
+        except Exception as exc:
+            status = _external_lookup_status_from_exception(exc)
+            external_statuses.append(status)
+            warnings.append(_external_lookup_warning(exc))
+            logger.warning(
+                "[food_ai] external_lookup_failed status=%s url_or_service=usda_fdc error_type=%s message=%s openai_called=true",
+                status.replace("failed_", ""),
+                type(exc).__name__,
+                exc,
+            )
         if usda_match:
             macros = usda_match.get("macros", {})
             for source_key, target_key in [
@@ -905,12 +935,21 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None, forc
         api_items.append(_food_to_api_item(normalized))
 
     totals = _api_totals(api_items)
+    unique_statuses = [status for status in dict.fromkeys(external_statuses) if status]
+    external_lookup_status = (
+        "ok"
+        if "ok" in unique_statuses and not any(status.startswith("failed") for status in unique_statuses)
+        else next((status for status in unique_statuses if status.startswith("failed")), "skipped")
+    )
     return {
         "items": api_items,
         "foods": api_items,
         "totals": totals,
         "total": totals,
         "warnings": warnings,
+        "parser_source": parsed.get("source", ""),
+        "external_lookup_status": external_lookup_status,
+        "external_lookup_statuses": unique_statuses,
         "source": parsed.get("source", ""),
         "cached": bool(parsed.get("cached", False)),
         "success": bool(parsed.get("success")),
@@ -920,6 +959,8 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None, forc
             **(parsed.get("debug", {}) if isinstance(parsed.get("debug"), dict) else {}),
             "parser_source": parsed.get("source", ""),
             "parser_cached": bool(parsed.get("cached", False)),
+            "external_lookup_status": external_lookup_status,
+            "external_lookup_statuses": unique_statuses,
         },
     }
 
@@ -959,6 +1000,7 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None, force_
         )
 
     try:
+        logger.info("[food_ai] pre_openai_step=openai_primary")
         parsed = _call_openai(cleaned_text, api_key, image_data_url=image_data_url)
         foods = parsed.get("foods", [])
         if not isinstance(foods, list) or not foods:
@@ -1055,6 +1097,8 @@ def _macro_conflict(ai_food: dict, verified_macros: dict) -> bool:
 def _verify_uncertain_foods(result: dict) -> dict:
     """Verify at most five low-confidence/brand-like foods."""
     foods = result.get("foods", [])
+    warnings = list(result.get("warnings") or []) if isinstance(result.get("warnings"), list) else []
+    external_statuses = list(result.get("external_lookup_statuses") or []) if isinstance(result.get("external_lookup_statuses"), list) else []
     verified_count = 0
     updated_foods = []
     for food in foods:
@@ -1068,7 +1112,27 @@ def _verify_uncertain_foods(result: dict) -> dict:
         normalized["verification_reason"] = normalized.get("verification_reason") or reason
         if needs_verification and verified_count < 5:
             verified_count += 1
-            verification = verify_food_online(normalized["food_name"], normalized.get("quantity"))
+            try:
+                logger.info("[food_ai] external_lookup_started url_or_service=online_verification query=%s", normalized["food_name"])
+                verification = verify_food_online(normalized["food_name"], normalized.get("quantity"))
+                external_statuses.append("ok" if verification.get("verified") else "skipped")
+            except Exception as exc:
+                status = _external_lookup_status_from_exception(exc)
+                external_statuses.append(status)
+                warnings.append(_external_lookup_warning(exc))
+                logger.warning(
+                    "[food_ai] external_lookup_failed status=%s url_or_service=online_verification error_type=%s message=%s openai_called=true",
+                    status.replace("failed_", ""),
+                    type(exc).__name__,
+                    exc,
+                )
+                verification = {
+                    "verified": False,
+                    "macros": {},
+                    "source": status,
+                    "confidence": "low",
+                    "message": _external_lookup_warning(exc),
+                }
             if verification.get("verified") and verification.get("macros"):
                 conflict = _macro_conflict(normalized, verification["macros"])
                 macros = verification["macros"]
@@ -1095,6 +1159,21 @@ def _verify_uncertain_foods(result: dict) -> dict:
 
     result["foods"] = updated_foods
     result["total"] = _total(updated_foods)
+    unique_statuses = [status for status in dict.fromkeys(external_statuses) if status]
+    external_lookup_status = (
+        "ok"
+        if "ok" in unique_statuses and not any(status.startswith("failed") for status in unique_statuses)
+        else next((status for status in unique_statuses if status.startswith("failed")), "skipped")
+    )
+    result["warnings"] = warnings
+    result["external_lookup_status"] = external_lookup_status
+    result["external_lookup_statuses"] = unique_statuses
+    debug = result.get("debug") if isinstance(result.get("debug"), dict) else {}
+    result["debug"] = {
+        **debug,
+        "external_lookup_status": external_lookup_status,
+        "external_lookup_statuses": unique_statuses,
+    }
     if any(food.get("source") == "verified_online" for food in updated_foods):
         result["message"] = "Parsed with AI and verified uncertain foods where reliable online sources were available."
     elif any(food.get("verification_status") == "verification_unavailable" for food in updated_foods):
