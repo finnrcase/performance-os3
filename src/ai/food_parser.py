@@ -521,6 +521,88 @@ def _parse_model_json(response: Any) -> dict:
     return json.loads(output_text)
 
 
+def _response_text(response: Any) -> str:
+    output_text = str(getattr(response, "output_text", "") or "")
+    if output_text:
+        return output_text.strip()
+    for item in getattr(response, "output", []) or []:
+        for content in getattr(item, "content", []) or []:
+            text = str(getattr(content, "text", "") or "")
+            if text:
+                return text.strip()
+    return ""
+
+
+def test_openai_connection() -> dict[str, Any]:
+    """Run a tiny backend-only OpenAI check without exposing secrets."""
+    config = openai_analyzer_config()
+    result = {
+        "configured": bool(config.get("openai_key_configured")),
+        "client_initialized": False,
+        "test_status": "error",
+        "error_type": "",
+        "message": "",
+        "model": config.get("model", ""),
+        "api_key_source": config.get("api_key_source", "unknown"),
+        "model_source": config.get("model_source", "unknown"),
+        "fallback_model_used": bool(config.get("fallback_model_used", False)),
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if config.get("model_error"):
+        result["error_type"] = "ModelConfigurationError"
+        result["message"] = str(config["model_error"])
+        return result
+    api_key = _get_openai_api_key()
+    if not api_key:
+        result["error_type"] = "MissingApiKey"
+        result["message"] = "OPENAI_API_KEY is not configured. Manual food logging still works."
+        return result
+    started = time.perf_counter()
+    try:
+        client = OpenAI(api_key=api_key, timeout=10)
+        result["client_initialized"] = True
+        kwargs: dict[str, Any] = {
+            "model": str(config.get("model") or food_analysis_model()),
+            "input": "Reply with exactly: OK",
+            "max_output_tokens": 16,
+        }
+        if str(kwargs["model"]).startswith("gpt-5"):
+            kwargs["reasoning"] = {"effort": str(config.get("reasoning_effort") or FOOD_ANALYSIS_REASONING_EFFORT)}
+        logger.info(
+            "[openai_debug] test_call_start model=%s source=%s fallback_model_used=%s",
+            kwargs["model"],
+            config.get("model_source"),
+            config.get("fallback_model_used"),
+        )
+        response = client.responses.create(**kwargs)
+        text = _response_text(response)
+        if not text:
+            raise ValueError("OpenAI returned no text output.")
+        result["test_status"] = "ok"
+        result["message"] = f"OpenAI test call succeeded with {kwargs['model']}."
+        result["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        logger.info("[openai_debug] test_call_ok model=%s latency_ms=%s", kwargs["model"], result["latency_ms"])
+        return result
+    except AuthenticationError as exc:
+        result["error_type"] = type(exc).__name__
+        result["message"] = "OpenAI rejected the API key. Replace OPENAI_API_KEY and redeploy."
+    except RateLimitError as exc:
+        result["error_type"] = type(exc).__name__
+        result["message"] = f"OpenAI quota or rate limit error: {exc}"
+    except APIConnectionError as exc:
+        result["error_type"] = type(exc).__name__
+        result["message"] = f"Could not reach OpenAI: {exc}"
+    except APIStatusError as exc:
+        result["error_type"] = type(exc).__name__
+        result["message"] = f"OpenAI API returned status {exc.status_code}: {exc}"
+    except Exception as exc:
+        result["error_type"] = type(exc).__name__
+        result["message"] = str(exc) or "OpenAI test call failed."
+    result["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    logger.warning("[openai_debug] test_call_failed model=%s error_type=%s message=%s", result.get("model"), result["error_type"], result["message"])
+    return result
+
+
 def _food_parse_schema() -> dict:
     return {
         "type": "object",

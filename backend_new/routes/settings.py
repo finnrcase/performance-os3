@@ -182,7 +182,13 @@ def settings_payload() -> dict[str, Any]:
             **strava_service,
         },
         "withings": withings_service,
-        "openai": {"configured": statuses["openai_api_key"] == "Configured", "status": "ok" if statuses["openai_api_key"] == "Configured" else "missing_api_key", "message": "OpenAI analyzer is configured." if statuses["openai_api_key"] == "Configured" else "OpenAI analyzer is not configured.", "model": openai_config.get("model", ""), "api_key_source": openai_config.get("api_key_source", "unknown")},
+        "openai": {
+            "configured": statuses["openai_api_key"] == "Configured",
+            "status": "configured" if statuses["openai_api_key"] == "Configured" else "missing_api_key",
+            "message": "OpenAI analyzer key is configured; use the OpenAI test button for a live Working check." if statuses["openai_api_key"] == "Configured" else "OpenAI analyzer is not configured.",
+            "model": openai_config.get("model", ""),
+            "api_key_source": openai_config.get("api_key_source", "unknown"),
+        },
     }
     health = [
         {

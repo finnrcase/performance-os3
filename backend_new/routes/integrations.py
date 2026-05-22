@@ -420,15 +420,44 @@ def integrations_test() -> dict[str, Any]:
     withings_status, _ = _withings_status(settings)
     hevy_configured = bool(os.getenv("HEVY_API_KEY", "").strip() or _integrations(settings).get("hevy_api_key"))
     try:
-        from src.ai.food_parser import get_openai_key_status
+        from src.ai.food_parser import test_openai_connection
 
-        openai_configured = get_openai_key_status()
-    except Exception:
+        openai_test = test_openai_connection()
+    except Exception as exc:
         openai_configured = bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key"))
+        openai_test = {
+            "configured": openai_configured,
+            "client_initialized": False,
+            "test_status": "error",
+            "error_type": type(exc).__name__,
+            "message": str(exc) or "OpenAI test failed.",
+        }
+    openai_status = "connected" if openai_test.get("test_status") == "ok" else "missing_api_key" if not openai_test.get("configured") else "error"
+    openai_message = (
+        f"Working: {openai_test.get('message')}"
+        if openai_test.get("test_status") == "ok"
+        else str(openai_test.get("message") or "OpenAI test failed.")
+    )
     return {
         "checkedAt": utc_now_iso(),
         "hevy": _test_result("connected" if hevy_configured else "missing_api_key", "HEVY_API_KEY is configured." if hevy_configured else "HEVY_API_KEY is not configured."),
-        "openai": _test_result("connected" if openai_configured else "missing_api_key", "OPENAI_API_KEY is configured." if openai_configured else "OPENAI_API_KEY is not configured."),
+        "openai": {
+            **_test_result(openai_status, openai_message),
+            "layers": {
+                "configuration": {
+                    "status": "configured" if openai_test.get("configured") else "missing_api_key",
+                    "message": "OPENAI_API_KEY is configured." if openai_test.get("configured") else "OPENAI_API_KEY is not configured.",
+                },
+                "client": {
+                    "status": "initialized" if openai_test.get("client_initialized") else "not_initialized",
+                    "message": "OpenAI client initialized." if openai_test.get("client_initialized") else "OpenAI client did not initialize.",
+                },
+                "test_call": {
+                    "status": str(openai_test.get("test_status") or "error"),
+                    "message": openai_message,
+                },
+            },
+        },
         "strava": _test_result(strava_status.lower().replace(" ", "_"), f"Strava is {strava_status.lower()}."),
         "withings": _test_result(withings_status.lower().replace(" ", "_"), f"Withings is {withings_status.lower()}."),
     }

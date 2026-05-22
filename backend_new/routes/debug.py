@@ -88,3 +88,22 @@ def debug_startup(request: Request, full: bool = Query(default=False)) -> dict:
         "integration_syncs_on_startup": False,
         "generated_at": utc_now_iso(),
     }
+
+
+@router.get("/api/debug/openai")
+def debug_openai() -> dict:
+    try:
+        from src.ai.food_parser import test_openai_connection
+
+        return test_openai_connection()
+    except Exception as exc:
+        return {
+            "configured": False,
+            "client_initialized": False,
+            "test_status": "error",
+            "error_type": type(exc).__name__,
+            "message": str(exc) or "OpenAI debug check failed before the client could be initialized.",
+            "model": "",
+            "api_key_source": "unknown",
+            "checked_at": utc_now_iso(),
+        }

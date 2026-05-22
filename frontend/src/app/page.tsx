@@ -1105,6 +1105,17 @@ type ApiConnectionTestResponse = {
   withings: ApiConnectionTestItem;
 };
 
+type OpenAIDebugResponse = {
+  configured: boolean;
+  client_initialized: boolean;
+  test_status: "ok" | "error" | string;
+  error_type: string;
+  message: string;
+  model?: string;
+  api_key_source?: string;
+  latency_ms?: number;
+};
+
 type FormState = {
   nutrition: NutritionEntry;
   body: BodyMetricEntry;
@@ -10852,11 +10863,12 @@ export default function Home() {
           setApiError(null);
           setMessage(null);
           try {
-            const parsed = await apiSend<FoodParseResponse>("/api/nutrition/ai/parse", "POST", { text: "3 eggs, protein shake, banana" });
-            if (!parsed.foods.length) {
-              throw new Error(parsed.message || "Parser returned no foods.");
+            const result = await apiGet<OpenAIDebugResponse>("/api/debug/openai", SETTINGS_API_TIMEOUT_MS);
+            if (result.test_status !== "ok") {
+              throw new Error(result.message || result.error_type || "OpenAI test failed.");
             }
-            setMessage(`OpenAI parser returned ${parsed.foods.length} editable food item(s). Source: ${parsed.source}.`);
+            const latency = result.latency_ms ? ` in ${Math.round(result.latency_ms)}ms` : "";
+            setMessage(`OpenAI test passed with ${result.model || "configured model"}${latency}. Food Analyze is ready.`);
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "OpenAI parser test failed.");
           }
