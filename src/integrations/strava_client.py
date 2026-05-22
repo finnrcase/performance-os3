@@ -29,6 +29,7 @@ STRAVA_API_BASE_URL = "https://www.strava.com/api/v3"
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_TOKEN_URL = "https://www.strava.com/oauth/token"
 STRAVA_ACTIVITY_MARKER = "strava_activity_id="
+STRAVA_SCOPES = "read,activity:read_all"
 RUN_SPORT_TYPES = {"Run", "TrailRun", "VirtualRun"}
 CARDIO_SPORT_TYPES = {
     "Run",
@@ -155,14 +156,32 @@ def _env_strava_tokens() -> dict:
         "refresh_token": refresh_token_env or _read_dotenv_value("STRAVA_REFRESH_TOKEN").strip(),
         "expires_at": expires_at_int,
         "athlete_id": os.getenv("STRAVA_ATHLETE_ID", "").strip() or _read_dotenv_value("STRAVA_ATHLETE_ID").strip(),
-        "scopes": os.getenv("STRAVA_SCOPES", "").strip() or _read_dotenv_value("STRAVA_SCOPES").strip() or "read,activity:read_all",
+        "scopes": os.getenv("STRAVA_SCOPES", "").strip() or _read_dotenv_value("STRAVA_SCOPES").strip() or STRAVA_SCOPES,
+    }
+
+
+def _saved_strava_tokens(settings: dict | None = None) -> dict:
+    current_settings = settings or load_settings()
+    integrations = current_settings.get("integrations") if isinstance(current_settings.get("integrations"), dict) else {}
+    metadata = current_settings.get("metadata") if isinstance(current_settings.get("metadata"), dict) else {}
+    nested = metadata.get("strava_tokens") if isinstance(metadata.get("strava_tokens"), dict) else {}
+    try:
+        expires_at = int(integrations.get("strava_expires_at") or nested.get("expires_at") or 0)
+    except ValueError:
+        expires_at = 0
+    return {
+        "access_token": str(integrations.get("strava_access_token") or nested.get("access_token") or "").strip(),
+        "refresh_token": str(integrations.get("strava_refresh_token") or nested.get("refresh_token") or "").strip(),
+        "expires_at": expires_at,
+        "athlete_id": str(integrations.get("strava_athlete_id") or nested.get("athlete_id") or "").strip(),
+        "scopes": str(integrations.get("strava_scopes") or nested.get("scopes") or STRAVA_SCOPES).strip(),
     }
 
 
 def _effective_strava_tokens(settings: dict | None = None) -> dict:
     """Resolve Strava tokens from explicit env vars, persisted settings, or .env."""
     current_settings = settings or load_settings()
-    saved_tokens = current_settings.get("metadata", {}).get("strava_tokens", {})
+    saved_tokens = _saved_strava_tokens(current_settings)
     explicit_env_tokens = bool(os.getenv("STRAVA_ACCESS_TOKEN", "").strip() and os.getenv("STRAVA_REFRESH_TOKEN", "").strip())
     env_tokens = _env_strava_tokens()
     if explicit_env_tokens:
@@ -179,12 +198,7 @@ def get_strava_connection_status() -> str:
     sync_state = settings.get("metadata", {}).get("strava_sync", {})
     env_tokens = _env_strava_tokens()
     has_env_tokens = bool(env_tokens.get("access_token") and env_tokens.get("refresh_token"))
-    has_token = bool(tokens.get("access_token") or tokens.get("refresh_token"))
-    if sync_state.get("needs_reconnect") and has_token and not has_env_tokens:
-        return "Expired/Reauth required"
     integrations = settings.get("integrations", {})
-    if tokens.get("refresh_token"):
-        return "Connected"
     client_id = (
         integrations.get("strava_client_id", "").strip()
         or os.getenv("STRAVA_CLIENT_ID", "").strip()
@@ -195,9 +209,13 @@ def get_strava_connection_status() -> str:
         or os.getenv("STRAVA_CLIENT_SECRET", "").strip()
         or _read_dotenv_value("STRAVA_CLIENT_SECRET").strip()
     )
-    if client_id and client_secret:
-        return "Disconnected"
-    return "Not configured"
+    if not (client_id and client_secret):
+        return "Not configured"
+    if sync_state.get("needs_reconnect") and not has_env_tokens:
+        return "Reconnect required"
+    if tokens.get("refresh_token"):
+        return "Connected"
+    return "Disconnected"
 
 
 def get_strava_safe_token_metadata() -> dict:
@@ -229,7 +247,7 @@ def build_strava_auth_url(redirect_uri: str, state: str | None = None, force_app
         "redirect_uri": redirect_uri,
         "response_type": "code",
         "approval_prompt": "force" if force_approval else "auto",
-        "scope": "read,activity:read_all",
+        "scope": STRAVA_SCOPES,
     }
     if state:
         query["state"] = state
@@ -263,29 +281,57 @@ def _save_strava_tokens(token_payload: dict) -> dict:
     """Persist Strava tokens locally without exposing them to frontend responses."""
     settings = load_settings()
     athlete = token_payload.get("athlete") or {}
-    previous_tokens = settings.get("metadata", {}).get("strava_tokens", {})
-    settings.setdefault("metadata", {})["strava_tokens"] = {
+    previous_tokens = _saved_strava_tokens(settings)
+    connected_at = datetime.now(timezone.utc).isoformat()
+    tokens = {
         "access_token": str(token_payload.get("access_token", "")),
         "refresh_token": str(token_payload.get("refresh_token", "")),
         "expires_at": int(token_payload.get("expires_at") or 0),
         "athlete_id": str(athlete.get("id", "") or previous_tokens.get("athlete_id", "")),
-        "scopes": str(token_payload.get("scope") or previous_tokens.get("scopes") or "read,activity:read_all"),
+        "scopes": str(token_payload.get("scope") or previous_tokens.get("scopes") or STRAVA_SCOPES),
+    }
+    integrations = settings.setdefault("integrations", {})
+    integrations.update(
+        {
+            "strava_access_token": tokens["access_token"],
+            "strava_refresh_token": tokens["refresh_token"],
+            "strava_expires_at": tokens["expires_at"],
+            "strava_athlete_id": tokens["athlete_id"],
+            "strava_scopes": tokens["scopes"],
+            "strava_connected_at": connected_at,
+        }
+    )
+    settings.setdefault("metadata", {})["strava_tokens"] = {
+        **tokens,
+        "connected_at": connected_at,
     }
     settings.setdefault("metadata", {}).setdefault("strava_sync", {})["needs_reconnect"] = False
     settings["metadata"]["strava_sync"]["last_error"] = ""
+    settings["updated_at"] = connected_at
     save_settings(settings)
     logger.info(
         "Stored Strava tokens for athlete_id=%s expires_at=%s",
-        settings["metadata"]["strava_tokens"].get("athlete_id", ""),
-        settings["metadata"]["strava_tokens"].get("expires_at", 0),
+        tokens.get("athlete_id", ""),
+        tokens.get("expires_at", 0),
     )
-    return settings["metadata"]["strava_tokens"]
+    return tokens
 
 
 def clear_strava_connection(reason: str = "", mark_error: bool = True) -> dict:
     """Clear saved OAuth tokens so the next action starts a clean reconnect flow."""
     settings = load_settings()
-    athlete_id = str(settings.get("metadata", {}).get("strava_tokens", {}).get("athlete_id", "") or "")
+    athlete_id = str(_saved_strava_tokens(settings).get("athlete_id") or "")
+    integrations = settings.setdefault("integrations", {})
+    integrations.update(
+        {
+            "strava_access_token": "",
+            "strava_refresh_token": "",
+            "strava_expires_at": 0,
+            "strava_athlete_id": athlete_id,
+            "strava_scopes": "",
+            "strava_connected_at": "",
+        }
+    )
     settings.setdefault("metadata", {})["strava_tokens"] = {
         "access_token": "",
         "refresh_token": "",
@@ -297,6 +343,7 @@ def clear_strava_connection(reason: str = "", mark_error: bool = True) -> dict:
     sync["needs_reconnect"] = True
     sync["last_error"] = (reason or "Strava authorization expired. Reconnect Strava.") if mark_error else ""
     sync["last_synced_at"] = datetime.now(timezone.utc).isoformat()
+    settings["updated_at"] = sync["last_synced_at"]
     save_settings(settings)
     logger.warning("Cleared Strava connection state: %s", reason or "manual reconnect")
     return sync

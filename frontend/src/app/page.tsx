@@ -41,7 +41,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Component, FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
 
 function apiUrl(path: string) {
@@ -1553,6 +1553,26 @@ function recommendationConfidenceLabel(confidence?: AdaptiveNutritionRecommendat
   return confidence.overall || fallback || "low";
 }
 
+function finiteNumberOrNull(value: unknown) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatWholeNumber(value: unknown, fallback = "--") {
+  const parsed = finiteNumberOrNull(value);
+  return parsed === null ? fallback : `${Math.round(parsed)}`;
+}
+
+function formatSignedWholeNumber(value: unknown, suffix = "", fallback = "--") {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return fallback;
+  return `${parsed > 0 ? "+" : ""}${Math.round(parsed)}${suffix}`;
+}
+
+function stringList(value: unknown, fallback: string[] = []) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : fallback;
+}
+
 const ACCENT_THEME_STORAGE_KEY = "performance-os-accent-theme";
 const DAILY_NUTRITION_HISTORY_EXPANDED_KEY = "performance-os-daily-nutrition-history-expanded";
 
@@ -1958,6 +1978,45 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
       {action ? <div>{action}</div> : null}
     </div>
   );
+}
+
+class GoalsPageErrorBoundary extends Component<
+  Readonly<{ children: React.ReactNode; resetKey?: string }>,
+  { hasError: boolean; message: string }
+> {
+  state = { hasError: false, message: "" };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "Goals & Targets could not render.",
+    };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+  }
+
+  componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; resetKey?: string }>) {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, message: "" });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="space-y-6">
+          <Card>
+            <SectionHeader eyebrow="Goals" title="Goals & Targets" />
+            <p className="text-sm leading-6 text-zinc-300">Insufficient data to render one Goals & Targets tile.</p>
+            <p className="mt-2 text-xs leading-5 text-zinc-500">{this.state.message || "Missing recommendation data."}</p>
+          </Card>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function MetricCard({
@@ -3884,24 +3943,39 @@ function GoalsPage({
   adaptiveRecommendation: AdaptiveNutritionRecommendation | null;
   onApplySuggestedMacros: () => void;
 }>) {
-  const calorieDelta = targets ? targets.target_calories - targets.maintenance_calories : 0;
+  const calorieDelta = targets ? (finiteNumberOrNull(targets.target_calories) ?? 0) - (finiteNumberOrNull(targets.maintenance_calories) ?? 0) : 0;
   const calorieDeltaLabel = calorieDelta === 0 ? "at maintenance" : `${calorieDelta > 0 ? "+" : ""}${calorieDelta} kcal ${calorieDelta > 0 ? "surplus" : "deficit"}`;
-  const leanBulkRange = weightFeedback?.target_weekly_change_low != null && weightFeedback?.target_weekly_change_high != null
-    ? `${weightFeedback.target_weekly_change_low.toFixed(2)}% to ${weightFeedback.target_weekly_change_high.toFixed(2)}%/week target`
+  const targetWeeklyChangeLow = finiteNumberOrNull(weightFeedback?.target_weekly_change_low);
+  const targetWeeklyChangeHigh = finiteNumberOrNull(weightFeedback?.target_weekly_change_high);
+  const leanBulkRange = targetWeeklyChangeLow !== null && targetWeeklyChangeHigh !== null
+    ? `${targetWeeklyChangeLow.toFixed(2)}% to ${targetWeeklyChangeHigh.toFixed(2)}%/week target`
     : "Trend target unlocks with goals";
-  const weeklyTrend = weightFeedback?.weekly_change_lb != null && weightFeedback?.weekly_change_pct != null
-    ? `${weightFeedback.weekly_change_lb > 0 ? "+" : ""}${weightFeedback.weekly_change_lb} lb/week (${weightFeedback.weekly_change_pct > 0 ? "+" : ""}${weightFeedback.weekly_change_pct}%)`
+  const weeklyChangeLb = finiteNumberOrNull(weightFeedback?.weekly_change_lb);
+  const weeklyChangePct = finiteNumberOrNull(weightFeedback?.weekly_change_pct);
+  const weeklyTrend = weeklyChangeLb !== null && weeklyChangePct !== null
+    ? `${weeklyChangeLb > 0 ? "+" : ""}${weeklyChangeLb} lb/week (${weeklyChangePct > 0 ? "+" : ""}${weeklyChangePct}%)`
     : "Need bodyweight trend";
   const lastUpdated = targets?.updated_at ? new Date(targets.updated_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not applied yet";
-  const performanceSignal = leanBulkDecision?.details.performance_signal;
-  const performanceDrivers = performanceSignal?.drivers?.slice(0, 3) ?? [];
-  const recoverySignal = leanBulkDecision?.details.recovery_signal ?? targets?.recovery_signal;
-  const recoveryDrivers = recoverySignal?.drivers?.slice(0, 3) ?? [];
-  const adaptiveReasons = adaptiveRecommendation?.reasoning?.slice(0, 4) ?? [];
-  const adaptiveTrends = adaptiveRecommendation?.detectedTrends?.slice(0, 4) ?? [];
-  const missingDataWarnings = adaptiveRecommendation?.missingDataWarnings?.slice(0, 3) ?? [];
+  const leanBulkDetails = leanBulkDecision?.details ?? null;
+  const performanceSignal = leanBulkDetails?.performance_signal ?? null;
+  const performanceDrivers = Array.isArray(performanceSignal?.drivers) ? performanceSignal.drivers.slice(0, 3) : [];
+  const recoverySignal = leanBulkDetails?.recovery_signal ?? targets?.recovery_signal ?? null;
+  const recoveryDrivers = Array.isArray(recoverySignal?.drivers) ? recoverySignal.drivers.slice(0, 3) : [];
+  const adaptiveReasons = stringList(adaptiveRecommendation?.reasoning).slice(0, 4);
+  const adaptiveTrends = stringList(adaptiveRecommendation?.detectedTrends).slice(0, 4);
+  const missingDataWarnings = stringList(adaptiveRecommendation?.missingDataWarnings).slice(0, 3);
   const dayTypeAdjustment = adaptiveRecommendation?.dayTypeAdjustment;
-  const bodyComposition = adaptiveRecommendation?.signals.bodyComposition;
+  const adaptiveSignals: Partial<AdaptiveNutritionRecommendation["signals"]> = adaptiveRecommendation?.signals ?? {};
+  const bodyComposition = adaptiveSignals.bodyComposition ?? null;
+  const currentTarget = adaptiveRecommendation?.currentTarget ?? null;
+  const macroChanges = adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment ?? null;
+  const hasRecommendedTargets = ["caloriesTarget", "proteinTarget", "carbsTarget", "fatTarget"].every((key) => finiteNumberOrNull(adaptiveRecommendation?.[key as keyof AdaptiveNutritionRecommendation]) !== null);
+  const currentTargetSummary = currentTarget
+    ? `${formatWholeNumber(currentTarget.calories)} kcal · P ${formatWholeNumber(currentTarget.protein)} C ${formatWholeNumber(currentTarget.carbs)} F ${formatWholeNumber(currentTarget.fat)}`
+    : "No active target";
+  const macroChangeSummary = macroChanges
+    ? `${formatSignedWholeNumber(macroChanges.calories, " kcal")} · P ${formatSignedWholeNumber(macroChanges.protein, "g")} · C ${formatSignedWholeNumber(macroChanges.carbs, "g")} · F ${formatSignedWholeNumber(macroChanges.fat, "g")}`
+    : "Insufficient data";
   return (
     <div className="space-y-6">
       <Card>
@@ -3951,11 +4025,11 @@ function GoalsPage({
               <div>
                 <p className="text-sm text-zinc-400">Recommended target</p>
                 <p className="mt-2 text-3xl font-semibold text-white">
-                  {adaptiveRecommendation ? `${adaptiveRecommendation.caloriesTarget} kcal` : "Need data"}
+                  {hasRecommendedTargets ? `${formatWholeNumber(adaptiveRecommendation?.caloriesTarget)} kcal` : "Need data"}
                 </p>
                 <p className="mt-2 text-sm text-zinc-300">
-                  {adaptiveRecommendation
-                    ? `${adaptiveRecommendation.proteinTarget}g protein · ${adaptiveRecommendation.carbsTarget}g carbs · ${adaptiveRecommendation.fatTarget}g fat`
+                  {hasRecommendedTargets
+                    ? `${formatWholeNumber(adaptiveRecommendation?.proteinTarget)}g protein · ${formatWholeNumber(adaptiveRecommendation?.carbsTarget)}g carbs · ${formatWholeNumber(adaptiveRecommendation?.fatTarget)}g fat`
                     : "The engine will combine weight, food, Hevy, Strava, performance, and recovery signals."}
                 </p>
               </div>
@@ -3967,15 +4041,13 @@ function GoalsPage({
               <div className="rounded-lg border border-white/10 bg-black/15 p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Current</p>
                 <p className="mt-2 text-sm font-semibold text-white">
-                  {adaptiveRecommendation ? `${adaptiveRecommendation.currentTarget.calories} kcal · P ${adaptiveRecommendation.currentTarget.protein} C ${adaptiveRecommendation.currentTarget.carbs} F ${adaptiveRecommendation.currentTarget.fat}` : "No active target"}
+                  {currentTargetSummary}
                 </p>
               </div>
               <div className="rounded-lg border border-white/10 bg-black/15 p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Change</p>
                 <p className="mt-2 text-sm font-semibold text-white">
-                  {adaptiveRecommendation
-                    ? `${adaptiveRecommendation.macroChanges.calories > 0 ? "+" : ""}${adaptiveRecommendation.macroChanges.calories} kcal · P ${adaptiveRecommendation.macroChanges.protein > 0 ? "+" : ""}${adaptiveRecommendation.macroChanges.protein}g · C ${adaptiveRecommendation.macroChanges.carbs > 0 ? "+" : ""}${adaptiveRecommendation.macroChanges.carbs}g · F ${adaptiveRecommendation.macroChanges.fat > 0 ? "+" : ""}${adaptiveRecommendation.macroChanges.fat}g`
-                    : "No change yet"}
+                  {macroChangeSummary}
                 </p>
               </div>
             </div>
@@ -4025,11 +4097,11 @@ function GoalsPage({
           </div>
           <div className="grid gap-2">
             {[
-              ["Weight", adaptiveRecommendation?.signals.weight.status ?? "insufficient data"],
-              ["Performance", adaptiveRecommendation?.signals.performance.label ?? "insufficient data"],
-              ["Recovery", adaptiveRecommendation?.signals.recovery.status ?? "insufficient data"],
-              ["Training Load", adaptiveRecommendation?.signals.trainingLoad.status ?? "low"],
-              ["Running Load", adaptiveRecommendation?.signals.runningLoad.status ?? "low"],
+              ["Weight", adaptiveSignals.weight?.status ?? "insufficient data"],
+              ["Performance", adaptiveSignals.performance?.label ?? "insufficient data"],
+              ["Recovery", adaptiveSignals.recovery?.status ?? "insufficient data"],
+              ["Training Load", adaptiveSignals.trainingLoad?.status ?? "low"],
+              ["Running Load", adaptiveSignals.runningLoad?.status ?? "low"],
             ].map(([label, value]) => (
               <div key={label} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
                 <span className="text-sm text-zinc-400">{label}</span>
@@ -4040,18 +4112,18 @@ function GoalsPage({
         </div>
       </Card>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <TargetDetailCard
-          title="Calories"
-          value={targets ? `${targets.target_calories} kcal` : "No target"}
-          subvalue={targets ? `Maintenance ${targets.maintenance_calories} - ${calorieDeltaLabel}` : "Save goals to calculate"}
-          note={targets ? `Dynamic adjustment: ${targets.calorie_adjustment > 0 ? "+" : ""}${targets.calorie_adjustment} kcal/day. Macro math: ${targets.macro_calories ?? targets.target_calories} kcal (${targets.calorie_macro_delta ?? 0} delta).` : "Calories update from weight trend, training load, cardio, and recovery."}
-          icon={Apple}
-          accent="accent-outline"
-        />
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <TargetDetailCard
+            title="Calories"
+            value={targets ? `${formatWholeNumber(targets.target_calories)} kcal` : "No target"}
+            subvalue={targets ? `Maintenance ${formatWholeNumber(targets.maintenance_calories)} - ${calorieDeltaLabel}` : "Save goals to calculate"}
+            note={targets ? `Dynamic adjustment: ${formatSignedWholeNumber(targets.calorie_adjustment, " kcal/day")}. Macro math: ${formatWholeNumber(targets.macro_calories ?? targets.target_calories)} kcal (${formatSignedWholeNumber(targets.calorie_macro_delta ?? 0, " delta")}).` : "Calories update from weight trend, training load, cardio, and recovery."}
+            icon={Apple}
+            accent="accent-outline"
+          />
         <TargetDetailCard
           title="Protein"
-          value={targets ? `${targets.protein_grams}g` : "No target"}
+          value={targets ? `${formatWholeNumber(targets.protein_grams)}g` : "No target"}
           subvalue={targets?.protein_per_lb ? `${targets.protein_per_lb}g/lb bodyweight` : "Protein-first allocation"}
           note="Lean bulk targets a higher protein floor for muscle retention, growth, and consistency."
           icon={ProteinMoleculeIcon}
@@ -4059,7 +4131,7 @@ function GoalsPage({
         />
         <TargetDetailCard
           title="Carbs"
-          value={targets ? `${targets.carb_grams}g` : "No target"}
+          value={targets ? `${formatWholeNumber(targets.carb_grams)}g` : "No target"}
           subvalue="Remaining calories after protein and fats"
           note={targets?.carb_emphasis ?? "Carbs scale with lifting frequency, cardio, surplus size, and recovery demand."}
           icon={CarbsMoleculeIcon}
@@ -4067,7 +4139,7 @@ function GoalsPage({
         />
         <TargetDetailCard
           title="Fat"
-          value={targets ? `${targets.fat_grams}g` : "No target"}
+          value={targets ? `${formatWholeNumber(targets.fat_grams)}g` : "No target"}
           subvalue={targets?.fat_per_lb ? `${targets.fat_per_lb}g/lb - floor ${targets.fat_floor_grams ?? 0}g` : "Minimum recovery threshold"}
           note="Moderate fats are protected before carbs get the remaining calories."
           icon={FatMoleculeIcon}
@@ -4119,12 +4191,12 @@ function GoalsPage({
       <Card>
         <SectionHeader eyebrow="Lean Bulk" title="Calorie optimization details" />
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <MetricCard title="7-Day Avg Weight" value={leanBulkDecision?.details.seven_day_avg_weight ? `${leanBulkDecision.details.seven_day_avg_weight}` : "Need data"} detail="Smooths water spikes" icon={Weight} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
-          <MetricCard title="14-Day Avg Weight" value={leanBulkDecision?.details.fourteen_day_avg_weight ? `${leanBulkDecision.details.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="accent-outline" />
-          <MetricCard title="Calorie Avg" value={leanBulkDecision?.details.calorie_average ? `${leanBulkDecision.details.calorie_average}` : "Need logs"} detail="Recent daily average" icon={Apple} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
-          <MetricCard title="Protein Avg" value={leanBulkDecision?.details.protein_average ? `${leanBulkDecision.details.protein_average}g` : "Need logs"} detail={leanBulkDecision?.details.protein_target ? `Target ~${leanBulkDecision.details.protein_target}g` : "0.8-1.0g/lb guardrail"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
-          <MetricCard title="Training Trend" value={leanBulkDecision?.details.training_trend ?? "Need data"} detail="Key lift direction" icon={Dumbbell} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
-          <MetricCard title="Recovery Trend" value={leanBulkDecision?.details.recovery_trend ?? "Need data"} detail={leanBulkDecision?.details.recovery_average ? `${leanBulkDecision.details.recovery_average}/100 avg` : "Recent readiness"} icon={HeartPulse} accent="border-rose-400/20 bg-rose-400/10 text-rose-300" />
+          <MetricCard title="7-Day Avg Weight" value={leanBulkDetails?.seven_day_avg_weight ? `${leanBulkDetails.seven_day_avg_weight}` : "Need data"} detail="Smooths water spikes" icon={Weight} accent="border-blue-400/20 bg-blue-400/10 text-blue-300" />
+          <MetricCard title="14-Day Avg Weight" value={leanBulkDetails?.fourteen_day_avg_weight ? `${leanBulkDetails.fourteen_day_avg_weight}` : "Need data"} detail="Primary trend context" icon={Weight} accent="accent-outline" />
+          <MetricCard title="Calorie Avg" value={leanBulkDetails?.calorie_average ? `${leanBulkDetails.calorie_average}` : "Need logs"} detail="Recent daily average" icon={Apple} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
+          <MetricCard title="Protein Avg" value={leanBulkDetails?.protein_average ? `${leanBulkDetails.protein_average}g` : "Need logs"} detail={leanBulkDetails?.protein_target ? `Target ~${leanBulkDetails.protein_target}g` : "0.8-1.0g/lb guardrail"} icon={ProteinMoleculeIcon} accent="border-teal-400/20 bg-teal-400/10 text-teal-300" />
+          <MetricCard title="Training Trend" value={leanBulkDetails?.training_trend ?? "Need data"} detail="Key lift direction" icon={Dumbbell} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
+          <MetricCard title="Recovery Trend" value={leanBulkDetails?.recovery_trend ?? "Need data"} detail={leanBulkDetails?.recovery_average ? `${leanBulkDetails.recovery_average}/100 avg` : "Recent readiness"} icon={HeartPulse} accent="border-rose-400/20 bg-rose-400/10 text-rose-300" />
           <MetricCard title="Decision" value={leanBulkDecision?.recommendation ?? "maintain"} detail={leanBulkDecision ? `${leanBulkDecision.calorie_change > 0 ? "+" : ""}${leanBulkDecision.calorie_change} kcal/day` : "Need data"} icon={Sparkles} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
           <MetricCard title="Risk Score" value={`${leanBulkDecision?.fat_gain_risk_score ?? 0}/100`} detail="Fat-gain risk estimate" icon={Gauge} accent="border-orange-400/20 bg-orange-400/10 text-orange-300" />
         </div>
@@ -8755,15 +8827,15 @@ function IntegrationHealthGrid({
   cards: SettingsHealthCard[];
   onSyncHevy: () => void;
   onImportStrava: () => void;
-  onConnectStrava: () => void;
+  onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
   onSyncWithings: () => void;
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
     if (card.action === "hevy_sync") return { label: "Sync", onClick: onSyncHevy };
     if (card.action === "strava_import") return { label: "Sync", onClick: onImportStrava };
-    if (card.action === "strava_connect") return { label: "Connect Strava", onClick: onConnectStrava };
-    if (card.action === "strava_reconnect") return { label: "Reconnect Strava", onClick: onConnectStrava };
+    if (card.action === "strava_connect") return { label: "Connect Strava", onClick: () => onConnectStrava(false) };
+    if (card.action === "strava_reconnect") return { label: "Reconnect Strava", onClick: () => onConnectStrava(true) };
     if (card.action === "withings_connect") return { label: "Connect", onClick: onConnectWithings };
     if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
     return null;
@@ -9319,7 +9391,7 @@ function SettingsPage({
   onSubmit: (event: FormEvent) => void;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onTestApiConnections: () => void;
-  onConnectStrava: () => void;
+  onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
   onSyncWithings: () => void;
   onSyncWithingsHistory: () => void;
@@ -9329,6 +9401,8 @@ function SettingsPage({
   onClearWithings: () => void;
 }>) {
   const withingsConnected = settings?.statuses.withings === "Connected";
+  const stravaStatus = settings?.statuses.strava ?? "Not configured";
+  const stravaReconnect = stravaStatus === "Connected" || stravaStatus === "Reconnect required" || stravaStatus === "Expired/Reauth required";
   return (
     <div className="space-y-4">
       <DiagnosticStatusDashboard settings={settings} />
@@ -9367,8 +9441,8 @@ function SettingsPage({
         <Card>
           <SectionHeader eyebrow="Strava" title="OAuth connection" />
           <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.strava ?? "Not configured"}</span></p>
-          <button onClick={onConnectStrava} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
-            {settings?.statuses.strava === "Connected" || settings?.statuses.strava === "Disconnected" ? "Reconnect Strava" : "Connect Strava"}
+          <button onClick={() => onConnectStrava(stravaReconnect)} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
+            {stravaReconnect ? "Reconnect Strava" : "Connect Strava"}
           </button>
           <p className="mt-3 text-xs text-zinc-500">Uses OAuth2 scopes: read and activity:read_all. Tokens are stored server-side and never displayed.</p>
         </Card>
@@ -9523,8 +9597,26 @@ function sleepClockHour(value: string) {
   return date.getHours() + date.getMinutes() / 60;
 }
 
+function initialPageFromUrl(): PageId {
+  if (typeof window === "undefined") return "dashboard";
+  const page = new URLSearchParams(window.location.search).get("page");
+  return navigation.some((item) => item.id === page) ? page as PageId : "dashboard";
+}
+
+function initialIntegrationNotice(kind: "message" | "error") {
+  if (typeof window === "undefined") return null;
+  const params = new URLSearchParams(window.location.search);
+  const provider = params.has("strava") ? "Strava" : params.has("withings") ? "Withings" : "";
+  if (!provider) return null;
+  const status = (params.get(provider.toLowerCase()) ?? "").toLowerCase();
+  const text = params.get("message");
+  if (kind === "message" && status === "connected") return text || `${provider} connected.`;
+  if (kind === "error" && status === "error") return text || `${provider} connection failed.`;
+  return null;
+}
+
 export default function Home() {
-  const [activePage, setActivePage] = useState<PageId>("dashboard");
+  const [activePage, setActivePage] = useState<PageId>(() => initialPageFromUrl());
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [nutritionLogs, setNutritionLogs] = useState<NutritionEntry[]>([]);
   const [nutritionHistory, setNutritionHistory] = useState<DailyNutritionSummary[]>([]);
@@ -9580,8 +9672,8 @@ export default function Home() {
   const [hevySyncing, setHevySyncing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("Waking backend...");
-  const [message, setMessage] = useState<string | null>(null);
-  const [apiError, setApiError] = useState<string | null>(null);
+  const [message, setMessage] = useState<string | null>(() => initialIntegrationNotice("message"));
+  const [apiError, setApiError] = useState<string | null>(() => initialIntegrationNotice("error"));
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
   const [systemFailure, setSystemFailure] = useState<SystemFailureReport | null>(null);
   const [rateLimited, setRateLimited] = useState(false);
@@ -11076,18 +11168,20 @@ export default function Home() {
       />
     ),
     goals: (
-      <GoalsPage
-        goals={dashboard?.goals ?? null}
-        targets={dashboard?.targets ?? null}
-        weightFeedback={dashboard?.weight_feedback ?? null}
-        leanBulkDecision={dashboard?.lean_bulk_decision ?? null}
-        adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
-        onApplySuggestedMacros={() =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend("/api/goals/apply-suggested-macros", "POST", {});
-          }, "Suggested macros applied.")
-        }
-      />
+      <GoalsPageErrorBoundary resetKey={`${dashboard?.date ?? ""}-${Boolean(dashboard?.adaptive_recommendation)}`}>
+        <GoalsPage
+          goals={dashboard?.goals ?? null}
+          targets={dashboard?.targets ?? null}
+          weightFeedback={dashboard?.weight_feedback ?? null}
+          leanBulkDecision={dashboard?.lean_bulk_decision ?? null}
+          adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
+          onApplySuggestedMacros={() =>
+            void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+              await apiSend("/api/goals/apply-suggested-macros", "POST", {});
+            }, "Suggested macros applied.")
+          }
+        />
+      </GoalsPageErrorBoundary>
     ),
     recovery: (
       <RecoveryPage
@@ -11312,11 +11406,11 @@ export default function Home() {
             "Strava import complete.",
           );
         }}
-        onConnectStrava={async () => {
+        onConnectStrava={async (reconnect = false) => {
           setApiError(null);
           setMessage(null);
           try {
-            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/integrations/strava/auth-url?reconnect=true");
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>(`/api/integrations/strava/auth-url${reconnect ? "?reconnect=true" : ""}`);
             if (result.status !== "ok" || !result.auth_url) {
               throw new Error(result.message ?? "Unable to generate Strava authorization URL.");
             }

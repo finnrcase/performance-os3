@@ -32,7 +32,10 @@ def test_strava_auth_url_uses_required_scope_and_redirect_uri():
     assert parsed.netloc == "www.strava.com"
     assert query["client_id"] == ["client-id"]
     assert query["redirect_uri"] == ["https://api.example.com/api/strava/callback"]
+    assert query["response_type"] == ["code"]
+    assert query["approval_prompt"] == ["auto"]
     assert query["scope"] == ["read,activity:read_all"]
+    assert query["state"] == ["performance-os"]
 
 
 def test_strava_debug_reports_disconnected_without_exposing_credentials():
@@ -58,6 +61,12 @@ def test_strava_debug_reports_disconnected_without_exposing_credentials():
     assert payload["refresh_token_present"] is False
     assert payload["status"] == "disconnected"
     assert payload["next_action"] == "connect_strava"
+    assert payload["auth_url_route_registered"] is True
+    assert payload["callback_route_registered"] is True
+    assert payload["disconnect_route_registered"] is True
+    assert payload["import_route_registered"] is True
+    assert payload["debug_route_registered"] is True
+    assert payload["storage_keys_found"] == []
     assert "client-secret" not in str(payload)
 
 
@@ -89,6 +98,7 @@ def test_strava_callback_exchanges_code_and_redirects_to_frontend():
 
     assert response.status_code == 303
     assert "strava=connected" in response.headers["location"]
+    assert "page=settings" in response.headers["location"]
     exchange.assert_called_once_with("abc123")
 
 
@@ -121,7 +131,86 @@ def test_strava_token_save_uses_backend_new_api_connections_storage():
     assert table == "api_connections"
     assert key_field == "settings_key"
     assert key_value == "primary"
+    assert data["integrations"]["strava_access_token"] == "access"
+    assert data["integrations"]["strava_refresh_token"] == "refresh"
+    assert data["integrations"]["strava_expires_at"] == 123
+    assert data["integrations"]["strava_athlete_id"] == "42"
     assert data["metadata"]["strava_tokens"]["refresh_token"] == "refresh"
+
+
+def test_strava_status_reads_stable_token_keys_and_masks_tokens():
+    stored = {
+        "integrations": {
+            "strava_client_id": "saved-client-id",
+            "strava_client_secret": "saved-client-secret",
+            "strava_access_token": "saved-access",
+            "strava_refresh_token": "saved-refresh",
+            "strava_expires_at": 9999999999,
+            "strava_athlete_id": "42",
+        },
+        "metadata": {"strava_sync": {}},
+    }
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "STRAVA_CLIENT_ID": "",
+                "STRAVA_CLIENT_SECRET": "",
+                "STRAVA_ACCESS_TOKEN": "",
+                "STRAVA_REFRESH_TOKEN": "",
+                "STRAVA_EXPIRES_AT": "",
+                "STRAVA_TOKEN_EXPIRES_AT": "",
+                "STRAVA_ATHLETE_ID": "",
+            },
+            clear=False,
+        ),
+        patch("backend_new.routes.integrations.fetch_latest_document", return_value=stored),
+        patch("backend_new.routes.settings.fetch_latest_document", return_value=stored),
+    ):
+        response = client.get("/api/integrations/status?external_checks=false")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["statuses"]["strava"] == "Connected"
+    assert payload["services"]["strava"]["status"] == "ok"
+    assert payload["integrations"]["strava_access_token"] == "••••"
+    assert payload["integrations"]["strava_refresh_token"] == "••••"
+    serialized = str(payload)
+    assert "saved-access" not in serialized
+    assert "saved-refresh" not in serialized
+
+
+def test_strava_status_reports_reconnect_required_after_refresh_failure_flag():
+    stored = {
+        "integrations": {
+            "strava_client_id": "saved-client-id",
+            "strava_client_secret": "saved-client-secret",
+            "strava_access_token": "",
+            "strava_refresh_token": "",
+        },
+        "metadata": {"strava_sync": {"needs_reconnect": True, "last_error": "Strava token refresh failed."}},
+    }
+    with (
+        patch.dict(
+            "os.environ",
+            {
+                "STRAVA_CLIENT_ID": "",
+                "STRAVA_CLIENT_SECRET": "",
+                "STRAVA_ACCESS_TOKEN": "",
+                "STRAVA_REFRESH_TOKEN": "",
+            },
+            clear=False,
+        ),
+        patch("backend_new.routes.integrations.fetch_latest_document", return_value=stored),
+        patch("backend_new.routes.settings.fetch_latest_document", return_value=stored),
+    ):
+        response = client.get("/api/integrations/status?external_checks=false")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["statuses"]["strava"] == "Reconnect required"
+    assert payload["services"]["strava"]["status"] == "reconnect_required"
+    assert payload["services"]["strava"]["reconnect_required"] is True
 
 
 def test_manual_strava_import_returns_counts_and_refreshes_summary_cache():

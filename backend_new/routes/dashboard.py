@@ -16,7 +16,7 @@ from backend_new.config import app_timezone_name
 from backend_new.utils import app_today_iso, utc_now_iso
 from src.body_metrics import canonical_daily_bodyweights
 from src.analytics.recovery_engine import calculate_recovery_score
-from src.training_schedule import DEFAULT_RECURRING_SCHEDULE_PROFILE, planned_training_for_date, summarize_training_day
+from src.training_schedule import DEFAULT_RECURRING_SCHEDULE_PROFILE, classify_strength_split, planned_training_for_date, summarize_training_day
 
 
 router = APIRouter(tags=["dashboard"])
@@ -308,6 +308,9 @@ def _latest_from_training_history(history_items: list[dict[str, Any]]) -> dict[s
         "workout_type": latest.get("workout_type") or "Workout",
         "classification": latest.get("classification"),
         "classification_debug": latest.get("classification_debug"),
+        "split_type": latest.get("split_type") or "",
+        "split_confidence": latest.get("split_confidence", 0.0),
+        "classification_reason": latest.get("classification_reason") or [],
         "exercise_names": latest.get("exercise_names") or [],
         "total_sets": latest.get("total_sets", 0),
         "total_volume": latest.get("total_volume", 0),
@@ -372,18 +375,44 @@ def _workout_title_from_item(item: dict[str, Any]) -> str:
 
 
 def _normalized_workout_split(item: dict[str, Any]) -> str:
-    title = _clean_training_text(_workout_title_from_item(item))
-    split_terms = [
-        ("push", ("push", "pressing", "chest shoulders triceps")),
-        ("pull", ("pull", "back biceps")),
-        ("upper", ("upper", "upper body")),
-        ("lower", ("lower", "lower body")),
-        ("legs", ("legs", "leg", "squat")),
-    ]
-    for split, needles in split_terms:
-        if any(needle in title for needle in needles):
-            return split
-    return ""
+    split = classify_strength_split(item)
+    return str(split.get("split_type") or "").strip()
+
+
+def _workout_split_payload(item: dict[str, Any]) -> dict[str, Any]:
+    split = classify_strength_split(item)
+    return {
+        "split_type": str(split.get("split_type") or ""),
+        "split_confidence": split.get("split_confidence", 0.0),
+        "classification_reason": split.get("classification_reason") or [],
+        "matched_by": split.get("matched_by") or "none",
+    }
+
+
+def _split_display_label(split_type: str) -> str:
+    labels = {
+        "pull_day": "Pull",
+        "push_day": "Push",
+        "chest_day": "Chest",
+        "upper_day": "Upper",
+        "lower_day": "Lower",
+        "leg_day": "Leg",
+        "leg_day_quad": "Quad leg",
+        "leg_day_hamstring": "Hamstring leg",
+    }
+    return labels.get(str(split_type or ""), str(split_type or "").replace("_", " ").title())
+
+
+def _comparison_match_label(split_type: str) -> str:
+    legacy_labels = {
+        "pull_day": "pull",
+        "push_day": "push",
+        "chest_day": "chest",
+        "upper_day": "upper",
+        "lower_day": "lower",
+        "leg_day": "legs",
+    }
+    return legacy_labels.get(str(split_type or ""), str(split_type or ""))
 
 
 def _normalized_workout_title(item: dict[str, Any]) -> str:
@@ -468,7 +497,7 @@ def _similar_lift_workouts(latest: dict[str, Any], previous: list[dict[str, Any]
     if split:
         matches = [item for item in previous if _normalized_workout_split(item) == split]
         if matches:
-            return matches[:7], "normalized_split", split
+            return matches[:7], "normalized_split", _comparison_match_label(split)
 
     title = _normalized_workout_title(latest)
     if title:
@@ -670,6 +699,10 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
     latest_date = str(latest.get("date") or "")[:10]
     latest_id = str(latest.get("workout_id") or "")
     title = _workout_title_from_item(latest)
+    split_payload = _workout_split_payload(latest)
+    split_type = split_payload.get("split_type") or ""
+    split_confidence = split_payload.get("split_confidence", 0.0)
+    classification_reason = split_payload.get("classification_reason") or []
     total_sets = int(max(0, _number(latest.get("total_sets"), 0)))
     total_reps = _workout_reps(latest)
     total_volume = _round(_number(latest.get("total_volume"), 0))
@@ -698,7 +731,7 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
             score = 55
     rating, color = _workout_score_rating(score)
     confidence = "high" if sample_size >= 7 and compared_sets >= max(3, len(comparable) * 2) else "medium" if sample_size >= 3 and compared_sets else "low"
-    split_label = match_label.title() if matched_by == "normalized_split" and match_label else "similar"
+    split_label = _split_display_label(match_label) if matched_by == "normalized_split" and match_label else "similar"
     if avg_progression is None:
         summary = "Insufficient comparison data for set-level workout quality."
         comparison_text = "Need prior similar lifting workouts with comparable weighted sets."
@@ -716,6 +749,9 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
         "workout_type": title,
         "classification": "lift",
         "classification_label": latest.get("classification_label") or "Lift",
+        "split_type": split_type,
+        "split_confidence": split_confidence,
+        "classification_reason": classification_reason,
         "rating": rating,
         "score": score,
         "score_label": f"{score}/100" if score is not None else rating,
@@ -744,6 +780,10 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
             "lift_items_checked": len(lifts),
             "matched_by": matched_by,
             "match_label": match_label,
+            "split_type": split_type,
+            "split_confidence": split_confidence,
+            "classification_reason": classification_reason,
+            "split_matched_by": split_payload.get("matched_by") or "none",
             "excluded_cardio": True,
             "today_sets_scored": len(today_sets),
             "sets_compared": compared_sets,
@@ -1250,6 +1290,10 @@ def _lift_performance_payload(
         "sources": [],
         "schedule_match": "missed",
         "match_label": "Workout not logged yet",
+        "planned_split_type": planned.get("split_type") or "",
+        "completed_split_types": [],
+        "split_match": False,
+        "classification_reason": [],
         "cardio_indicator": "Planned run/cardio" if planned["is_run_day"] else None,
         "extra_run_added": False,
         "recovery_status_relative_to_plan": "Plan pending",
@@ -1267,7 +1311,24 @@ def _lift_performance_payload(
         completed_text = " ".join(completed_workouts).lower()
         has_lift = any(str(item.get("classification") or "") in {"lift", "lift_cardio"} for item in today_items)
         has_run = any(str(item.get("classification") or "") in {"run", "cardio", "lift_cardio"} for item in today_items)
-        schedule_match = "matched" if planned_label and planned_label in completed_text else "different"
+        split_payloads = [_workout_split_payload(item) for item in today_items if str(item.get("classification") or "") in {"lift", "lift_cardio"}]
+        completed_split_types = list(dict.fromkeys(str(item.get("split_type") or "") for item in split_payloads if item.get("split_type")))
+        planned_split_type = str((day_summary.get("planned") or {}).get("split_type") or "")
+        split_match = bool(planned_split_type and planned_split_type in completed_split_types)
+        label_match = bool(planned_label and planned_label in completed_text)
+        if planned.get("is_run_day"):
+            schedule_match = "matched" if has_run else "different"
+        elif planned.get("is_strength_day"):
+            strength_match = split_match or (not planned_split_type and label_match)
+            schedule_match = "matched_plus_extra_run" if strength_match and has_run else "matched" if strength_match else "different"
+        else:
+            schedule_match = "logged"
+        match_label = {
+            "matched": "Matched schedule",
+            "matched_plus_extra_run": "Matched + recovery run added",
+            "different": "Different from planned",
+            "logged": "Logged",
+        }.get(schedule_match, "Logged")
         day_summary = {
             **day_summary,
             "completed_workouts": completed_workouts,
@@ -1276,10 +1337,20 @@ def _lift_performance_payload(
             "has_run": has_run,
             "sources": sorted({str(item.get("source") or "manual").capitalize() for item in today_items if item.get("source")}),
             "schedule_match": schedule_match,
-            "match_label": "Matched schedule" if schedule_match == "matched" else "Different from planned",
+            "match_label": match_label,
+            "completed_split_types": completed_split_types,
+            "split_match": split_match,
+            "classification_reason": list(
+                dict.fromkeys(
+                    reason
+                    for item in split_payloads
+                    for reason in (item.get("classification_reason") or [])
+                    if reason
+                )
+            )[:6],
             "cardio_indicator": "Run/cardio logged" if has_run else None,
             "extra_run_added": bool(has_run and has_lift),
-            "recovery_status_relative_to_plan": "On plan" if schedule_match == "matched" else "Different from planned",
+            "recovery_status_relative_to_plan": "Extra run added" if schedule_match == "matched_plus_extra_run" else "On plan" if schedule_match == "matched" else match_label,
         }
     elif training_rows:
         training_df = pd.DataFrame(training_rows)
@@ -1298,6 +1369,10 @@ def _lift_performance_payload(
         "completed_summary": completed_summary,
         "schedule_match": day_summary.get("schedule_match", "missed"),
         "match_label": day_summary.get("match_label", "Workout not logged yet"),
+        "planned_split_type": day_summary.get("planned_split_type") or (day_summary.get("planned") or {}).get("split_type") or "",
+        "completed_split_types": day_summary.get("completed_split_types", []),
+        "split_match": bool(day_summary.get("split_match")),
+        "classification_reason": day_summary.get("classification_reason", []),
         "sources": day_summary.get("sources", []),
         "has_run": bool(day_summary.get("has_run")),
         "has_lift": bool(day_summary.get("has_lift")),

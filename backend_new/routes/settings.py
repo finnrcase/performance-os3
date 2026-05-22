@@ -82,10 +82,10 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
     tokens = metadata.get("strava_tokens") if isinstance(metadata.get("strava_tokens"), dict) else {}
     sync = metadata.get("strava_sync") if isinstance(metadata.get("strava_sync"), dict) else {}
-    access_token = os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or str(tokens.get("access_token") or "").strip()
-    refresh_token = os.getenv("STRAVA_REFRESH_TOKEN", "").strip() or str(tokens.get("refresh_token") or "").strip()
+    access_token = os.getenv("STRAVA_ACCESS_TOKEN", "").strip() or str(integrations.get("strava_access_token") or tokens.get("access_token") or "").strip()
+    refresh_token = os.getenv("STRAVA_REFRESH_TOKEN", "").strip() or str(integrations.get("strava_refresh_token") or tokens.get("refresh_token") or "").strip()
     try:
-        expires_at = int(os.getenv("STRAVA_EXPIRES_AT", "").strip() or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip() or tokens.get("expires_at") or 0)
+        expires_at = int(os.getenv("STRAVA_EXPIRES_AT", "").strip() or os.getenv("STRAVA_TOKEN_EXPIRES_AT", "").strip() or integrations.get("strava_expires_at") or tokens.get("expires_at") or 0)
     except ValueError:
         expires_at = 0
     has_credentials = (
@@ -96,9 +96,11 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
         and _configured_from_env("strava_client_secret")
     )
     access_expired = bool(access_token and expires_at and expires_at <= int(time.time()))
-    has_tokens = bool(access_token or refresh_token)
-    if sync.get("needs_reconnect") and has_tokens:
-        status = "Expired/Reauth required"
+    if not has_credentials:
+        status = "Not configured"
+        token_status = "missing"
+    elif sync.get("needs_reconnect"):
+        status = "Reconnect required"
         token_status = "reconnect_required"
     elif refresh_token:
         status = "Connected"
@@ -115,12 +117,12 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
         "token_status": token_status,
         "access_token_present": bool(access_token),
         "refresh_token_present": bool(refresh_token),
-        "athlete_id": str(os.getenv("STRAVA_ATHLETE_ID", "").strip() or tokens.get("athlete_id") or ""),
+        "athlete_id": str(os.getenv("STRAVA_ATHLETE_ID", "").strip() or integrations.get("strava_athlete_id") or tokens.get("athlete_id") or ""),
         "expires_at": expires_at or None,
         "last_synced_at": sync.get("last_synced_at", ""),
         "latest_record": sync.get("latest_activity_date", ""),
         "last_error": sync.get("last_error", ""),
-        "reconnect_required": bool(sync.get("needs_reconnect") and has_tokens),
+        "reconnect_required": bool(sync.get("needs_reconnect") and has_credentials),
         "imported_runs": sync.get("last_imported_count", 0),
         "updated_runs": sync.get("last_updated_count", 0),
         "fetched_activities": sync.get("last_fetched_count", 0),
@@ -225,7 +227,7 @@ def settings_payload() -> dict[str, Any]:
         "hevy": {"configured": statuses["hevy_api_key"] == "Configured", "status": "disabled", "message": "Hevy sync is disabled in backend_new."},
         "strava": {
             "configured": strava_service["configured"],
-            "status": "connected" if strava_status == "Connected" else "needs_reconnect" if strava_status == "Expired/Reauth required" else "disconnected" if strava_status == "Disconnected" else "not_configured",
+            "status": "connected" if strava_status == "Connected" else "needs_reconnect" if strava_status in {"Reconnect required", "Expired/Reauth required"} else "disconnected" if strava_status == "Disconnected" else "not_configured",
             "message": "Strava import is manual in backend_new. Startup never calls the Strava API.",
             **strava_service,
         },
@@ -238,11 +240,11 @@ def settings_payload() -> dict[str, Any]:
         {
             "id": "strava",
             "name": "Strava",
-            "status": "green" if strava_status == "Connected" else "yellow" if strava_status in {"Disconnected", "Expired/Reauth required"} else "gray",
+            "status": "green" if strava_status == "Connected" else "yellow" if strava_status in {"Disconnected", "Reconnect required", "Expired/Reauth required"} else "gray",
             "message": services["strava"]["message"],
             "last_synced_at": strava_service["last_synced_at"],
             "latest_record": strava_service["latest_record"],
-            "action": "strava_import" if strava_status == "Connected" else "strava_reconnect" if strava_status == "Expired/Reauth required" else "strava_connect",
+            "action": "strava_import" if strava_status == "Connected" else "strava_reconnect" if strava_status in {"Reconnect required", "Expired/Reauth required"} else "strava_connect",
             "metadata": {
                 "connection": strava_status,
                 "configured": strava_service["configured"],

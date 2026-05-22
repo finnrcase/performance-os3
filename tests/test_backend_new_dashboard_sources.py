@@ -219,6 +219,48 @@ def test_workout_quality_scores_set_progression_against_last_7_matching_split():
     assert all(item["exercise"] != "Deadlift" for item in payload["exercise_breakdown"])
 
 
+def test_workout_quality_keeps_quad_and_hamstring_leg_days_separate():
+    latest_hamstring = _lift_item(
+        "2026-05-22",
+        "ham-today",
+        "Legs",
+        [
+            _detail("Romanian Deadlift", 235, 8, 1, "Hamstrings"),
+            _detail("Romanian Deadlift", 235, 8, 2, "Hamstrings"),
+            _detail("Lying Leg Curl", 100, 12, 1, "Hamstrings"),
+        ],
+    )
+    prior_hamstring = _lift_item(
+        "2026-05-15",
+        "ham-prior",
+        "Legs",
+        [
+            _detail("Romanian Deadlift", 225, 8, 1, "Hamstrings"),
+            _detail("Romanian Deadlift", 225, 8, 2, "Hamstrings"),
+            _detail("Lying Leg Curl", 95, 12, 1, "Hamstrings"),
+        ],
+    )
+    prior_quad = _lift_item(
+        "2026-05-19",
+        "quad-prior",
+        "Legs",
+        [
+            _detail("Pendulum Squat", 270, 8, 1, "Quads"),
+            _detail("Pendulum Squat", 270, 8, 2, "Quads"),
+            _detail("Leg Extension", 130, 12, 1, "Quads"),
+        ],
+    )
+
+    payload = dashboard._workout_quality_payload([latest_hamstring, prior_quad, prior_hamstring])
+
+    assert payload["split_type"] == "leg_day_hamstring"
+    assert payload["debug"]["split_type"] == "leg_day_hamstring"
+    assert payload["debug"]["match_label"] == "leg_day_hamstring"
+    assert payload["similar_workouts_used"] == 1
+    assert "Hamstring leg workout" in payload["summary"]
+    assert all(item["exercise"] in {"Romanian Deadlift", "Lying Leg Curl"} for item in payload["exercise_breakdown"])
+
+
 def test_workout_quality_empty_when_no_lift_exists():
     payload = dashboard._workout_quality_payload(
         [
