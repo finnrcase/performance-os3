@@ -127,6 +127,53 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
     }
 
 
+def _openai_status(openai_config: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
+    configured = bool(openai_config.get("openai_key_configured"))
+    last_test = metadata.get("openai_last_test") if isinstance(metadata.get("openai_last_test"), dict) else {}
+    label = "Missing"
+    status = "missing_api_key"
+    message = "OpenAI API key is missing. Manual food logging still works."
+    if configured:
+        label = "Configured"
+        status = "configured"
+        message = "OpenAI key exists. Run Test OpenAI to verify auth, model, SDK, and network."
+    if configured and last_test:
+        test_status = str(last_test.get("test_status") or "").lower()
+        error_type = str(last_test.get("error_type") or "")
+        if test_status == "ok":
+            label = "Connected"
+            status = "connected"
+            message = str(last_test.get("message") or "OpenAI test request succeeded.")
+        elif error_type in {"AuthenticationError"}:
+            label = "Auth failed"
+            status = "auth_failed"
+            message = str(last_test.get("message") or "OpenAI rejected the configured API key.")
+        elif error_type in {"ModelConfigurationError", "ModelInvalidError"}:
+            label = "Model invalid"
+            status = "model_invalid"
+            message = str(last_test.get("message") or "OpenAI model configuration is invalid.")
+        elif error_type in {"RateLimitError"}:
+            label = "Rate limited"
+            status = "rate_limited"
+            message = str(last_test.get("message") or "OpenAI quota or rate limit was reached.")
+        else:
+            label = "Request failed"
+            status = "request_failed"
+            message = str(last_test.get("message") or "OpenAI test request failed.")
+    return {
+        "configured": configured,
+        "label": label,
+        "status": status,
+        "message": message,
+        "model": openai_config.get("model", ""),
+        "api_key_source": openai_config.get("api_key_source", "unknown"),
+        "last_checked_at": metadata.get("openai_last_test_at", ""),
+        "last_test_status": last_test.get("test_status", ""),
+        "last_error_type": last_test.get("error_type", ""),
+        "response_ms": last_test.get("response_ms", last_test.get("latency_ms")),
+    }
+
+
 def _saved_settings() -> dict[str, Any]:
     stored = fetch_latest_document("api_connections", _default_settings())
     if not isinstance(stored, dict):
@@ -152,7 +199,8 @@ def settings_payload() -> dict[str, Any]:
         openai_config = openai_analyzer_config()
     except Exception:
         openai_config = {"openai_key_configured": statuses["openai_api_key"] == "Configured", "model": "", "api_key_source": "unknown"}
-    statuses["openai_api_key"] = "Configured" if openai_config.get("openai_key_configured") else "Not configured"
+    openai_service = _openai_status(openai_config, metadata)
+    statuses["openai_api_key"] = openai_service["label"]
     withings_status = _withings_status(settings, integrations)
     strava_status, strava_service = _strava_connection(settings, integrations)
     statuses.update(
@@ -183,11 +231,7 @@ def settings_payload() -> dict[str, Any]:
         },
         "withings": withings_service,
         "openai": {
-            "configured": statuses["openai_api_key"] == "Configured",
-            "status": "configured" if statuses["openai_api_key"] == "Configured" else "missing_api_key",
-            "message": "OpenAI analyzer key is configured; use the OpenAI test button for a live Working check." if statuses["openai_api_key"] == "Configured" else "OpenAI analyzer is not configured.",
-            "model": openai_config.get("model", ""),
-            "api_key_source": openai_config.get("api_key_source", "unknown"),
+            **openai_service,
         },
     }
     health = [

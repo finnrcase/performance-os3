@@ -563,7 +563,7 @@ def test_openai_connection() -> dict[str, Any]:
         result["client_initialized"] = True
         kwargs: dict[str, Any] = {
             "model": str(config.get("model") or food_analysis_model()),
-            "input": "Reply with exactly: OK",
+            "input": "Respond with the word OK.",
             "max_output_tokens": 16,
         }
         if str(kwargs["model"]).startswith("gpt-5"):
@@ -580,8 +580,10 @@ def test_openai_connection() -> dict[str, Any]:
             raise ValueError("OpenAI returned no text output.")
         result["test_status"] = "ok"
         result["message"] = f"OpenAI test call succeeded with {kwargs['model']}."
-        result["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
-        logger.info("[openai_debug] test_call_ok model=%s latency_ms=%s", kwargs["model"], result["latency_ms"])
+        response_ms = round((time.perf_counter() - started) * 1000, 1)
+        result["response_ms"] = response_ms
+        result["latency_ms"] = response_ms
+        logger.info("[openai_debug] test_call_ok model=%s response_ms=%s", kwargs["model"], response_ms)
         return result
     except AuthenticationError as exc:
         result["error_type"] = type(exc).__name__
@@ -593,12 +595,19 @@ def test_openai_connection() -> dict[str, Any]:
         result["error_type"] = type(exc).__name__
         result["message"] = f"Could not reach OpenAI: {exc}"
     except APIStatusError as exc:
-        result["error_type"] = type(exc).__name__
-        result["message"] = f"OpenAI API returned status {exc.status_code}: {exc}"
+        text = str(exc)
+        if exc.status_code in {400, 404} and "model" in text.lower():
+            result["error_type"] = "ModelInvalidError"
+            result["message"] = f"OpenAI model {result.get('model') or 'unknown'} is invalid or unavailable: {text}"
+        else:
+            result["error_type"] = type(exc).__name__
+            result["message"] = f"OpenAI API returned status {exc.status_code}: {exc}"
     except Exception as exc:
         result["error_type"] = type(exc).__name__
         result["message"] = str(exc) or "OpenAI test call failed."
-    result["latency_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    response_ms = round((time.perf_counter() - started) * 1000, 1)
+    result["response_ms"] = response_ms
+    result["latency_ms"] = response_ms
     logger.warning("[openai_debug] test_call_failed model=%s error_type=%s message=%s", result.get("model"), result["error_type"], result["message"])
     return result
 

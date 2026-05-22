@@ -282,6 +282,9 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
     except Exception:
         openai_config = {"openai_key_configured": bool(os.getenv("OPENAI_API_KEY", "").strip() or _integrations(settings).get("openai_api_key")), "model": "", "api_key_source": "unknown"}
     openai_configured = bool(openai_config.get("openai_key_configured"))
+    openai_service = (base.get("services", {}) if isinstance(base.get("services"), dict) else {}).get("openai", {})
+    openai_label = str(openai_service.get("label") or ("Configured" if openai_configured else "Missing"))
+    openai_status = str(openai_service.get("status") or ("configured" if openai_configured else "missing_api_key"))
     hevy_configured = bool(os.getenv("HEVY_API_KEY", "").strip() or _integrations(settings).get("hevy_api_key"))
     db = ping()
     database_ok = db.get("status") == "ok"
@@ -301,8 +304,8 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "frontend": _component(configured=True, status="green", message="Frontend proxy can consume this backend response.", required_env_vars=[]),
             "openai": _component(
                 configured=openai_configured,
-                status="green" if openai_configured else "gray",
-                message="OpenAI key is configured." if openai_configured else "OpenAI key is not configured. Manual logging still works.",
+                status="green" if openai_status == "connected" else "yellow" if openai_status == "configured" else "gray" if openai_status == "missing_api_key" else "red",
+                message=str(openai_service.get("message") or ("OpenAI key is configured." if openai_configured else "OpenAI key is not configured. Manual logging still works.")),
                 required_env_vars=["OPENAI_API_KEY"],
                 details={key: value for key, value in openai_config.items() if key != "model_error"},
             ),
@@ -340,12 +343,12 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
         **base.get("statuses", {}),
         "strava": strava_status,
         "withings": withings_status,
-        "openai_api_key": "Configured" if openai_configured else "Not configured",
+        "openai_api_key": openai_label,
         "hevy_api_key": "Configured" if hevy_configured else "Not configured",
     }
     base["services"] = {
         **base.get("services", {}),
-        "openai": {"configured": openai_configured, "status": "ok" if openai_configured else "missing_api_key", "message": base["openai"]["message"], "model": openai_config.get("model", ""), "api_key_source": openai_config.get("api_key_source", "unknown")},
+        "openai": {**openai_service, "configured": openai_configured, "status": openai_status, "message": base["openai"]["message"], "model": openai_config.get("model", ""), "api_key_source": openai_config.get("api_key_source", "unknown")},
         "hevy": {"configured": hevy_configured, "status": "ok" if hevy_configured else "missing_api_key", "message": base["hevy"]["message"]},
         "strava": {"configured": base["strava"]["configured"], "status": "ok" if strava_status == "Connected" else _status_slug(strava_status), "message": base["strava"]["message"], "last_synced_at": strava_meta.get("last_synced_at", ""), "latest_record": strava_meta.get("latest_activity_date", ""), "reconnect_required": strava_meta.get("needs_reconnect", False), "token_status": strava_meta.get("token_status", "missing")},
         "withings": {"configured": base["withings"]["configured"], "status": "ok" if withings_status == "Connected" else withings_status.lower().replace(" ", "_"), "message": base["withings"]["message"], "last_synced_at": withings_meta.get("last_synced_at", ""), "latest_record": withings_meta.get("latest_measurement_date", ""), "reconnect_required": withings_meta.get("needs_reconnect", False)},
@@ -354,7 +357,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
         _health_card("hevy", "Hevy", "Connected" if hevy_configured else "Not configured", {"connected": hevy_configured}),
         _health_card("strava", "Strava", strava_status, strava_meta),
         _health_card("withings", "Withings", withings_status, withings_meta),
-        _health_card("openai", "OpenAI", "Connected" if openai_configured else "Not configured", {"connected": openai_configured}),
+        _health_card("openai", "OpenAI", openai_label, {"connected": openai_status == "connected", "configured": openai_configured}),
     ]
     base["integrations"] = {
         **base.get("integrations", {}),

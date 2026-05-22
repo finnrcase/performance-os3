@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Query, Request
 
 from backend_new.config import SERVICE_NAME, environment, storage_name
-from backend_new.db import SUPPORTED_JSONB_TABLES, count_rows_many, fetch_json_rows, ping
+from backend_new.db import SUPPORTED_JSONB_TABLES, count_rows_many, fetch_json_rows, fetch_latest_document, insert_json_row, ping
 from backend_new.utils import env_presence, timed, utc_now_iso
 from src.body_metrics import canonical_bodyweight_debug
 
@@ -95,12 +95,26 @@ def debug_openai() -> dict:
     try:
         from src.ai.food_parser import test_openai_connection
 
-        return test_openai_connection()
+        result = test_openai_connection()
+        try:
+            settings = fetch_latest_document("api_connections", {"integrations": {}, "metadata": {}})
+            if not isinstance(settings, dict):
+                settings = {"integrations": {}, "metadata": {}}
+            metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+            safe_result = {key: value for key, value in result.items() if "token" not in key.lower() and "key" not in key.lower()}
+            metadata["openai_last_test"] = safe_result
+            metadata["openai_last_test_at"] = utc_now_iso()
+            settings["metadata"] = metadata
+            insert_json_row("api_connections", settings)
+        except Exception:
+            pass
+        return result
     except Exception as exc:
         return {
             "configured": False,
             "client_initialized": False,
             "test_status": "error",
+            "response_ms": 0,
             "error_type": type(exc).__name__,
             "message": str(exc) or "OpenAI debug check failed before the client could be initialized.",
             "model": "",

@@ -1083,7 +1083,7 @@ type SettingsData = {
   appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
-  services?: Record<string, { configured: boolean; status: string; message: string; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean }>;
+  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean }>;
 };
 
 type ApiConnectionLayer = {
@@ -1113,6 +1113,7 @@ type OpenAIDebugResponse = {
   message: string;
   model?: string;
   api_key_source?: string;
+  response_ms?: number;
   latency_ms?: number;
 };
 
@@ -10312,7 +10313,7 @@ export default function Home() {
         parseResult={parseResult}
         manualSaving={manualFoodSaving}
         manualError={manualFoodError}
-        aiParsingConfigured={settings?.statuses.openai_api_key === "Configured"}
+        aiParsingConfigured={Boolean(settings?.services?.openai?.configured ?? (settings?.statuses.openai_api_key === "Configured" || settings?.statuses.openai_api_key === "Connected"))}
         shortcutSuggestion={shortcutSuggestion}
         onUseSuggestion={() => {
           if (!shortcutSuggestion) return;
@@ -10867,7 +10868,8 @@ export default function Home() {
             if (result.test_status !== "ok") {
               throw new Error(result.message || result.error_type || "OpenAI test failed.");
             }
-            const latency = result.latency_ms ? ` in ${Math.round(result.latency_ms)}ms` : "";
+            const latencyValue = result.response_ms ?? result.latency_ms;
+            const latency = latencyValue ? ` in ${Math.round(latencyValue)}ms` : "";
             setMessage(`OpenAI test passed with ${result.model || "configured model"}${latency}. Food Analyze is ready.`);
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "OpenAI parser test failed.");

@@ -40,13 +40,13 @@ def test_openai_config_agrees_across_settings_status_and_analyzer_when_configure
         integrations = client.get("/api/integrations/status?external_checks=false").json()
         analyze = client.post("/api/food/analyze-text", json={"text": "1 large egg"}).json()
 
-    assert settings["statuses"]["openai_api_key"] == "Configured"
+    assert settings["statuses"]["openai_api_key"] in {"Configured", "Connected"}
     assert settings["services"]["openai"]["model"] == "gpt-5.5"
-    assert integrations["statuses"]["openai_api_key"] == "Configured"
+    assert integrations["statuses"]["openai_api_key"] in {"Configured", "Connected"}
     assert integrations["services"]["openai"]["model"] == "gpt-5.5"
     assert analyze["debug"]["openai_key_configured"] is True
     assert analyze["debug"]["model"] == "gpt-5.5"
-    assert settings["services"]["openai"]["status"] == "configured"
+    assert settings["services"]["openai"]["status"] in {"configured", "connected"}
 
 
 def test_openai_config_agrees_across_settings_status_and_analyzer_when_missing():
@@ -69,8 +69,8 @@ def test_openai_config_agrees_across_settings_status_and_analyzer_when_missing()
         integrations = client.get("/api/integrations/status?external_checks=false").json()
         analyze = client.post("/api/food/analyze-text", json={"text": "1 large egg"}).json()
 
-    assert settings["statuses"]["openai_api_key"] == "Not configured"
-    assert integrations["statuses"]["openai_api_key"] == "Not configured"
+    assert settings["statuses"]["openai_api_key"] == "Missing"
+    assert integrations["statuses"]["openai_api_key"] == "Missing"
     assert analyze["success"] is False
     assert analyze["error_code"] == "openai_not_configured"
     assert analyze["message"] == "AI food parsing is not configured yet. You can still log foods manually."
@@ -87,6 +87,7 @@ def test_debug_openai_returns_safe_working_status_without_exposing_key():
         "message": "OpenAI test call succeeded with gpt-5.5.",
         "model": "gpt-5.5",
         "api_key_source": "environment",
+        "response_ms": 42.0,
         "latency_ms": 42.0,
     }
     with patch("src.ai.food_parser.test_openai_connection", return_value=debug_payload):
@@ -98,6 +99,7 @@ def test_debug_openai_returns_safe_working_status_without_exposing_key():
     assert data["client_initialized"] is True
     assert data["test_status"] == "ok"
     assert data["model"] == "gpt-5.5"
+    assert data["response_ms"] == 42.0
     assert "sk-" not in str(data)
 
 
