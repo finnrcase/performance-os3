@@ -1165,6 +1165,12 @@ type FoodParseResponse = {
   };
 };
 
+type FoodAiFlowStep = {
+  step: string;
+  status: "pending" | "ok" | "error";
+  message: string;
+};
+
 type FoodAnalyzeResponse = {
   items: Array<{
     name: string;
@@ -1202,6 +1208,14 @@ type FoodAnalyzeResponse = {
   success: boolean;
   error_code: string | null;
   debug: FoodParseResponse["debug"];
+};
+
+type FoodBulkLogResponse = {
+  status: string;
+  created: number;
+  requested?: number;
+  items?: NutritionEntry[];
+  message?: string;
 };
 
 type FoodShortcut = {
@@ -1719,10 +1733,15 @@ async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+  const text = await response.text();
   if (!response.ok) {
-    throw new ApiRequestError(path, response.status, await apiErrorMessage(response));
+    throw new ApiRequestError(path, response.status, apiErrorMessageFromText(text, response.statusText));
   }
-  return response.json() as Promise<T>;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${path} returned invalid JSON (HTTP ${response.status}): ${text.slice(0, 300) || "empty response"}`);
+  }
 }
 
 async function apiDelete<T>(path: string): Promise<T> {
@@ -3035,6 +3054,17 @@ function normalizeSearchText(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 }
 
+function looksLikeMultiFoodQuery(value: string) {
+  return /,|\/|\+|&|\n|\b(and|plus|with)\b/i.test(value);
+}
+
+function savedFoodMatchesQuery(query: string, name: string) {
+  if (!query || !name) return false;
+  if (query === name) return true;
+  if (looksLikeMultiFoodQuery(query)) return false;
+  return name.includes(query);
+}
+
 function findSavedFoodMatch(text: string, shortcuts: FoodShortcut[], templates: MealTemplate[], frequentFoods: NutritionShortcutData["frequent_foods"] = []) {
   const query = normalizeSearchText(text);
   if (!query) {
@@ -3042,14 +3072,14 @@ function findSavedFoodMatch(text: string, shortcuts: FoodShortcut[], templates: 
   }
   const shortcut = shortcuts.find((item) => {
     const name = normalizeSearchText(item.shortcut_name);
-    return name && (query.includes(name) || name.includes(query));
+    return savedFoodMatchesQuery(query, name);
   });
   if (shortcut) {
     return { type: "shortcut" as const, label: shortcut.shortcut_name, id: shortcut.shortcut_id };
   }
   const frequent = frequentFoods.find((item) => {
     const name = normalizeSearchText(item.food_name);
-    return name && (query.includes(name) || name.includes(query));
+    return savedFoodMatchesQuery(query, name);
   });
   if (frequent) {
     return { type: "frequent" as const, label: frequent.food_name, id: frequent.food_name };
@@ -3057,7 +3087,7 @@ function findSavedFoodMatch(text: string, shortcuts: FoodShortcut[], templates: 
   const templateNames = Array.from(new Set(templates.map((item) => item.template_name)));
   const templateName = templateNames.find((name) => {
     const normalized = normalizeSearchText(name);
-    return normalized && (query.includes(normalized) || normalized.includes(query));
+    return savedFoodMatchesQuery(query, normalized);
   });
   return templateName ? { type: "template" as const, label: templateName, id: templateName } : null;
 }
@@ -3984,6 +4014,7 @@ function FoodPage({
   onParseAnyway,
   parseLoading,
   parseResult,
+  foodAiFlow,
   manualSaving,
   manualError,
   aiParsingConfigured,
@@ -4034,6 +4065,7 @@ function FoodPage({
   onParseAnyway: () => void;
   parseLoading: boolean;
   parseResult: FoodParseResponse | null;
+  foodAiFlow: FoodAiFlowStep[];
   manualSaving: boolean;
   manualError: string | null;
   aiParsingConfigured: boolean;
@@ -4641,6 +4673,24 @@ function FoodPage({
           {parseResult ? (
             <div className={cx("mt-4 rounded-lg border p-3 text-sm", parseResult.success ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" : "border-amber-300/20 bg-amber-300/10 text-amber-100")}>
               <p>{parseResult.message}</p>
+            </div>
+          ) : null}
+          {foodAiFlow.length ? (
+            <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">AI food flow</p>
+              <div className="mt-3 space-y-2">
+                {foodAiFlow.map((item) => (
+                  <div key={`${item.step}-${item.status}-${item.message}`} className="flex items-start gap-2 text-xs leading-5">
+                    <span className={cx(
+                      "mt-0.5 inline-flex rounded-full border px-2 py-0.5 font-semibold uppercase tracking-[0.12em]",
+                      item.status === "ok" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : item.status === "pending" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-red-300/25 bg-red-300/10 text-red-100",
+                    )}>
+                      {item.status}
+                    </span>
+                    <p className="break-words text-zinc-300"><span className="font-semibold text-white">{item.step}:</span> {item.message}</p>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : null}
           {parsedFoods.length ? (
@@ -9220,6 +9270,7 @@ export default function Home() {
   const [aiText, setAiText] = useState("");
   const [parsedFoods, setParsedFoods] = useState<ParsedFood[]>([]);
   const [parseResult, setParseResult] = useState<FoodParseResponse | null>(null);
+  const [foodAiFlow, setFoodAiFlow] = useState<FoodAiFlowStep[]>([]);
   const [parseLoading, setParseLoading] = useState(false);
   const [manualFoodMode, setManualFoodMode] = useState<"direct" | "serving">("direct");
   const [servingForm, setServingForm] = useState<ServingScaleForm>({
@@ -10063,6 +10114,10 @@ export default function Home() {
     { calories: 0, protein: 0, carbs: 0, fat: 0 },
   );
 
+  const updateFoodAiFlowStep = (step: string, status: FoodAiFlowStep["status"], message: string) => {
+    setFoodAiFlow((items) => [...items.filter((item) => item.step !== step), { step, status, message }]);
+  };
+
   const draftFromAnalyzeItem = (item: FoodAnalyzeResponse["items"][number]): ParsedFood => ({
     food_name: item.display_name || item.name,
     display_name: item.display_name || item.name,
@@ -10132,7 +10187,10 @@ export default function Home() {
   };
 
   const saveParsedFoodsToToday = async () => {
-    await apiSend("/api/food/log-bulk", "POST", {
+    if (!parsedFoods.length) {
+      throw new Error("No parsed food items are available to save. Run Analyze first.");
+    }
+    const response = await apiSend<FoodBulkLogResponse>("/api/food/log-bulk", "POST", {
       date: forms.nutrition.date,
       meal_type: DEFAULT_MEAL_TYPE,
       items: parsedFoods.map((food) => ({
@@ -10156,6 +10214,13 @@ export default function Home() {
         needs_review: false,
       })),
     });
+    if (response.status !== "ok") {
+      throw new Error(response.message || "Food save failed.");
+    }
+    if (response.created !== parsedFoods.length) {
+      throw new Error(`Food save mismatch: backend saved ${response.created} of ${parsedFoods.length} parsed item(s).`);
+    }
+    return response;
   };
 
   const editBenchPr = () => {
@@ -10311,6 +10376,7 @@ export default function Home() {
         setParsedFoods={setParsedFoods}
         parseLoading={parseLoading}
         parseResult={parseResult}
+        foodAiFlow={foodAiFlow}
         manualSaving={manualFoodSaving}
         manualError={manualFoodError}
         aiParsingConfigured={Boolean(settings?.services?.openai?.configured ?? (settings?.statuses.openai_api_key === "Configured" || settings?.statuses.openai_api_key === "Connected"))}
@@ -10336,45 +10402,80 @@ export default function Home() {
         }}
         onParseFood={(event) =>
           submitWithoutRefresh(event, async () => {
-            const savedMatch = findSavedFoodMatch(aiText, shortcutData.items, shortcutData.meal_templates, shortcutData.frequent_foods);
-            if (savedMatch && !forceAiParse) {
-              setShortcutSuggestion(savedMatch);
-              throw new Error("Saved shortcut found. Use it or choose Parse new anyway.");
-            }
-            setForceAiParse(false);
-            setShortcutSuggestion(null);
-            setParseLoading(true);
-            if (aiText.trim().length > 4000) {
-              throw new Error("Food text must be 4,000 characters or fewer.");
-            }
-            const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: aiText });
-            setParseResult({
-              foods: analyzed.items.map(draftFromAnalyzeItem),
-              total: {
-                calories: analyzed.totals.calories,
-                protein: analyzed.totals.protein_g,
-                carbs: analyzed.totals.carbs_g,
-                fat: analyzed.totals.fat_g,
-              },
-              source: "food_analyze_text",
-              cached: false,
-              success: analyzed.success,
-              error_code: analyzed.error_code,
-              message: [analyzed.message, ...analyzed.warnings].filter(Boolean).join(" "),
-              debug: analyzed.debug,
-            });
-            setParsedFoods(analyzed.items.map(draftFromAnalyzeItem));
-            if (!analyzed.success) {
-              throw new Error(analyzed.message || "Food analysis failed.");
+            const parseStarted = performance.now();
+            setFoodAiFlow([]);
+            setParseResult(null);
+            setParsedFoods([]);
+            updateFoodAiFlowStep("Input", "pending", "Checking text and saved-food matches.");
+            try {
+              const cleanedText = aiText.trim();
+              if (!cleanedText) {
+                throw new Error("Enter food text before analyzing.");
+              }
+              if (cleanedText.length > 4000) {
+                throw new Error("Food text must be 4,000 characters or fewer.");
+              }
+              updateFoodAiFlowStep("Input", "ok", `${cleanedText.length} character(s) ready for analysis.`);
+              const savedMatch = findSavedFoodMatch(cleanedText, shortcutData.items, shortcutData.meal_templates, shortcutData.frequent_foods);
+              if (savedMatch && !forceAiParse) {
+                setShortcutSuggestion(savedMatch);
+                updateFoodAiFlowStep("Saved match", "pending", `${savedMatch.label} matched locally. Use it or choose Parse new anyway.`);
+                throw new Error("Saved shortcut found. Use it or choose Parse new anyway.");
+              }
+              updateFoodAiFlowStep("Saved match", "ok", forceAiParse ? "Bypassing saved match and parsing new food." : "No saved shortcut blocked the parser.");
+              setForceAiParse(false);
+              setShortcutSuggestion(null);
+              setParseLoading(true);
+              updateFoodAiFlowStep("Request", "pending", "POST /api/food/analyze-text");
+              const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: cleanedText });
+              updateFoodAiFlowStep("Request", "ok", `/api/food/analyze-text responded in ${Math.round(performance.now() - parseStarted)}ms.`);
+              if (!Array.isArray(analyzed.items)) {
+                throw new Error("Food analysis response did not include an items array.");
+              }
+              const drafts = analyzed.items.map(draftFromAnalyzeItem);
+              updateFoodAiFlowStep("Parse result", analyzed.success && drafts.length ? "ok" : "error", `${drafts.length} parsed item(s). ${analyzed.error_code ? `Error code: ${analyzed.error_code}. ` : ""}${analyzed.message || ""}`);
+              setParseResult({
+                foods: drafts,
+                total: {
+                  calories: analyzed.totals.calories,
+                  protein: analyzed.totals.protein_g,
+                  carbs: analyzed.totals.carbs_g,
+                  fat: analyzed.totals.fat_g,
+                },
+                source: "food_analyze_text",
+                cached: false,
+                success: analyzed.success,
+                error_code: analyzed.error_code,
+                message: [analyzed.message, ...analyzed.warnings].filter(Boolean).join(" "),
+                debug: analyzed.debug,
+              });
+              setParsedFoods(drafts);
+              if (!analyzed.success) {
+                throw new Error(analyzed.message || analyzed.error_code || "Food analysis failed.");
+              }
+              if (!drafts.length) {
+                throw new Error("Food analysis returned no parsed items.");
+              }
+              updateFoodAiFlowStep("Review", "ok", "Parsed drafts are visible below. Review them, then click Save to today.");
+            } catch (error) {
+              updateFoodAiFlowStep("Failure", "error", error instanceof Error ? error.message : "Food analysis failed.");
+              throw error;
             }
           }, "Food text parsed. Review before saving.").finally(() => setParseLoading(false))
         }
         onSaveParsedFoods={(event) =>
           submitFoodAndRefreshToday(event, async () => {
-            await saveParsedFoodsToToday();
-            setParsedFoods([]);
-            setParseResult(null);
-            setAiText("");
+            try {
+              updateFoodAiFlowStep("Save", "pending", `POST /api/food/log-bulk with ${parsedFoods.length} parsed item(s).`);
+              const result = await saveParsedFoodsToToday();
+              updateFoodAiFlowStep("Save", "ok", `Saved ${result.created} parsed item(s) to food_logs. Today's totals refresh next.`);
+              setParsedFoods([]);
+              setParseResult(null);
+              setAiText("");
+            } catch (error) {
+              updateFoodAiFlowStep("Save", "error", error instanceof Error ? error.message : "Could not save parsed food items.");
+              throw error;
+            }
           }, "Confirmed parsed food entries saved.")
         }
         onSaveShortcut={(event) =>

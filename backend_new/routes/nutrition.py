@@ -605,10 +605,24 @@ async def upload_nutrition_label(file: UploadFile = File(...)) -> dict[str, Any]
 @router.post("/api/food/log-bulk")
 def log_food_bulk(payload: dict[str, Any]) -> dict[str, Any]:
     raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    if not raw_items:
+        raise HTTPException(status_code=400, detail={"message": "No parsed food items were provided to save.", "code": "empty_food_bulk"})
     shared = {
         "date": payload.get("date") or _today_iso(),
         "meal_type": payload.get("meal_type") or "Food",
         "source": "bulk_log",
     }
-    items = [insert_json_row("food_logs", _normalize_food_log({**shared, **item})) for item in raw_items if isinstance(item, dict)]
-    return {"status": "ok", "items": items, "created": len(items)}
+    items = []
+    errors = []
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            errors.append({"index": index, "message": "Parsed food item was not an object."})
+            continue
+        inserted = insert_json_row("food_logs", _normalize_food_log({**shared, **item}))
+        if isinstance(inserted, dict) and inserted.get("status") == "error":
+            errors.append({"index": index, "message": inserted.get("message") or "Database insert failed.", "detail": inserted})
+            continue
+        items.append(inserted)
+    if errors:
+        raise HTTPException(status_code=500, detail={"message": "Some parsed food items could not be saved.", "code": "food_bulk_insert_failed", "errors": errors, "created": len(items)})
+    return {"status": "ok", "items": items, "created": len(items), "requested": len(raw_items)}

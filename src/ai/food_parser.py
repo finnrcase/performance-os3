@@ -235,9 +235,26 @@ def _split_fallback_foods(food_text: str) -> list[str]:
     return parts or [str(food_text).strip()]
 
 
+def _looks_like_multi_food_query(query: str) -> bool:
+    text = str(query or "").strip().lower()
+    return bool(re.search(r",|/|\+|&|\n|\b(and|plus|with)\b", text))
+
+
+def _saved_food_match(query: str, candidate_name: str) -> bool:
+    """Only short-circuit OpenAI when the saved item represents the whole query."""
+    normalized_query = _normalize_query(query)
+    normalized_name = _normalize_query(candidate_name)
+    if not normalized_query or not normalized_name:
+        return False
+    if normalized_query == normalized_name:
+        return True
+    if _looks_like_multi_food_query(query):
+        return False
+    return normalized_query in normalized_name
+
+
 def _local_saved_food_response(query: str) -> dict | None:
     """Check reusable local foods before calling OpenAI."""
-    normalized_query = _normalize_query(query)
     try:
         from src.ai.nutrition_verifier import load_verified_food_cache
         from src.nutrition import load_food_shortcuts, load_frequent_foods
@@ -245,7 +262,7 @@ def _local_saved_food_response(query: str) -> dict | None:
         shortcuts = load_food_shortcuts()
         for _, row in shortcuts.iterrows():
             name = _normalize_query(row.get("shortcut_name", ""))
-            if name and (name in normalized_query or normalized_query in name):
+            if _saved_food_match(query, name):
                 food = {
                     "food_name": row.get("shortcut_name", ""),
                     "quantity": "",
@@ -266,7 +283,7 @@ def _local_saved_food_response(query: str) -> dict | None:
         frequent = load_frequent_foods()
         for _, row in frequent.iterrows():
             name = _normalize_query(row.get("food_name", ""))
-            if name and (name in normalized_query or normalized_query in name):
+            if _saved_food_match(query, name):
                 food = {
                     "food_name": row.get("food_name", ""),
                     "quantity": "",
@@ -287,7 +304,7 @@ def _local_saved_food_response(query: str) -> dict | None:
         verified = load_verified_food_cache()
         for _, row in verified.iterrows():
             name = _normalize_query(row.get("food_name", ""))
-            if name and (name in normalized_query or normalized_query in name):
+            if _saved_food_match(query, name):
                 food = {
                     "food_name": row.get("food_name", ""),
                     "quantity": row.get("serving_size", ""),
