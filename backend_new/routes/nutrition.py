@@ -21,7 +21,7 @@ from backend_new.db import (
     update_json_rows_for_value,
     upsert_json_row,
 )
-from backend_new.utils import utc_now_iso
+from backend_new.utils import app_today_iso, utc_now_iso
 
 
 router = APIRouter(tags=["nutrition"])
@@ -213,9 +213,7 @@ def _food_ai_error_response(
 
 
 def _today_iso() -> str:
-    from datetime import date
-
-    return date.today().isoformat()
+    return app_today_iso()
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -520,7 +518,7 @@ def get_nutrition_logs(
         cache_key: tuple[Any, ...] = ("date", selected_date, bounded_limit)
     else:
         bounded_window_days = _bounded_days(days)
-        cutoff = _normalize_history_date(since_date) if since_date else (date_cls.today() - timedelta(days=bounded_window_days)).isoformat()
+        cutoff = _normalize_history_date(since_date) if since_date else (date_cls.fromisoformat(app_today_iso()) - timedelta(days=bounded_window_days)).isoformat()
         query_meta = {"mode": "recent", "days": bounded_window_days, "since_date": cutoff}
         cache_key = ("recent", cutoff, bounded_limit)
     cached = _cached_nutrition_logs(cache_key)

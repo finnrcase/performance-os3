@@ -21,6 +21,7 @@ from backend_new.config import (
     MAX_STATEMENT_TIMEOUT_MS,
     database_url,
 )
+from backend_new.utils import app_today_iso
 from src.training_schedule import classify_workout
 
 
@@ -657,7 +658,7 @@ def load_recent_training_summary(
     started = time.perf_counter()
     bounded_workouts = max(1, min(int(limit_workouts or CORE_TRAINING_WORKOUTS), CORE_TRAINING_WORKOUTS))
     bounded_days = max(1, min(int(days or CORE_TRAINING_DAYS), CORE_TRAINING_DAYS))
-    cutoff = (date.today() - timedelta(days=bounded_days)).isoformat()
+    cutoff = (date.fromisoformat(app_today_iso()) - timedelta(days=bounded_days)).isoformat()
 
     try:
         cached = cached_metadata if isinstance(cached_metadata, dict) else {}
@@ -1152,7 +1153,11 @@ def fetch_dashboard_core_bundle(
         cached = _dashboard_core_cache.get(cache_key)
         if cached and time.time() - float(cached.get("_cached_epoch", 0)) <= DASHBOARD_CORE_CACHE_TTL_SECONDS:
             payload = copy.deepcopy(cached.get("payload", {}))
-            payload["cache"] = {"status": "hit", "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS}
+            payload["cache"] = {
+                "status": "hit",
+                "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS,
+                "created_at": cached.get("_cached_at", ""),
+            }
             payload["duration_ms"] = _duration_ms(started)
             return payload
 
@@ -1447,10 +1452,18 @@ def fetch_dashboard_core_bundle(
         "counts": counts,
         "blocks": blocks,
         "warnings": warnings,
-        "cache": {"status": "miss", "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS},
+        "cache": {
+            "status": "miss",
+            "ttl_seconds": DASHBOARD_CORE_CACHE_TTL_SECONDS,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
         "duration_ms": _duration_ms(started),
     }
     with _dashboard_core_cache_lock:
-        _dashboard_core_cache[cache_key] = {"payload": copy.deepcopy(result), "_cached_epoch": time.time()}
+        _dashboard_core_cache[cache_key] = {
+            "payload": copy.deepcopy(result),
+            "_cached_epoch": time.time(),
+            "_cached_at": result["cache"]["created_at"],
+        }
     logger.info("[dashboard_core] block=total duration_ms=%s cache=miss", result["duration_ms"])
     return result

@@ -30,6 +30,10 @@ def storage_name() -> str:
     return "postgres" if database_url() else "not_configured"
 
 
+def app_timezone_name() -> str:
+    return os.getenv("APP_TIMEZONE") or os.getenv("TIMEZONE") or os.getenv("TZ") or "America/Los_Angeles"
+
+
 def cors_origins() -> list[str]:
     configured = ",".join(
         value
@@ -53,4 +57,3 @@ def cors_origins() -> list[str]:
     if configured:
         origins.extend(origin.strip() for origin in configured.split(",") if origin.strip())
     return list(dict.fromkeys(origins))
-

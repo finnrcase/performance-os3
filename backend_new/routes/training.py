@@ -23,7 +23,7 @@ from backend_new.db import (
     move_workout_date_rows,
     upsert_json_row,
 )
-from backend_new.utils import json_safe, utc_now_iso
+from backend_new.utils import app_today_iso, json_safe, utc_now_iso
 from src.training_schedule import classify_workout
 
 
@@ -54,7 +54,7 @@ def _bounded_int(value: int | str | None, default: int, minimum: int, maximum: i
 
 
 def _date_cutoff(days: int) -> str:
-    return (date.today() - timedelta(days=days)).isoformat()
+    return (date.fromisoformat(app_today_iso()) - timedelta(days=days)).isoformat()
 
 
 def _valid_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -366,7 +366,7 @@ def update_workout_date(payload: dict[str, Any]) -> dict[str, Any]:
         parsed_new_date = date.fromisoformat(new_date)
     except ValueError:
         raise HTTPException(status_code=400, detail="new_date must be a valid YYYY-MM-DD date.") from None
-    if parsed_new_date > date.today():
+    if parsed_new_date > date.fromisoformat(app_today_iso()):
         raise HTTPException(status_code=400, detail="Workout date corrections cannot move a workout into the future.")
 
     selected_rows = _valid_rows(fetch_json_rows_matching_any("workout_logs", ("workout_id", "hevy_workout_id", "external_id", "source_id"), workout_id, limit=500))

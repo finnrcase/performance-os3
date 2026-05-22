@@ -7,10 +7,25 @@ import math
 import os
 import time
 from typing import Any, Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from backend_new.config import app_timezone_name
 
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def app_timezone() -> ZoneInfo:
+    name = app_timezone_name()
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        return ZoneInfo("America/Los_Angeles")
+
+
+def app_today_iso() -> str:
+    return datetime.now(app_timezone()).date().isoformat()
 
 
 def json_safe(value: Any) -> Any:

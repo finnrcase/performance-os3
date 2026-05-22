@@ -1342,6 +1342,7 @@ type NutritionShortcutData = {
 };
 
 const DEFAULT_MEAL_TYPE = "Food";
+const APP_TIMEZONE = process.env.NEXT_PUBLIC_APP_TIMEZONE || "America/Los_Angeles";
 const integrationLabels: Record<string, string> = {
   hevy_api_key: "Hevy API key",
   strava_client_id: "Strava client ID",
@@ -1355,9 +1356,18 @@ const integrationLabels: Record<string, string> = {
 };
 
 function todayString() {
-  const now = new Date();
-  const offset = now.getTimezoneOffset();
-  return new Date(now.getTime() - offset * 60_000).toISOString().slice(0, 10);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
+function dashboardCorePath(date = todayString()) {
+  return `/api/dashboard/core?date=${encodeURIComponent(date)}`;
 }
 
 const defaultGoals: Goals = {
@@ -9664,11 +9674,12 @@ export default function Home() {
       {
         key: "dashboard_core",
         label: "Dashboard",
-        path: "/api/dashboard/core",
+        path: dashboardCorePath(),
         timeoutMs: STARTUP_API_TIMEOUT_MS,
         required: true,
         run: async () => {
-          const dashboardData = await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path: "/api/dashboard/core", required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug);
+          const path = dashboardCorePath();
+          const dashboardData = await trackedApiGet<DashboardData>({ key: "dashboard_core", label: "Dashboard", path, required: true }, STARTUP_API_TIMEOUT_MS, recordStartupDebug);
           setDashboard(dashboardData);
           if (dashboardCoreFailed(dashboardData)) {
             const failedBlocks = dashboardCoreFailedBlocks(dashboardData);
@@ -9676,7 +9687,7 @@ export default function Home() {
             recordStartupDebug({
               key: "dashboard_core_core_failure",
               label: "Dashboard core readiness",
-              path: "/api/dashboard/core",
+              path,
               required: true,
               status: "error",
               httpStatus: 200,
@@ -9811,6 +9822,12 @@ export default function Home() {
     setLoading(false);
   }, [applySettingsData, loadDeferredData, recordStartupDebug]);
 
+  const refreshDashboardCoreOnly = useCallback(async (date = todayString()) => {
+    const dashboardData = await apiGet<DashboardData>(dashboardCorePath(date), STARTUP_API_TIMEOUT_MS);
+    setDashboard(dashboardData);
+    return dashboardData;
+  }, []);
+
   useEffect(() => {
     const id = window.setTimeout(() => {
       void refreshAll();
@@ -9899,13 +9916,16 @@ export default function Home() {
       await action();
       const payload = await refreshTodayFoodOnly(date);
       afterRefresh?.(payload);
+      refreshDashboardCoreOnly(date).catch((error) => {
+        console.warn("[dashboard] refresh after food update failed", error);
+      });
       setMessage(success);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Food update failed.";
       onFailure?.(message);
       setApiError(message);
     }
-  }, [forms.nutrition.date, refreshTodayFoodOnly]);
+  }, [forms.nutrition.date, refreshDashboardCoreOnly, refreshTodayFoodOnly]);
 
   const submitWithoutRefresh = useCallback(async (event: FormEvent, action: () => Promise<void>, success: string) => {
     event.preventDefault();
@@ -10146,6 +10166,7 @@ export default function Home() {
       });
       await refreshTrainingData(true);
       await refreshTrainingSummaryStatus();
+      await refreshDashboardCoreOnly();
       if (showMessage) {
         const failureText = result.failures?.length ? ` ${result.failures.length} failures.` : "";
         const changeText = `${result.new_workouts ?? 0} new, ${result.updated_workouts ?? 0} updated`;
@@ -10169,7 +10190,7 @@ export default function Home() {
     } finally {
       setHevySyncing(false);
     }
-  }, [refreshTrainingData, refreshTrainingSummaryStatus]);
+  }, [refreshDashboardCoreOnly, refreshTrainingData, refreshTrainingSummaryStatus]);
 
   const validateNutritionForm = () => {
     const entry = forms.nutrition;

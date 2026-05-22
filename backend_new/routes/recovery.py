@@ -1,19 +1,18 @@
 from __future__ import annotations
 
-from datetime import date
 from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter
 
 from backend_new.db import fetch_json_rows, insert_json_row
-from backend_new.utils import utc_now_iso
+from backend_new.utils import app_today_iso, utc_now_iso
 
 router = APIRouter(tags=["recovery"])
 
 
 def _today_iso() -> str:
-    return date.today().isoformat()
+    return app_today_iso()
 
 
 def _number_or_none(value: Any) -> float | None:

@@ -14,7 +14,7 @@ from backend_new.db import (
     insert_json_row,
     upsert_json_row,
 )
-from backend_new.utils import utc_now_iso
+from backend_new.utils import app_today_iso, utc_now_iso
 from src.body_metrics import canonical_bodyweight_debug, canonical_daily_bodyweights
 
 router = APIRouter(tags=["body-metrics"])
@@ -33,7 +33,7 @@ NUMERIC_FIELDS = (
 
 
 def _today_iso() -> str:
-    return date.today().isoformat()
+    return app_today_iso()
 
 
 def _number_or_none(value: Any) -> float | None:
@@ -125,7 +125,7 @@ def _body_comp_trends(items: list[dict[str, Any]]) -> dict[str, Any]:
     try:
         latest_day = date.fromisoformat(latest_date[:10])
     except ValueError:
-        latest_day = date.today()
+        latest_day = date.fromisoformat(app_today_iso())
     fields = ("bodyweight", "body_fat_percent", "lean_mass", "fat_mass", "muscle_mass")
     for days in (7, 14, 28):
         cutoff = (latest_day.toordinal() - days)

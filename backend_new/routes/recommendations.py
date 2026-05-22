@@ -11,7 +11,7 @@ from backend_new.db import fetch_json_rows, fetch_latest_document, insert_json_r
 from backend_new.routes.dashboard import dashboard_core
 from backend_new.routes.goals import calculate_targets, fallback_goals
 from backend_new.routes.nutrition import _daily_summary_from_logs, _is_excluded, _today_iso
-from backend_new.utils import utc_now_iso
+from backend_new.utils import app_today_iso, utc_now_iso
 
 
 router = APIRouter(tags=["recommendations"])
@@ -26,7 +26,7 @@ def _duration_ms(started: float) -> float:
 
 
 def _since(days: int) -> str:
-    return (date.today() - timedelta(days=days)).isoformat()
+    return (date.fromisoformat(app_today_iso()) - timedelta(days=days)).isoformat()
 
 
 def _clean_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
