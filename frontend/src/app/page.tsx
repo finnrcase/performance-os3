@@ -370,30 +370,51 @@ type RunSummary = {
   average_heart_rate?: number | null;
 };
 
+type StrengthTrendPoint = {
+  date?: string;
+  week?: string;
+  exercise?: string;
+  best_set_weight?: number | string | null;
+  estimated_1rm?: number | string | null;
+  total_volume?: number | string | null;
+  average_working_weight?: number | string | null;
+  average_rpe?: number | string | null;
+  total_reps?: number | string | null;
+  sets?: number | string | null;
+  reps?: number | string | null;
+  volume?: number | string | null;
+  top_weight?: number | string | null;
+};
+
 type StrengthTrend = {
-  exercise: string;
-  label: string;
-  change_pct?: number;
-  history: Array<{
-    date: string;
-    best_set_weight: number;
-    estimated_1rm: number;
-    total_volume: number;
-    average_working_weight: number;
-    average_rpe: number;
-    total_reps: number;
-  }>;
-  best_set: { date: string; weight: number; reps: number; estimated_1rm: number; rpe: number } | null;
-  recent_pr: boolean | null;
-  summary: string;
+  exercise?: string;
+  label?: string;
+  change_pct?: number | string | null;
+  history?: StrengthTrendPoint[] | null;
+  best_set?: { date?: string; weight?: number | string | null; reps?: number | string | null; estimated_1rm?: number | string | null; rpe?: number | string | null } | null;
+  recent_pr?: boolean | null;
+  summary?: string | null;
+};
+
+type StrengthTrendItem = {
+  exercise?: string;
+  sets?: number | string | null;
+  reps?: number | string | null;
+  volume?: number | string | null;
+  top_weight?: number | string | null;
+  last_date?: string | null;
 };
 
 type StrengthTrendResponse = {
-  exercise_options: string[];
-  selected_exercise: string;
-  trend: StrengthTrend;
-  volume_by_exercise: Array<{ exercise: string; volume: number; sets: number }>;
-  muscle_group_trends: MuscleGroupTrendResponse;
+  status?: string;
+  exercise_options?: string[];
+  selected_exercise?: string;
+  trend?: StrengthTrend | StrengthTrendPoint[] | null;
+  items?: StrengthTrendItem[];
+  weeks?: number;
+  summary?: string | Record<string, unknown> | null;
+  volume_by_exercise?: Array<{ exercise: string; volume: number; sets: number }>;
+  muscle_group_trends?: MuscleGroupTrendResponse | null;
 };
 
 type MuscleGroupTrendSummary = {
@@ -1563,10 +1584,22 @@ function formatWholeNumber(value: unknown, fallback = "--") {
   return parsed === null ? fallback : `${Math.round(parsed)}`;
 }
 
+function formatCompactNumber(value: unknown, fallback = "--") {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return fallback;
+  return Math.round(parsed).toLocaleString();
+}
+
 function formatSignedWholeNumber(value: unknown, suffix = "", fallback = "--") {
   const parsed = finiteNumberOrNull(value);
   if (parsed === null) return fallback;
   return `${parsed > 0 ? "+" : ""}${Math.round(parsed)}${suffix}`;
+}
+
+function formatSignedPercentValue(value: unknown, digits = 0, fallback = "--") {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return fallback;
+  return `${parsed >= 0 ? "+" : ""}${parsed.toFixed(digits)}%`;
 }
 
 function stringList(value: unknown, fallback: string[] = []) {
@@ -2012,6 +2045,43 @@ class GoalsPageErrorBoundary extends Component<
             <p className="text-sm leading-6 text-zinc-300">Insufficient data to render one Goals & Targets tile.</p>
             <p className="mt-2 text-xs leading-5 text-zinc-500">{this.state.message || "Missing recommendation data."}</p>
           </Card>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+class ExerciseViewErrorBoundary extends Component<
+  Readonly<{ children: React.ReactNode; resetKey?: string }>,
+  { hasError: boolean; message: string }
+> {
+  state = { hasError: false, message: "" };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "Exercise view could not render.",
+    };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+  }
+
+  componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; resetKey?: string }>) {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, message: "" });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
+          <p className="font-medium text-white">Exercise view unavailable</p>
+          <p className="mt-2 text-sm text-zinc-400">No exercise trend data available yet.</p>
+          <p className="mt-2 text-xs text-zinc-500">{this.state.message || "Missing exercise trend data."}</p>
         </div>
       );
     }
@@ -3354,6 +3424,25 @@ function calculateServingPreview(form: ServingScaleForm) {
   };
 }
 
+const FOOD_PROGRESS_COLOR_STOPS = [
+  { percent: 0, color: [248, 113, 113] },
+  { percent: 35, color: [251, 146, 60] },
+  { percent: 70, color: [234, 179, 8] },
+  { percent: 100, color: [34, 197, 94] },
+  { percent: 125, color: [74, 222, 128] },
+] as const;
+
+function dashboardFoodProgressColor(percent: number) {
+  const safePercent = Math.min(Math.max(Number(percent) || 0, 0), 125);
+  const upperIndex = FOOD_PROGRESS_COLOR_STOPS.findIndex((stop) => safePercent <= stop.percent);
+  const upper = FOOD_PROGRESS_COLOR_STOPS[upperIndex === -1 ? FOOD_PROGRESS_COLOR_STOPS.length - 1 : upperIndex];
+  const lower = FOOD_PROGRESS_COLOR_STOPS[Math.max((upperIndex === -1 ? FOOD_PROGRESS_COLOR_STOPS.length - 1 : upperIndex) - 1, 0)];
+  const range = Math.max(upper.percent - lower.percent, 1);
+  const amount = (safePercent - lower.percent) / range;
+  const [red, green, blue] = upper.color.map((channel, index) => Math.round(lower.color[index] + (channel - lower.color[index]) * amount));
+  return `rgb(${red}, ${green}, ${blue})`;
+}
+
 function DashboardProgressLine({ label, value, target, left, over, percent, unit = "g" }: Readonly<{
   label: string;
   value: number;
@@ -3364,6 +3453,7 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
   unit?: string;
 }>) {
   const moleculeKind = macroMoleculeKind(label);
+  const progressPercent = target ? percent : 0;
   return (
     <div>
       <div className="flex items-center justify-between gap-3 text-sm">
@@ -3376,7 +3466,14 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
         </span>
       </div>
       <div className="mt-2 h-2 rounded-full bg-white/10">
-        <div className="accent-progress h-2 rounded-full" style={{ width: `${target ? percent : 0}%` }} />
+        <div
+          className="h-2 rounded-full"
+          style={{
+            width: `${progressPercent}%`,
+            backgroundColor: dashboardFoodProgressColor(progressPercent),
+            transition: "width 200ms ease, background-color 250ms ease",
+          }}
+        />
       </div>
       <p className="mt-1 text-xs text-zinc-500">
         {!target ? "Set macro targets." : over && over > 0 ? `+${Math.round(over)}${unit === "kcal" ? " kcal" : unit} over` : `${Math.round(left ?? 0)}${unit === "kcal" ? " kcal" : unit} left`}
@@ -3523,7 +3620,7 @@ function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ repor
   ];
 
   return (
-    <Card className="overflow-hidden p-0 xl:col-span-5">
+    <Card className="col-span-full overflow-hidden p-0">
       <button
         type="button"
         onClick={() => setExpanded((value) => !value)}
@@ -3642,9 +3739,9 @@ function Dashboard({
   const dashboardDegraded = data?.debug?.dashboard_status === "degraded" && failedDashboardBlocks.length > 0;
 
   return (
-    <div className="grid gap-4 xl:grid-cols-5">
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4">
       {dashboardDegraded ? (
-        <Card className="border-amber-400/30 bg-amber-400/10 xl:col-span-5">
+        <Card className="col-span-full border-amber-400/30 bg-amber-400/10">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <div className="flex items-center gap-2">
@@ -3836,7 +3933,7 @@ function Dashboard({
             {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
           </button>
         ) : null}
-        <div className="grid gap-3 md:grid-cols-3">
+        <div className="grid gap-3 xl:grid-cols-3">
           <div className="accent-outline rounded-lg border p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
             <p className="mt-2 text-2xl font-semibold text-white">{macroAdherence?.weekly_score !== null && macroAdherence?.weekly_score !== undefined ? `${Math.round(macroAdherence.weekly_score)}%` : "--"}</p>
@@ -3864,7 +3961,7 @@ function Dashboard({
 
       <WeeklyPerformanceReportCard report={weeklyReport} onViewDetails={() => setActivePage("history")} />
 
-      <Card className="xl:col-span-5">
+      <Card className="col-span-full">
         <SectionHeader
           eyebrow="Records"
           title="PRs"
@@ -6502,10 +6599,64 @@ function StrengthTrendsSection({
   muscleTrendMetric: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">;
   setMuscleTrendMetric: (value: keyof Pick<MuscleGroupTrendHistory, "strength_index" | "weekly_volume" | "hard_sets" | "total_reps" | "best_estimated_1rm">) => void;
 }>) {
-  const trend = strength?.trend;
-  const muscleTrends = strength?.muscle_group_trends;
-  const selectedGroups = selectedMuscleGroup ? [selectedMuscleGroup] : muscleTrends?.summary.slice(0, 6).map((item) => item.muscle_group) ?? [];
-  const muscleChartData = muscleTrends?.history
+  const exerciseOptions = Array.isArray(strength?.exercise_options) ? strength.exercise_options : [];
+  const exerciseItems = Array.isArray(strength?.items) ? strength.items : [];
+  const selectedExerciseValue = selectedExercise || (typeof strength?.selected_exercise === "string" ? strength.selected_exercise : "") || exerciseOptions[0] || "";
+  const rawTrend = strength?.trend;
+  const legacyTrend = rawTrend && !Array.isArray(rawTrend) ? rawTrend : null;
+  const trendPoints = Array.isArray(rawTrend) ? rawTrend : Array.isArray(legacyTrend?.history) ? legacyTrend.history : [];
+  const trendChartData = trendPoints
+    .map((item) => {
+      const date = String(item.date ?? item.week ?? "");
+      if (!date) return null;
+      return {
+        date,
+        estimated_1rm: finiteNumberOrNull(item.estimated_1rm ?? item.best_set_weight ?? item.top_weight ?? item.average_working_weight) ?? 0,
+        total_volume: finiteNumberOrNull(item.total_volume ?? item.volume) ?? 0,
+        total_reps: finiteNumberOrNull(item.total_reps ?? item.reps) ?? 0,
+        top_weight: finiteNumberOrNull(item.best_set_weight ?? item.top_weight) ?? 0,
+      };
+    })
+    .filter((item): item is { date: string; estimated_1rm: number; total_volume: number; total_reps: number; top_weight: number } => Boolean(item));
+  const firstVolume = trendChartData[0]?.total_volume ?? null;
+  const latestVolume = trendChartData[trendChartData.length - 1]?.total_volume ?? null;
+  const volumeTrendPct = firstVolume !== null && firstVolume > 0 && latestVolume !== null && trendChartData.length > 1 ? ((latestVolume - firstVolume) / firstVolume) * 100 : null;
+  const currentExerciseItem = exerciseItems.find((item) => typeof item.exercise === "string" && item.exercise === selectedExerciseValue) ?? exerciseItems[0] ?? null;
+  const bestSet = legacyTrend?.best_set && typeof legacyTrend.best_set === "object" ? legacyTrend.best_set : null;
+  const latestPoint = trendPoints[trendPoints.length - 1] ?? null;
+  const trendLabel = legacyTrend?.label?.trim()
+    || (volumeTrendPct === null
+      ? "Insufficient data"
+      : volumeTrendPct > 5
+        ? "Improving"
+        : volumeTrendPct < -5
+          ? "Down"
+          : "Stable");
+  const trendSummary = legacyTrend?.summary?.trim()
+    || (volumeTrendPct !== null
+      ? `${formatSignedPercentValue(volumeTrendPct, 1)} volume over ${trendChartData.length} logged points.`
+      : selectedExerciseValue
+        ? "Log this exercise multiple times to build a trend."
+        : "Select an exercise.");
+  const bestSetValue = bestSet
+    ? `${formatCompactNumber(bestSet.weight)} x ${formatCompactNumber(bestSet.reps)}`
+    : finiteNumberOrNull(currentExerciseItem?.top_weight ?? latestPoint?.top_weight ?? latestPoint?.best_set_weight) !== null
+      ? `${formatCompactNumber(currentExerciseItem?.top_weight ?? latestPoint?.top_weight ?? latestPoint?.best_set_weight)} lb top`
+      : "No best set";
+  const bestSetDetail = bestSet
+    ? `${formatCompactNumber(bestSet.estimated_1rm)} est. 1RM`
+    : currentExerciseItem
+      ? `${formatCompactNumber(currentExerciseItem.sets)} sets · ${formatCompactNumber(currentExerciseItem.reps)} reps`
+      : "Log weighted sets";
+  const recentPrValue = typeof legacyTrend?.recent_pr === "boolean" ? (legacyTrend.recent_pr ? "Yes" : "No") : "Need data";
+  const latestTrendDate = bestSet?.date ?? latestPoint?.date ?? latestPoint?.week ?? currentExerciseItem?.last_date ?? "Needs history";
+  const muscleTrends = strength?.muscle_group_trends && typeof strength.muscle_group_trends === "object" ? strength.muscle_group_trends : null;
+  const muscleSummary = Array.isArray(muscleTrends?.summary) ? muscleTrends.summary : [];
+  const muscleHistory = Array.isArray(muscleTrends?.history) ? muscleTrends.history : [];
+  const muscleOptions = Array.isArray(muscleTrends?.muscle_group_options) ? muscleTrends.muscle_group_options : [];
+  const unmappedExercises = Array.isArray(muscleTrends?.unmapped_exercises) ? muscleTrends.unmapped_exercises : [];
+  const selectedGroups = selectedMuscleGroup ? [selectedMuscleGroup] : muscleSummary.slice(0, 6).map((item) => item.muscle_group);
+  const muscleChartData = muscleHistory
     .filter((item) => !selectedGroups.length || selectedGroups.includes(item.muscle_group))
     .reduce<Array<Record<string, string | number>>>((rows, item) => {
       let row = rows.find((entry) => entry.week === item.week);
@@ -6537,99 +6688,104 @@ function StrengthTrendsSection({
           </button>
         </div>
       </div>
-      {strength?.exercise_options.length ? (
-        <div className="space-y-4">
-          {trendView === "exercise" ? (
-            <>
-              <SelectInput label="Exercise" value={selectedExercise || strength.selected_exercise} options={strength.exercise_options} onChange={setSelectedExercise} />
-              <div className="grid gap-3 md:grid-cols-3">
-                <MetricCard title="Trend" value={trend?.label ?? "insufficient data"} detail={trend?.summary ?? "Select an exercise"} icon={Gauge} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
-                <MetricCard title="Best Set" value={trend?.best_set ? `${trend.best_set.weight} x ${trend.best_set.reps}` : "No best set"} detail={trend?.best_set ? `${trend.best_set.estimated_1rm} est. 1RM` : "Log weighted sets"} icon={Dumbbell} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
-                <MetricCard title="Recent PR" value={trend?.recent_pr ? "Yes" : "No"} detail={trend?.best_set?.date ?? "Needs history"} icon={Sparkles} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
-              </div>
-              {trend?.history.length ? (
-                <div className="grid gap-4 lg:grid-cols-2">
-                  <ChartFrame className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <RechartsLineChart data={trend.history}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                        <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
-                        <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                        <Line dataKey="estimated_1rm" stroke="#a78bfa" strokeWidth={3} dot={false} />
-                      </RechartsLineChart>
-                    </ResponsiveContainer>
-                  </ChartFrame>
-                  <ChartFrame className="h-64">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={trend.history}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                        <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
-                        <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                        <Bar dataKey="total_volume" fill="#f59e0b" radius={[6, 6, 0, 0]} />
-                      </BarChart>
-                    </ResponsiveContainer>
-                  </ChartFrame>
+      <div className="space-y-4">
+        {trendView === "exercise" ? (
+          <ExerciseViewErrorBoundary resetKey={`${selectedExerciseValue}-${trendDateRange}-${exerciseOptions.length}-${trendChartData.length}`}>
+            {exerciseOptions.length ? (
+              <>
+                <SelectInput label="Exercise" value={selectedExerciseValue} options={exerciseOptions} onChange={setSelectedExercise} />
+                <div className="grid gap-3 md:grid-cols-3">
+                  <MetricCard title="Trend" value={trendLabel} detail={trendSummary} icon={Gauge} accent="border-violet-400/20 bg-violet-400/10 text-violet-300" />
+                  <MetricCard title="Best Set" value={bestSetValue} detail={bestSetDetail} icon={Dumbbell} accent="border-amber-400/20 bg-amber-400/10 text-amber-300" />
+                  <MetricCard title="Recent PR" value={recentPrValue} detail={latestTrendDate} icon={Sparkles} accent="border-emerald-400/20 bg-emerald-400/10 text-emerald-300" />
                 </div>
-              ) : (
-                <EmptyState title="Insufficient trend data" description="Log the same weighted exercise multiple times to see estimated 1RM and volume trends." action="Log training" onAction={() => undefined} />
-              )}
-            </>
-          ) : (
-            <div className="space-y-4">
-              <div className="grid gap-3 md:grid-cols-3">
-                <SelectInput label="Date range" value={trendDateRange} options={["4w", "8w", "12w", "6m", "all"]} onChange={setTrendDateRange} />
-                <SelectInput label="Muscle group" value={selectedMuscleGroup} options={["", ...(muscleTrends?.muscle_group_options ?? [])]} onChange={setSelectedMuscleGroup} />
-                <SelectInput label="Metric" value={muscleTrendMetric} options={["strength_index", "weekly_volume", "hard_sets", "total_reps", "best_estimated_1rm"]} onChange={(value) => setMuscleTrendMetric(value as typeof muscleTrendMetric)} />
-              </div>
-              {muscleTrends?.summary.length ? (
-                <>
-                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-                    {muscleTrends.summary.map((item) => (
+                {trendChartData.length ? (
+                  <div className="grid gap-4 lg:grid-cols-2">
+                    <ChartFrame className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <RechartsLineChart data={trendChartData}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                          <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                          <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                          <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                          <Line dataKey="estimated_1rm" stroke="#a78bfa" strokeWidth={3} dot={false} />
+                        </RechartsLineChart>
+                      </ResponsiveContainer>
+                    </ChartFrame>
+                    <ChartFrame className="h-64">
+                      <ResponsiveContainer width="100%" height="100%">
+                        <BarChart data={trendChartData}>
+                          <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                          <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                          <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                          <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                          <Bar dataKey="total_volume" fill="#f59e0b" radius={[6, 6, 0, 0]} />
+                        </BarChart>
+                      </ResponsiveContainer>
+                    </ChartFrame>
+                  </div>
+                ) : (
+                  <EmptyState title="Insufficient trend data" description="Log the same weighted exercise multiple times to see estimated 1RM and volume trends." action="Log training" onAction={() => undefined} />
+                )}
+              </>
+            ) : (
+              <EmptyState title="Exercise view unavailable" description="No exercise trend data available yet." action="Log training" onAction={() => undefined} />
+            )}
+          </ExerciseViewErrorBoundary>
+        ) : (
+          <div className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-3">
+              <SelectInput label="Date range" value={trendDateRange} options={["4w", "8w", "12w", "6m", "all"]} onChange={setTrendDateRange} />
+              <SelectInput label="Muscle group" value={selectedMuscleGroup} options={["", ...muscleOptions]} onChange={setSelectedMuscleGroup} />
+              <SelectInput label="Metric" value={muscleTrendMetric} options={["strength_index", "weekly_volume", "hard_sets", "total_reps", "best_estimated_1rm"]} onChange={(value) => setMuscleTrendMetric(value as typeof muscleTrendMetric)} />
+            </div>
+            {muscleSummary.length ? (
+              <>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                  {muscleSummary.map((item) => {
+                    const strengthChange = finiteNumberOrNull(item.strength_change_pct);
+                    return (
                       <div key={item.muscle_group} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <p className="font-semibold text-white">{item.muscle_group}</p>
-                            <p className={cx("mt-1 text-lg font-semibold", item.strength_change_pct >= 0 ? "text-emerald-200" : "text-red-200")}>
-                              {item.strength_change_pct >= 0 ? "+" : ""}{item.strength_change_pct}%
+                            <p className={cx("mt-1 text-lg font-semibold", strengthChange === null || strengthChange >= 0 ? "text-emerald-200" : "text-red-200")}>
+                              {formatSignedPercentValue(item.strength_change_pct)}
                             </p>
                           </div>
-                          <span className="rounded-full border border-white/10 px-2 py-1 text-xs text-zinc-300">Index {item.strength_index}</span>
+                          <span className="rounded-full border border-white/10 px-2 py-1 text-xs text-zinc-300">Index {formatCompactNumber(item.strength_index)}</span>
                         </div>
-                        <p className="mt-3 text-sm text-zinc-400">Weekly volume {item.volume_change_pct >= 0 ? "+" : ""}{item.volume_change_pct}% · {item.hard_sets} sets · {item.total_reps} reps</p>
+                        <p className="mt-3 text-sm text-zinc-400">Weekly volume {formatSignedPercentValue(item.volume_change_pct)} · {formatCompactNumber(item.hard_sets)} sets · {formatCompactNumber(item.total_reps)} reps</p>
                         <p className="mt-2 text-sm text-zinc-300">Best contributor: {item.recent_best_exercise || "No clear contributor"}</p>
                       </div>
-                    ))}
+                    );
+                  })}
+                </div>
+                <ChartFrame className="h-72">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <RechartsLineChart data={muscleChartData}>
+                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                      <XAxis dataKey="week" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
+                      <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                      <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                      {selectedGroups.map((group, index) => (
+                        <Line key={group} dataKey={group} name={`${group} ${metricLabels[muscleTrendMetric]}`} stroke={lineColors[index % lineColors.length]} strokeWidth={3} dot={false} />
+                      ))}
+                    </RechartsLineChart>
+                  </ResponsiveContainer>
+                </ChartFrame>
+                {unmappedExercises.length ? (
+                  <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm text-amber-100">
+                    Unmapped exercises: {unmappedExercises.join(", ")}
                   </div>
-                  <ChartFrame className="h-72">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <RechartsLineChart data={muscleChartData}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                        <XAxis dataKey="week" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
-                        <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                        {selectedGroups.map((group, index) => (
-                          <Line key={group} dataKey={group} name={`${group} ${metricLabels[muscleTrendMetric]}`} stroke={lineColors[index % lineColors.length]} strokeWidth={3} dot={false} />
-                        ))}
-                      </RechartsLineChart>
-                    </ResponsiveContainer>
-                  </ChartFrame>
-                  {muscleTrends.unmapped_exercises.length ? (
-                    <div className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm text-amber-100">
-                      Unmapped exercises: {muscleTrends.unmapped_exercises.join(", ")}
-                    </div>
-                  ) : null}
-                </>
-              ) : (
-                <EmptyState title="No muscle group trend yet" description="Muscle group trends need weighted Hevy or manual strength rows in the selected range." action="Change filters" onAction={() => setSelectedMuscleGroup("")} />
-              )}
-            </div>
-          )}
-        </div>
-      ) : (
-        <EmptyState title="No exercises yet" description="Strength trends need saved strength training rows." action="Log training" onAction={() => undefined} />
-      )}
+                ) : null}
+              </>
+            ) : (
+              <EmptyState title="No muscle group trend yet" description="Muscle group trends need weighted Hevy or manual strength rows in the selected range." action="Change filters" onAction={() => setSelectedMuscleGroup("")} />
+            )}
+          </div>
+        )}
+      </div>
     </Card>
   );
 }
@@ -9888,7 +10044,8 @@ export default function Home() {
           const path = strengthTrendPath();
           const data = await trackedApiGet<StrengthTrendResponse>({ key: "strength_trends", label: "Strength trends", path, required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
           setStrengthTrends(data);
-          setSelectedExercise((current) => current || data.selected_exercise || data.exercise_options[0] || "");
+          const exerciseOptions = Array.isArray(data.exercise_options) ? data.exercise_options : [];
+          setSelectedExercise((current) => current || data.selected_exercise || exerciseOptions[0] || "");
         },
       },
       {
@@ -10329,7 +10486,8 @@ export default function Home() {
     }
     if (trends.status === "fulfilled") {
       setStrengthTrends(trends.value);
-      setSelectedExercise((current) => current || trends.value.selected_exercise || trends.value.exercise_options[0] || "");
+      const exerciseOptions = Array.isArray(trends.value.exercise_options) ? trends.value.exercise_options : [];
+      setSelectedExercise((current) => current || trends.value.selected_exercise || exerciseOptions[0] || "");
     } else {
       failures.push(trends.reason instanceof Error ? trends.reason.message : "Strength trends failed.");
     }
