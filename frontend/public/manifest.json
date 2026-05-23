@@ -1,23 +1,24 @@
 {
   "name": "Performance OS",
-  "short_name": "Performance OS",
+  "short_name": "PerfOS",
   "description": "Recovery, nutrition, and training optimization dashboard.",
+  "id": "/",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
-  "background_color": "#07080b",
-  "theme_color": "#07080b",
+  "background_color": "#050505",
+  "theme_color": "#B7F34D",
   "categories": ["health", "fitness", "productivity"],
   "icons": [
     {
-      "src": "/icons/android-chrome-192x192.png?v=3",
+      "src": "/icons/icon-192.png",
       "sizes": "192x192",
       "type": "image/png",
       "purpose": "any maskable"
     },
     {
-      "src": "/icons/android-chrome-512x512.png?v=3",
+      "src": "/icons/icon-512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any maskable"

@@ -28,12 +28,19 @@ export const metadata: Metadata = {
   icons: {
     // Performance OS heart logo. The ?v= query busts stale favicon caches.
     icon: [
-      { url: "/icons/favicon-32x32.png?v=3", sizes: "32x32", type: "image/png" },
-      { url: "/icons/favicon-16x16.png?v=3", sizes: "16x16", type: "image/png" },
-      { url: "/icons/android-chrome-192x192.png?v=3", sizes: "192x192", type: "image/png" },
-      { url: "/icons/android-chrome-512x512.png?v=3", sizes: "512x512", type: "image/png" },
+      { url: "/favicon.ico?v=4", sizes: "any" },
+      { url: "/icons/favicon-32x32.png?v=4", sizes: "32x32", type: "image/png" },
+      { url: "/icons/favicon-16x16.png?v=4", sizes: "16x16", type: "image/png" },
+      { url: "/icons/icon-192.png?v=4", sizes: "192x192", type: "image/png" },
+      { url: "/icons/icon-512.png?v=4", sizes: "512x512", type: "image/png" },
     ],
-    apple: [{ url: "/icons/apple-touch-icon.png?v=3", sizes: "180x180", type: "image/png" }],
+    apple: [{ url: "/icons/icon-192.png", sizes: "192x192", type: "image/png" }],
+  },
+  other: {
+    "apple-mobile-web-app-capable": "yes",
+    "apple-mobile-web-app-status-bar-style": "black-translucent",
+    "apple-mobile-web-app-title": "Performance OS",
+    "mobile-web-app-capable": "yes",
   },
 };
 
@@ -42,7 +49,7 @@ export const viewport: Viewport = {
   initialScale: 1,
   maximumScale: 1,
   viewportFit: "cover",
-  themeColor: "#07080b",
+  themeColor: "#B7F34D",
 };
 
 export default function RootLayout({

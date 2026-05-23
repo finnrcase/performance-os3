@@ -58,6 +58,8 @@ const navigation = [
   { id: "debug", label: "Startup Debug", icon: AlertTriangle },
 ] as const;
 
+const mobileBottomNavigation = navigation.filter((item) => item.id !== "debug");
+
 type PageId = (typeof navigation)[number]["id"];
 type MobileNavHighlight = { left: number; top: number; width: number; height: number; ready: boolean };
 type FoodIconType = "bagel" | "protein_bar" | "oats" | "protein_shake" | "chicken";
@@ -3567,33 +3569,57 @@ function workoutQualityComparisonText(comparison?: DashboardData["workout_qualit
   return pieces.join(" · ");
 }
 
-function todaysActionStyles(color: string) {
-  if (color === "green") {
+type TargetDecisionNotice = {
+  message: string;
+  confidence: string;
+  tone: "emerald" | "amber";
+};
+
+function usefulTargetDecisionNotice(
+  nutritionRecommendation?: OptimizationSignals["nutrition_recommendation"] | null,
+  adaptiveRecommendation?: AdaptiveNutritionRecommendation | null,
+): TargetDecisionNotice | null {
+  const confidence = nutritionRecommendation?.confidence ?? recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel);
+  const normalizedConfidence = confidence.toLowerCase();
+  const normalizedDecision = String(nutritionRecommendation?.decision ?? adaptiveRecommendation?.recommendation_trace?.decision ?? "").toLowerCase();
+  const normalizedStatus = String(nutritionRecommendation?.status ?? "").toLowerCase().replace(/[_-]/g, " ");
+  const macroChanges = adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment ?? null;
+  const calorieAdjustment = finiteNumberOrNull(nutritionRecommendation?.calorie_adjustment)
+    ?? finiteNumberOrNull(adaptiveRecommendation?.calorieAdjustment)
+    ?? finiteNumberOrNull(macroChanges?.calories)
+    ?? 0;
+  const reason = (nutritionRecommendation?.primary_reason ?? adaptiveRecommendation?.reasoning?.[0] ?? "").trim();
+  const reasonSentence = reason ? ` ${reason}` : "";
+  const changedMacros = (["protein", "carbs", "fat"] as const).filter((key) => Math.abs(finiteNumberOrNull(macroChanges?.[key]) ?? 0) >= 1);
+
+  if (Math.abs(calorieAdjustment) >= 1) {
     return {
-      panel: "border-emerald-300/20 bg-emerald-300/[0.08]",
-      label: "text-emerald-100",
-      badge: "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+      message: `Targets updated: ${calorieAdjustment > 0 ? "+" : ""}${Math.round(calorieAdjustment)} calories today.${reasonSentence}`,
+      confidence,
+      tone: "emerald",
     };
   }
-  if (color === "yellow") {
+
+  if (changedMacros.length > 0) {
     return {
-      panel: "border-amber-300/20 bg-amber-300/[0.08]",
-      label: "text-amber-100",
-      badge: "border-amber-300/25 bg-amber-300/10 text-amber-100",
+      message: `Targets updated: ${changedMacros.join(", ")} adjusted today.${reasonSentence}`,
+      confidence,
+      tone: "emerald",
     };
   }
-  if (color === "red") {
+
+  const holdingForLowConfidence = normalizedConfidence.includes("low")
+    && (normalizedDecision === "hold" || normalizedStatus.includes("insufficient") || normalizedStatus.includes("low confidence"));
+
+  if (holdingForLowConfidence) {
     return {
-      panel: "border-rose-300/20 bg-rose-300/[0.08]",
-      label: "text-rose-100",
-      badge: "border-rose-300/25 bg-rose-300/10 text-rose-100",
+      message: "Targets held: confidence is low, continuing baseline targets.",
+      confidence,
+      tone: "amber",
     };
   }
-  return {
-    panel: "border-zinc-300/15 bg-white/[0.035]",
-    label: "text-zinc-100",
-    badge: "border-zinc-300/20 bg-zinc-300/10 text-zinc-200",
-  };
+
+  return null;
 }
 
 function relativeSyncTime(value: string) {
@@ -3717,8 +3743,6 @@ function Dashboard({
     .slice(0, 3)
     .map((item) => `${item.exercise} ${formatWorkoutQualityPct(item.avg_set_volume_pct_change)}`)
     .join(", ");
-  const todaysAction = data?.todays_action;
-  const actionStyles = todaysActionStyles(todaysAction?.color ?? "gray");
   const personalLearning = data?.personal_learning;
   const weeklyReport = data?.weekly_report;
   const prs = data?.prs;
@@ -3731,7 +3755,8 @@ function Dashboard({
   const dashboardInsight = baselineSignal?.dashboard_insight;
   const topPlateauAlerts = plateauWatch?.top_alerts ?? [];
   const adaptiveRecommendation = data?.adaptive_recommendation;
-  const topAdaptiveWarning = optimizationSignals?.confidence.missing_data?.[0] ?? adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
+  const targetDecisionNotice = usefulTargetDecisionNotice(nutritionRecommendation, adaptiveRecommendation);
+  const topAdaptiveWarning = optimizationSignals?.confidence?.missing_data?.[0] ?? adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
   const plannedWorkout = lift?.planned_workout ?? "Training";
   const completedTraining = lift?.completed_summary || "";
   const trainingSources = lift?.sources ?? [];
@@ -3761,6 +3786,26 @@ function Dashboard({
           </div>
         </Card>
       ) : null}
+      {targetDecisionNotice ? (
+        <div className={cx(
+          "col-span-full rounded-lg border px-4 py-3 text-sm shadow-[0_12px_40px_rgba(0,0,0,0.18)] backdrop-blur",
+          targetDecisionNotice.tone === "amber"
+            ? "border-amber-300/20 bg-amber-300/[0.07] text-amber-50"
+            : "border-emerald-300/20 bg-emerald-300/[0.07] text-emerald-50",
+        )}>
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <p className="leading-6">{targetDecisionNotice.message}</p>
+            <span className={cx(
+              "w-fit rounded-full border px-2.5 py-1 text-xs font-semibold capitalize",
+              targetDecisionNotice.tone === "amber"
+                ? "border-amber-300/25 bg-amber-300/10 text-amber-100"
+                : "border-emerald-300/25 bg-emerald-300/10 text-emerald-100",
+            )}>
+              {targetDecisionNotice.confidence} confidence
+            </span>
+          </div>
+        </div>
+      ) : null}
       <Card className="xl:col-span-2">
         <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
         {food?.has_targets ? (
@@ -3774,19 +3819,6 @@ function Dashboard({
         ) : (
           <EmptyState title="Set macro targets." description="Goals & Targets powers calorie and macro progress." action="Set targets" onAction={() => setActivePage("goals")} />
         )}
-      </Card>
-
-      <Card>
-        <SectionHeader eyebrow="Today" title="Today's Action" />
-        <div className={`rounded-lg border p-4 ${actionStyles.panel}`}>
-          <p className={`text-xl font-semibold ${actionStyles.label}`}>{todaysAction?.headline ?? "Log today's basics"}</p>
-          <p className="mt-3 text-sm leading-6 text-zinc-400">
-            {todaysAction?.reason ?? "Workout, recovery, nutrition, and weight signals will shape one daily action."}
-          </p>
-          <span className={`mt-4 inline-flex rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${actionStyles.badge}`}>
-            {todaysAction?.status ?? "missing"}
-          </span>
-        </div>
       </Card>
 
       <Card>
@@ -5716,30 +5748,22 @@ function RecoveryPage({
   const latestWithingsLeanMass = [...withingsHistory].reverse().find((entry) => entry.leanMass !== null) ?? null;
   const latestWithingsFatMass = [...withingsHistory].reverse().find((entry) => entry.fatMass !== null) ?? null;
   const latestWithingsMuscleMass = [...withingsHistory].reverse().find((entry) => entry.muscleMass !== null) ?? null;
-  const latestWithingsHydration = [...withingsHistory].reverse().find((entry) => entry.hydration !== null) ?? null;
-  const latestWithingsBmi = [...withingsHistory].reverse().find((entry) => entry.bmi !== null) ?? null;
   const hasWithingsComposition = withingsHistory.some((entry) => (
     entry.bodyFat !== null
     || entry.leanMass !== null
     || entry.fatMass !== null
     || entry.muscleMass !== null
-    || entry.hydration !== null
-    || entry.bmi !== null
   ));
   const withingsCards = [
-    { label: "Latest Withings weight", value: formatWeight(latestWithings?.bodyweight), detail: latestWithings?.date ?? "No Withings weight yet" },
-    { label: "Latest body fat %", value: formatMetricValue(latestWithingsBodyFat?.bodyFat, "%", 1), detail: latestWithingsBodyFat ? `Withings body composition · ${latestWithingsBodyFat.date}` : "No Withings body fat yet" },
-    { label: "Latest lean mass", value: metricCardValue(latestWithingsLeanMass, "leanMass"), detail: latestWithingsLeanMass ? `Fat-free scale estimate · ${latestWithingsLeanMass.date}` : "No Withings lean mass yet" },
-    { label: "Latest fat mass", value: metricCardValue(latestWithingsFatMass, "fatMass"), detail: latestWithingsFatMass ? `Scale-derived fat mass · ${latestWithingsFatMass.date}` : "No Withings fat mass yet" },
-    { label: "Latest muscle mass", value: metricCardValue(latestWithingsMuscleMass, "muscleMass"), detail: latestWithingsMuscleMass ? `Withings muscle mass · ${latestWithingsMuscleMass.date}` : "No Withings muscle mass yet" },
-    { label: "Latest hydration", value: metricCardValue(latestWithingsHydration, "hydration"), detail: latestWithingsHydration ? `Water mass estimate · ${latestWithingsHydration.date}` : "No Withings hydration yet" },
-    { label: "Latest BMI", value: formatMetricValue(latestWithingsBmi?.bmi, "", 1), detail: latestWithingsBmi ? `Withings BMI · ${latestWithingsBmi.date}` : "No Withings BMI yet" },
-    {
-      label: "Last Withings sync date",
-      value: withingsLastSyncedAt ? relativeSyncTime(withingsLastSyncedAt) : "--",
-      detail: latestWithings?.date ? `Latest measurement ${latestWithings.date}` : "No Withings import yet",
-    },
+    { label: "Body Fat %", value: formatMetricValue(latestWithingsBodyFat?.bodyFat, "%", 1), detail: latestWithingsBodyFat ? `Withings body composition · ${latestWithingsBodyFat.date}` : "No Withings body fat yet" },
+    { label: "Lean Mass", value: metricCardValue(latestWithingsLeanMass, "leanMass"), detail: latestWithingsLeanMass ? `Fat-free scale estimate · ${latestWithingsLeanMass.date}` : "No Withings lean mass yet" },
+    { label: "Fat Mass", value: metricCardValue(latestWithingsFatMass, "fatMass"), detail: latestWithingsFatMass ? `Scale-derived fat mass · ${latestWithingsFatMass.date}` : "No Withings fat mass yet" },
+    { label: "Muscle Mass", value: metricCardValue(latestWithingsMuscleMass, "muscleMass"), detail: latestWithingsMuscleMass ? `Withings muscle mass · ${latestWithingsMuscleMass.date}` : "No Withings muscle mass yet" },
   ];
+  const withingsStatusText = [
+    withingsLastSyncedAt ? relativeSyncTime(withingsLastSyncedAt) : "Last sync unknown",
+    latestWithings?.date ? `Latest measurement: ${latestWithings.date}` : "Latest measurement: --",
+  ].join(" · ");
   const trendColor = weightTrend.trendLabel === "gaining"
     ? "text-emerald-200"
     : weightTrend.trendLabel === "losing"
@@ -5785,7 +5809,23 @@ function RecoveryPage({
   return (
     <div className="space-y-4">
       <Card>
-        <SectionHeader eyebrow="Bodyweight" title="Weight Overview" />
+        <SectionHeader
+          eyebrow="Bodyweight"
+          title="Weight Overview"
+          action={(
+            <div className="flex flex-col items-end gap-2">
+              <div className="flex flex-wrap justify-end gap-2">
+                <button onClick={onSyncWeightNow} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                  Sync Weight Now
+                </button>
+                <button onClick={onSyncWithingsHistory} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                  Sync Withings History
+                </button>
+              </div>
+              <p className="max-w-sm text-right text-xs leading-5 text-zinc-500">{withingsStatusText}</p>
+            </div>
+          )}
+        />
         {weightHistory.length ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
@@ -5817,14 +5857,6 @@ function RecoveryPage({
 
       <Card>
         <SectionHeader eyebrow="Withings" title="Body Composition Snapshot" />
-        <div className="mb-4 flex justify-end gap-2">
-          <button onClick={onSyncWeightNow} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-            Sync Weight Now
-          </button>
-          <button onClick={onSyncWithingsHistory} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-            Sync Withings History
-          </button>
-        </div>
         {withingsHistory.length ? (
           <div className="space-y-4">
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -5843,7 +5875,7 @@ function RecoveryPage({
             ) : null}
           </div>
         ) : (
-          <EmptyState title="No Withings body composition data yet" description="Connect and sync Withings to show body fat, lean mass, fat mass, muscle mass, hydration, and BMI." action="Open Settings" onAction={() => undefined} />
+          <EmptyState title="No Withings body composition data yet" description="Connect and sync Withings to show body fat, lean mass, fat mass, and muscle mass." action="Open Settings" onAction={() => undefined} />
         )}
       </Card>
 
@@ -9838,6 +9870,9 @@ export default function Home() {
   const mobileNavRef = useRef<HTMLDivElement | null>(null);
   const mobileItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const [mobileHighlight, setMobileHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
+  const bottomNavRef = useRef<HTMLDivElement | null>(null);
+  const bottomItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
+  const [bottomHighlight, setBottomHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
@@ -9853,6 +9888,20 @@ export default function Home() {
           height: mobileItem.offsetHeight,
           ready: true,
         });
+      } else {
+        setMobileHighlight((current) => ({ ...current, ready: false }));
+      }
+      const bottomItem = bottomItemRefs.current[activePage];
+      if (bottomItem && bottomNavRef.current) {
+        setBottomHighlight({
+          left: bottomItem.offsetLeft,
+          top: bottomItem.offsetTop,
+          width: bottomItem.offsetWidth,
+          height: bottomItem.offsetHeight,
+          ready: true,
+        });
+      } else {
+        setBottomHighlight((current) => ({ ...current, ready: false }));
       }
     };
 
@@ -11795,7 +11844,7 @@ export default function Home() {
                 Refresh
               </button>
             </div>
-            <div ref={mobileNavRef} className="relative mt-4 overflow-x-auto pb-1 lg:hidden">
+            <div ref={mobileNavRef} className="relative mt-4 hidden overflow-x-auto pb-1 sm:block lg:hidden">
               <span
                 aria-hidden="true"
                 className={cx(
@@ -11826,7 +11875,7 @@ export default function Home() {
             </div>
           </header>
 
-          <div className="p-4 sm:p-6 lg:p-8">
+          <div className="p-4 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:p-6 lg:p-8">
             {rateLimited ? (
               <Card className="mb-4 border-amber-400/30 bg-amber-400/10">
                 <p className="text-sm text-amber-100">Temporarily rate limited — retrying shortly. This is a server limit, not your account.</p>
@@ -11904,6 +11953,45 @@ export default function Home() {
             )}
           </div>
         </section>
+        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#07080b]/85 px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 shadow-2xl shadow-black/40 backdrop-blur-xl sm:hidden" aria-label="Primary navigation">
+          <div ref={bottomNavRef} className="relative overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            <span
+              aria-hidden="true"
+              className={cx(
+                "accent-active pointer-events-none absolute rounded-lg transition-[transform,width,height,opacity] duration-200 ease-out will-change-transform motion-reduce:transition-none",
+                bottomHighlight.ready ? "opacity-100" : "opacity-0",
+              )}
+              style={{
+                height: bottomHighlight.height,
+                width: bottomHighlight.width,
+                transform: `translate(${bottomHighlight.left}px, ${bottomHighlight.top}px)`,
+              }}
+            />
+            <div className="flex min-w-max gap-1">
+              {mobileBottomNavigation.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    ref={(node) => {
+                      bottomItemRefs.current[item.id] = node;
+                    }}
+                    onClick={() => setActivePage(item.id)}
+                    data-testid={`nav-${item.id}-bottom`}
+                    aria-label={item.label}
+                    className={cx(
+                      "relative z-10 flex h-14 min-w-[74px] flex-col items-center justify-center gap-1 rounded-lg px-2 text-[10px] font-medium leading-tight transition-colors",
+                      activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white",
+                    )}
+                  >
+                    <Icon className="h-4 w-4 shrink-0" />
+                    <span className="max-w-[4rem] truncate">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        </nav>
       </div>
     </main>
   );
