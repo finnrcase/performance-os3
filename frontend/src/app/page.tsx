@@ -11833,7 +11833,7 @@ export default function Home() {
         </aside>
 
         <section className="flex min-w-0 flex-1 flex-col">
-          <header className="sticky top-0 z-20 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
+          <header className="mobile-safe-header sticky top-0 z-20 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div>
                 <p className="text-sm text-zinc-500">Performance optimization dashboard</p>

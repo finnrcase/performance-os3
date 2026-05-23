@@ -171,6 +171,17 @@ button {
     linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 40%);
 }
 
+.mobile-safe-header {
+  padding-top: 1rem;
+  padding-top: max(1rem, calc(env(safe-area-inset-top) + 0.5rem));
+}
+
+@media (min-width: 640px) {
+  .mobile-safe-header {
+    padding-top: 1rem;
+  }
+}
+
 [data-accent-theme="rainbow"] .accent-bg,
 [data-accent-theme="rainbow"] .accent-active,
 [data-accent-theme="rainbow"] .accent-progress {
