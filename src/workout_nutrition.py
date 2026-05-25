@@ -15,7 +15,6 @@ import numpy as np
 import pandas as pd
 
 from src.paths import processed_data_path
-from src.storage import load_dataframe, save_dataframe
 
 
 WORKOUT_MARKER_COLUMNS = [
@@ -122,18 +121,19 @@ def _normalize_workout_markers(markers_df: pd.DataFrame | None) -> pd.DataFrame:
 
 def load_workout_markers() -> pd.DataFrame:
     """Load workout markers from the local processed dataset."""
-    markers_df = load_dataframe("workout_markers", WORKOUT_MARKERS_PATH, WORKOUT_MARKER_COLUMNS)
+    if not WORKOUT_MARKERS_PATH.exists():
+        return _empty_workout_markers()
+    try:
+        markers_df = pd.read_csv(WORKOUT_MARKERS_PATH)
+    except (OSError, pd.errors.EmptyDataError, pd.errors.ParserError):
+        return _empty_workout_markers()
     return _normalize_workout_markers(markers_df)
 
 
 def save_workout_markers(markers_df: pd.DataFrame | None) -> None:
     """Save workout markers without changing any food or training rows."""
-    save_dataframe(
-        "workout_markers",
-        WORKOUT_MARKERS_PATH,
-        _normalize_workout_markers(markers_df),
-        WORKOUT_MARKER_COLUMNS,
-    )
+    WORKOUT_MARKERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _normalize_workout_markers(markers_df).to_csv(WORKOUT_MARKERS_PATH, index=False)
 
 
 def create_workout_marker(
