@@ -974,6 +974,28 @@ type TrainingSummaryStatusResponse = {
   };
 };
 
+type TrainingPrItem = {
+  pr_id?: string;
+  exercise: string;
+  weight: number;
+  unit?: string;
+  reps: number;
+  estimated_1rm?: number;
+  date: string;
+  source: string;
+  record_source?: string;
+  workout_id?: string;
+  workout_type?: string;
+};
+
+type TrainingPrResponse = {
+  status: "ok" | "empty" | "error" | string;
+  items: TrainingPrItem[];
+  source: string;
+  diagnostics?: Record<string, unknown>;
+  message?: string;
+};
+
 type WithingsSyncResult = {
   status: string;
   message?: string;
@@ -3572,10 +3594,6 @@ function deltaText(value: number | null | undefined, unit = "") {
   return `${rounded > 0 ? "+" : ""}${rounded}${unit}`;
 }
 
-function stateSafeMileSeconds(value: { minutes: number; seconds: number }) {
-  return Math.max(Number(value.minutes) || 0, 0) * 60 + Math.max(Number(value.seconds) || 0, 0);
-}
-
 function normalizeSearchText(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
 }
@@ -3864,23 +3882,9 @@ function relativeSyncTime(value: string) {
 function Dashboard({
   data,
   setActivePage,
-  forms,
-  setForms,
-  onEditBenchPr,
-  onEditMilePr,
-  onSaveBenchPr,
-  onSaveMilePr,
-  onRecalculatePrs,
 }: Readonly<{
   data: DashboardData | null;
   setActivePage: (page: PageId) => void;
-  forms: FormState;
-  setForms: React.Dispatch<React.SetStateAction<FormState>>;
-  onEditBenchPr: () => void;
-  onEditMilePr: () => void;
-  onSaveBenchPr: (event: FormEvent) => void;
-  onSaveMilePr: (event: FormEvent) => void;
-  onRecalculatePrs: () => void;
 }>) {
   const [signalsExpanded, setSignalsExpanded] = useState(false);
   const food = data?.food;
@@ -3917,7 +3921,6 @@ function Dashboard({
   const workoutMuscleGroups = stringList(workoutQuality?.muscle_groups).slice(0, 3);
   const personalLearning = data?.personal_learning;
   const weeklyReport = data?.weekly_report;
-  const prs = data?.prs;
   const optimization = data?.optimization;
   const optimizationSignals = data?.optimization_signals;
   const nutritionRecommendation = optimizationSignals?.nutrition_recommendation;
@@ -4220,66 +4223,6 @@ function Dashboard({
         </Card>
       </TargetSectionErrorBoundary>
 
-      <Card className="col-span-full">
-        <SectionHeader
-          eyebrow="Records"
-          title="PRs"
-          action={<button onClick={onRecalculatePrs} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Recalculate from Logs</button>}
-        />
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-            <p className="text-sm text-zinc-400">Bench Press PR</p>
-            {prs?.bench_press ? (
-              <>
-                <p className="mt-2 text-2xl font-semibold text-white">{prs.bench_press.value} {prs.bench_press.unit}</p>
-                <p className="mt-1 text-sm text-zinc-400">{prs.bench_press.reps} rep{prs.bench_press.reps === 1 ? "" : "s"} · {prs.bench_press.date} · {prs.bench_press.source}</p>
-                {prs.bench_press.reps > 1 ? <p className="mt-2 text-sm text-emerald-200">Est. 1RM {prs.bench_press.estimated_1rm} lb</p> : null}
-                {prs.bench_press.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.bench_press.notes}</p> : null}
-                {prs.bench_press.manual_override ? <p className="accent-outline mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs">Manual override</p> : null}
-              </>
-            ) : (
-              <p className="mt-3 text-sm text-zinc-500">Add bench PR</p>
-            )}
-            <button onClick={onEditBenchPr} className="accent-bg mt-4 rounded-lg px-3 py-2 text-sm font-semibold">
-              {prs?.bench_press ? "Edit Bench PR" : "Add Bench PR"}
-            </button>
-            {forms.benchPr.editing ? (
-              <form onSubmit={onSaveBenchPr} className="mt-4 grid gap-3 sm:grid-cols-2">
-                <TextInput label="Weight" type="number" min={0} step="any" value={forms.benchPr.weight} onChange={(value) => setForms((state) => ({ ...state, benchPr: { ...state.benchPr, weight: Number(value) } }))} />
-                <TextInput label="Reps" type="number" min={1} value={forms.benchPr.reps} onChange={(value) => setForms((state) => ({ ...state, benchPr: { ...state.benchPr, reps: Number(value) } }))} />
-                <TextInput label="Date" type="date" value={forms.benchPr.date} onChange={(value) => setForms((state) => ({ ...state, benchPr: { ...state.benchPr, date: value } }))} />
-                <TextInput label="Notes" value={forms.benchPr.notes} onChange={(value) => setForms((state) => ({ ...state, benchPr: { ...state.benchPr, notes: value } }))} />
-                <button className="h-11 rounded-lg bg-emerald-300 text-sm font-semibold text-zinc-950 sm:col-span-2">Save Bench PR</button>
-              </form>
-            ) : null}
-          </div>
-          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-            <p className="text-sm text-zinc-400">Mile Time PR</p>
-            {prs?.mile_time ? (
-              <>
-                <p className="mt-2 text-2xl font-semibold text-white">{prs.mile_time.display}</p>
-                <p className="mt-1 text-sm text-zinc-400">{prs.mile_time.date} · {prs.mile_time.source}{prs.mile_time.estimated ? " · estimated" : ""}</p>
-                {prs.mile_time.notes ? <p className="mt-2 text-sm text-zinc-500">{prs.mile_time.notes}</p> : null}
-                {prs.mile_time.manual_override ? <p className="accent-outline mt-2 inline-flex rounded-full border px-2.5 py-1 text-xs">Manual override</p> : null}
-              </>
-            ) : (
-              <p className="mt-3 text-sm text-zinc-500">Add mile PR</p>
-            )}
-            <button onClick={onEditMilePr} className="accent-bg mt-4 rounded-lg px-3 py-2 text-sm font-semibold">
-              {prs?.mile_time ? "Edit Mile PR" : "Add Mile PR"}
-            </button>
-            {forms.milePr.editing ? (
-              <form onSubmit={onSaveMilePr} className="mt-4 grid gap-3 sm:grid-cols-2">
-                <TextInput label="Minutes" type="number" min={0} value={forms.milePr.minutes} onChange={(value) => setForms((state) => ({ ...state, milePr: { ...state.milePr, minutes: Number(value) } }))} />
-                <TextInput label="Seconds" type="number" min={0} value={forms.milePr.seconds} onChange={(value) => setForms((state) => ({ ...state, milePr: { ...state.milePr, seconds: Number(value) } }))} />
-                <TextInput label="Date" type="date" value={forms.milePr.date} onChange={(value) => setForms((state) => ({ ...state, milePr: { ...state.milePr, date: value } }))} />
-                <TextInput label="Notes" value={forms.milePr.notes} onChange={(value) => setForms((state) => ({ ...state, milePr: { ...state.milePr, notes: value } }))} />
-                <button className="h-11 rounded-lg bg-emerald-300 text-sm font-semibold text-zinc-950 sm:col-span-2">Save Mile PR</button>
-              </form>
-            ) : null}
-          </div>
-        </div>
-      </Card>
     </div>
   );
 }
@@ -4290,14 +4233,20 @@ function GoalsPage({
   weightFeedback,
   leanBulkDecision,
   adaptiveRecommendation,
+  trainingPrs,
+  trainingPrsLoading,
   onApplySuggestedMacros,
+  onRefreshTrainingPrs,
 }: Readonly<{
   goals: Goals | null;
   targets: Targets | null;
   weightFeedback: WeightFeedback | null;
   leanBulkDecision: LeanBulkDecision | null;
   adaptiveRecommendation: AdaptiveNutritionRecommendation | null;
+  trainingPrs: TrainingPrResponse | null;
+  trainingPrsLoading: boolean;
   onApplySuggestedMacros: () => void;
+  onRefreshTrainingPrs: () => void;
 }>) {
   const targetCalories = finiteNumberOrNull(targets?.target_calories) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.calories) ?? DEFAULT_BASELINE_CALORIES;
   const targetProtein = finiteNumberOrNull(targets?.protein_grams) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.protein);
@@ -4351,6 +4300,10 @@ function GoalsPage({
     ["Training Load", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.trainingLoad).status, "low")],
     ["Running Load", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.runningLoad).status, "low")],
   ];
+  const prItems = arrayOrEmpty<TrainingPrItem>(trainingPrs?.items);
+  const prDiagnostics = recordOrEmpty(trainingPrs?.diagnostics);
+  const prSourceReason = stringOrFallback(prDiagnostics.source_reason, trainingPrs?.message ?? "");
+  const prStatus = stringOrFallback(trainingPrs?.status, trainingPrsLoading ? "loading" : "not loaded");
   return (
     <div className="space-y-6">
       <TargetSectionErrorBoundary title="Targets unavailable" description="Insufficient target data for this section." resetKey={`${targetCalories}-${lastUpdated}`}>
@@ -4485,6 +4438,62 @@ function GoalsPage({
           </div>
         </div>
         </Card>
+      </TargetSectionErrorBoundary>
+
+      <TargetSectionErrorBoundary title="Exercise PRs unavailable" description="Training PR data could not render safely." resetKey={`${trainingPrs?.source ?? ""}-${prItems.length}`}>
+        <div data-testid="goals-pr-section">
+          <Card>
+            <SectionHeader
+              eyebrow="Training"
+              title="Exercise PRs"
+              action={
+                <button type="button" onClick={onRefreshTrainingPrs} disabled={trainingPrsLoading} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+                  {trainingPrsLoading ? "Loading..." : "Refresh PRs"}
+                </button>
+              }
+            />
+            {trainingPrsLoading && !prItems.length ? (
+              <p className="rounded-lg border border-white/10 bg-white/[0.035] p-4 text-sm text-zinc-400">Loading exercise PRs from training history.</p>
+            ) : prItems.length ? (
+              <div className="overflow-x-auto rounded-lg border border-white/10">
+                <table className="min-w-full divide-y divide-white/10 text-sm">
+                  <thead className="bg-white/[0.04] text-left text-zinc-400">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Exercise</th>
+                      <th className="px-3 py-2 font-medium">PR weight</th>
+                      <th className="px-3 py-2 font-medium">Reps</th>
+                      <th className="px-3 py-2 font-medium">Date</th>
+                      <th className="px-3 py-2 font-medium">Source</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/10">
+                    {prItems.map((item) => (
+                      <tr key={item.pr_id || `${item.exercise}-${item.date}-${item.weight}-${item.reps}`} className="text-zinc-200">
+                        <td className="px-3 py-2 font-semibold text-white">{stringOrFallback(item.exercise, "Unknown exercise")}</td>
+                        <td className="px-3 py-2">{formatCompactNumber(item.weight)} {stringOrFallback(item.unit, "lb")}</td>
+                        <td className="px-3 py-2">{formatWholeNumber(item.reps)}</td>
+                        <td className="px-3 py-2">{stringOrFallback(item.date, "--")}</td>
+                        <td className="px-3 py-2 capitalize text-zinc-400">{stringOrFallback(item.source, stringOrFallback(item.record_source, "--")).replaceAll("_", " ")}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <EmptyState
+                title={trainingPrs?.status === "error" ? "Exercise PRs unavailable" : "No lifting PRs yet"}
+                description={prSourceReason || "Weighted lifting rows from Hevy or training history will populate this section."}
+                action="Refresh PRs"
+                onAction={onRefreshTrainingPrs}
+              />
+            )}
+            <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-500">
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-2.5 py-1 capitalize">Status: {prStatus.replaceAll("_", " ")}</span>
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-2.5 py-1 capitalize">Source: {stringOrFallback(trainingPrs?.source, "not loaded").replaceAll("_", " ")}</span>
+              {prSourceReason ? <span className="rounded-full border border-white/10 bg-white/[0.035] px-2.5 py-1">{prSourceReason}</span> : null}
+            </div>
+          </Card>
+        </div>
       </TargetSectionErrorBoundary>
 
       <TargetSectionErrorBoundary title="Macro targets unavailable" description="Insufficient target data for macro target cards." resetKey={`${targetCalories}-${targetProtein ?? ""}-${targetCarbs ?? ""}-${targetFat ?? ""}`}>
@@ -10356,6 +10365,8 @@ function HomeContent() {
   const [trainingSummaryStatus, setTrainingSummaryStatus] = useState<TrainingSummaryStatusResponse | null>(null);
   const [trainingDataAction, setTrainingDataAction] = useState<"idle" | "exporting" | "rebuilding">("idle");
   const [strengthTrends, setStrengthTrends] = useState<StrengthTrendResponse | null>(null);
+  const [trainingPrs, setTrainingPrs] = useState<TrainingPrResponse | null>(null);
+  const [trainingPrsLoading, setTrainingPrsLoading] = useState(false);
   const [selectedExercise, setSelectedExercise] = useState("");
   const [trendView, setTrendView] = useState<"exercise" | "muscle_group">("muscle_group");
   const [selectedMuscleGroup, setSelectedMuscleGroup] = useState("");
@@ -11217,6 +11228,42 @@ function HomeContent() {
       .catch((error) => setApiError(error instanceof Error ? error.message : "Unable to load strength trend."));
   };
 
+  const loadTrainingPrs = useCallback(async (refresh = false) => {
+    await Promise.resolve();
+    setTrainingPrsLoading(true);
+    try {
+      const path = `/api/training/prs?limit=50${refresh ? "&refresh=true" : ""}`;
+      const data = await apiGet<TrainingPrResponse>(path, DEFAULT_API_TIMEOUT_MS);
+      setTrainingPrs({
+        ...data,
+        items: Array.isArray(data.items) ? data.items : [],
+        diagnostics: recordOrEmpty(data.diagnostics),
+      });
+    } catch (error) {
+      setTrainingPrs({
+        status: "error",
+        items: [],
+        source: "error",
+        message: error instanceof Error ? error.message : "Unable to load exercise PRs.",
+        diagnostics: {
+          source_reason: error instanceof Error ? error.message : "Unable to load exercise PRs.",
+        },
+      });
+    } finally {
+      setTrainingPrsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activePage === "goals" && !trainingPrs && !trainingPrsLoading) {
+      const timer = window.setTimeout(() => {
+        void loadTrainingPrs(false);
+      }, 0);
+      return () => window.clearTimeout(timer);
+    }
+    return undefined;
+  }, [activePage, loadTrainingPrs, trainingPrs, trainingPrsLoading]);
+
   const refreshTrainingData = useCallback(async (showErrors = false, nextLimit = 50) => {
     const failures: string[] = [];
     const historyPath = `/api/training/history?limit=${nextLimit}&days=${trainingHistoryMeta.rawWindowDays || 180}`;
@@ -11633,76 +11680,12 @@ function HomeContent() {
     return response;
   };
 
-  const editBenchPr = () => {
-    const bench = dashboard?.prs.bench_press;
-    setForms((state) => ({
-      ...state,
-      benchPr: {
-        weight: bench?.value ?? state.benchPr.weight,
-        reps: bench?.reps ?? state.benchPr.reps,
-        date: bench?.date ?? state.benchPr.date,
-        notes: bench?.notes ?? "",
-        editing: true,
-      },
-    }));
-  };
-
-  const editMilePr = () => {
-    const mile = dashboard?.prs.mile_time;
-    const valueSeconds = mile?.value_seconds ?? stateSafeMileSeconds(forms.milePr);
-    setForms((state) => ({
-      ...state,
-      milePr: {
-        minutes: Math.floor(valueSeconds / 60),
-        seconds: valueSeconds % 60,
-        date: mile?.date ?? state.milePr.date,
-        notes: mile?.notes ?? "",
-        editing: true,
-      },
-    }));
-  };
-
   const pageContent = {
     dashboard: (
       <TargetSectionErrorBoundary title="Dashboard unavailable" description="Insufficient dashboard target or recommendation data." resetKey={`${dashboard?.date ?? ""}-${dashboard?.targets?.target_calories ?? ""}`}>
         <Dashboard
           data={dashboard}
           setActivePage={setActivePage}
-          forms={forms}
-          setForms={setForms}
-          onEditBenchPr={editBenchPr}
-          onEditMilePr={editMilePr}
-          onSaveBenchPr={(event) =>
-            submitAndRefresh(event, async () => {
-              if (!forms.benchPr.weight || forms.benchPr.weight <= 0) throw new Error("Bench weight must be greater than 0.");
-              if (!forms.benchPr.reps || forms.benchPr.reps <= 0) throw new Error("Bench reps must be greater than 0.");
-              await apiSend("/api/personal-records/bench", "PUT", {
-                weight: Number(forms.benchPr.weight),
-                reps: Number(forms.benchPr.reps),
-                date: forms.benchPr.date,
-                notes: forms.benchPr.notes,
-              });
-              setForms((state) => ({ ...state, benchPr: { ...state.benchPr, editing: false } }));
-            }, "Bench PR saved.")
-          }
-          onSaveMilePr={(event) =>
-            submitAndRefresh(event, async () => {
-              const totalSeconds = stateSafeMileSeconds(forms.milePr);
-              if (totalSeconds <= 0) throw new Error("Mile time must be greater than 0.");
-              await apiSend("/api/personal-records/mile", "PUT", {
-                minutes: Number(forms.milePr.minutes) || 0,
-                seconds: Number(forms.milePr.seconds) || 0,
-                date: forms.milePr.date,
-                notes: forms.milePr.notes,
-              });
-              setForms((state) => ({ ...state, milePr: { ...state.milePr, editing: false } }));
-            }, "Mile PR saved.")
-          }
-          onRecalculatePrs={() =>
-            void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
-              await apiSend("/api/personal-records/recalculate", "POST", {});
-            }, "PRs recalculated from logs.")
-          }
         />
       </TargetSectionErrorBoundary>
     ),
@@ -12301,6 +12284,11 @@ function HomeContent() {
           weightFeedback={dashboard?.weight_feedback ?? null}
           leanBulkDecision={dashboard?.lean_bulk_decision ?? null}
           adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
+          trainingPrs={trainingPrs}
+          trainingPrsLoading={trainingPrsLoading}
+          onRefreshTrainingPrs={() => {
+            void loadTrainingPrs(true);
+          }}
           onApplySuggestedMacros={() =>
             void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
               await apiSend("/api/goals/apply-suggested-macros", "POST", {});

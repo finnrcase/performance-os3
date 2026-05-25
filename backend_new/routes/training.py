@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -14,6 +15,7 @@ from fastapi.responses import Response
 
 from backend_new.db import (
     count_rows,
+    ensure_jsonb_table,
     fetch_json_rows_for_value,
     fetch_json_rows_matching_any,
     fetch_latest_document,
@@ -60,6 +62,134 @@ def _date_cutoff(days: int) -> str:
 
 def _valid_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+
+
+CARDIO_PR_TERMS = (
+    "run",
+    "running",
+    "jog",
+    "cardio",
+    "treadmill",
+    "bike",
+    "cycling",
+    "spin",
+    "elliptical",
+    "stairmaster",
+    "stair master",
+    "rower",
+    "rowing",
+    "swim",
+    "strava",
+    "mile",
+    "5k",
+    "10k",
+)
+
+
+def _contains_wordish(text: str, term: str) -> bool:
+    pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+    return re.search(pattern, text) is not None
+
+
+def _exercise_slug(exercise: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", exercise.lower()).strip("-")
+    return slug or "unknown"
+
+
+def _exercise_pr_skip_reason(row: dict[str, Any]) -> str:
+    exercise = str(row.get("exercise") or "").strip()
+    if not exercise:
+        return "missing_exercise"
+    set_kind = str(row.get("set_type") or row.get("type") or row.get("kind") or "").lower()
+    if "warm" in set_kind:
+        return "warmup"
+    reps = _int(row.get("reps"), 0)
+    weight = _number(row.get("weight"), 0)
+    if reps <= 0:
+        return "missing_reps"
+    if weight <= 0:
+        return "missing_weight"
+    muscle_group = str(row.get("muscle_group") or "").strip() or _infer_muscle_group(exercise)
+    text = " ".join(
+        str(row.get(key) or "")
+        for key in ("exercise", "muscle_group", "workout_type", "classification", "source", "notes")
+    ).lower()
+    if muscle_group.lower() == "cardio" or any(_contains_wordish(text, term) for term in CARDIO_PR_TERMS):
+        return "cardio"
+    return ""
+
+
+def _normalize_exercise_pr_item(row: dict[str, Any], *, source: str) -> dict[str, Any] | None:
+    exercise = str(row.get("exercise") or "").strip()
+    weight = _number(row.get("weight"), 0)
+    reps = _int(row.get("reps"), 0)
+    if not exercise or weight <= 0 or reps <= 0:
+        return None
+    estimated_1rm = _number(row.get("estimated_1rm"), weight * (1 + reps / 30))
+    row_date = str(row.get("date") or "")[:10]
+    return {
+        "pr_id": str(row.get("pr_id") or f"exercise-pr:{_exercise_slug(exercise)}"),
+        "exercise": exercise,
+        "weight": round(weight, 1),
+        "unit": str(row.get("unit") or "lb"),
+        "reps": reps,
+        "estimated_1rm": round(estimated_1rm, 1),
+        "date": row_date,
+        "workout_id": row.get("workout_id") or row.get("hevy_workout_id") or "",
+        "workout_type": row.get("workout_type") or "",
+        "source": str(row.get("source") or source),
+        "record_source": source,
+        "updated_at": row.get("updated_at") or "",
+    }
+
+
+def _compute_exercise_prs_from_training_rows(rows: list[dict[str, Any]], *, limit: int = 50) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    best: dict[str, dict[str, Any]] = {}
+    skipped: dict[str, int] = defaultdict(int)
+    considered = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        reason = _exercise_pr_skip_reason(row)
+        if reason:
+            skipped[reason] += 1
+            continue
+        considered += 1
+        exercise = str(row.get("exercise") or "").strip()
+        item = _normalize_exercise_pr_item(row, source="training_history_fallback")
+        if not item:
+            skipped["invalid_pr_item"] += 1
+            continue
+        key = exercise.lower()
+        current = best.get(key)
+        current_weight = _number(current.get("weight"), 0) if current else 0
+        current_reps = _int(current.get("reps"), 0) if current else 0
+        current_date = str(current.get("date") or "") if current else ""
+        if (
+            current is None
+            or item["weight"] > current_weight
+            or (item["weight"] == current_weight and item["reps"] > current_reps)
+            or (item["weight"] == current_weight and item["reps"] == current_reps and item["date"] > current_date)
+        ):
+            best[key] = item
+    items = sorted(best.values(), key=lambda item: str(item.get("exercise") or "").lower())[:limit]
+    return items, {
+        "training_rows_read": len(rows),
+        "lift_rows_considered": considered,
+        "skipped": dict(skipped),
+        "exercise_count": len(best),
+    }
+
+
+def _normalize_cached_prs(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        if _exercise_pr_skip_reason(row) in {"cardio", "warmup", "missing_exercise", "missing_reps", "missing_weight"}:
+            continue
+        item = _normalize_exercise_pr_item(row, source="exercise_prs_table")
+        if item:
+            items.append(item)
+    return sorted(items, key=lambda item: str(item.get("exercise") or "").lower())[:limit]
 
 
 def _volume(row: dict[str, Any]) -> float:
@@ -875,6 +1005,58 @@ def rebuild_summaries() -> dict[str, Any]:
     result["core_training_summary"] = load_recent_training_summary(force_refresh=True)
     invalidate_dashboard_core_cache()
     return result
+
+
+@router.get("/api/training/prs")
+def training_prs(limit: int = 50, refresh: bool = False) -> dict[str, Any]:
+    started = time.perf_counter()
+    bounded = _bounded_int(limit, 50, 1, 200)
+    table_count = count_rows("exercise_prs")
+    ensure_result = ensure_jsonb_table("exercise_prs")
+    diagnostics: dict[str, Any] = {
+        "table": "exercise_prs",
+        "initial_table_status": table_count.get("status", "unknown"),
+        "initial_table_count_estimate": table_count.get("count_estimate", 0),
+        "safe_table_creation": ensure_result,
+        "refresh": bool(refresh),
+        "full_raw_hevy_scan": False,
+    }
+
+    cached_pr_rows = [] if refresh else _valid_rows(fetch_latest_json_rows("exercise_prs", limit=max(bounded, 500)))
+    cached_items = _normalize_cached_prs(cached_pr_rows, limit=bounded)
+    diagnostics["cached_rows_read"] = len(cached_pr_rows)
+    if cached_items:
+        diagnostics["source_reason"] = "exercise_prs table contained usable lifting PRs."
+        diagnostics["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+        return {
+            "status": "ok",
+            "items": cached_items,
+            "source": "exercise_prs_table",
+            "diagnostics": diagnostics,
+        }
+
+    training_rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
+    fallback_items, fallback_diagnostics = _compute_exercise_prs_from_training_rows(training_rows, limit=bounded)
+    diagnostics.update(fallback_diagnostics)
+    persisted = 0
+    if fallback_items and ensure_result.get("status") == "ok":
+        for item in fallback_items:
+            saved = upsert_json_row("exercise_prs", "pr_id", str(item["pr_id"]), {**item, "updated_at": utc_now_iso()})
+            if isinstance(saved, dict) and "_db_error" not in saved:
+                persisted += 1
+    diagnostics["persisted_to_table"] = persisted
+    diagnostics["source_reason"] = (
+        "exercise_prs table was missing or empty; PRs were computed from normalized workout_logs."
+        if fallback_items
+        else "No weighted lifting rows were available after excluding cardio/running rows."
+    )
+    diagnostics["duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
+    return {
+        "status": "ok" if fallback_items else "empty",
+        "items": fallback_items,
+        "source": "training_history_fallback" if fallback_items else "none",
+        "diagnostics": diagnostics,
+    }
 
 
 @router.get("/api/training/pr-history")

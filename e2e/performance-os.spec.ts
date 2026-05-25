@@ -102,4 +102,45 @@ test.describe("Performance OS startup and critical flows", () => {
     await page.getByRole("button", { name: /refresh hevy now/i }).click();
     await expect(page.getByText(/Hevy checked:/)).toBeVisible();
   });
+
+  test("exercise PRs render in Goals and not on Dashboard", async ({ page }) => {
+    await loginWithPage(page);
+
+    await page.route("**/api/training/prs*", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          status: "ok",
+          source: "training_history_fallback",
+          items: [
+            {
+              pr_id: "exercise-pr:bench-press",
+              exercise: "Bench Press",
+              weight: 225,
+              unit: "lb",
+              reps: 3,
+              estimated_1rm: 247.5,
+              date: "2026-05-21",
+              source: "hevy",
+            },
+          ],
+          diagnostics: {
+            source_reason: "exercise_prs table was missing or empty; PRs were computed from normalized workout_logs.",
+          },
+        }),
+      });
+    });
+
+    await expect(page.getByRole("heading", { name: "PRs", exact: true })).toHaveCount(0);
+
+    await page.getByTestId("nav-goals").click();
+    await expect(page.getByRole("heading", { name: "Goals & Targets" })).toBeVisible();
+    await expect(page.getByTestId("goals-pr-section")).toContainText("Bench Press");
+    await expect(page.getByTestId("goals-pr-section")).toContainText("225 lb");
+
+    await page.getByTestId("nav-dashboard").click();
+    await expect(page.getByRole("heading", { name: "Dashboard" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "PRs", exact: true })).toHaveCount(0);
+  });
 });
