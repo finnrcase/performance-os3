@@ -60,7 +60,7 @@ const navigation = [
 
 const primaryNavigation = navigation.filter((item) => item.id !== "debug");
 const debugNavigationItem = navigation.find((item) => item.id === "debug") ?? navigation[navigation.length - 1];
-const mobileNavigation = primaryNavigation.filter((item) => item.id !== "debug");
+const mobileNavigation = navigation.filter((item) => item.id !== "debug");
 const mobileBottomNavigation = mobileNavigation;
 
 type PageId = (typeof navigation)[number]["id"];
