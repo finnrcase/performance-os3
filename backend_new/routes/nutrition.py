@@ -257,6 +257,10 @@ def _round(value: float) -> int | float:
     return int(rounded) if rounded == int(rounded) else rounded
 
 
+def _macro_calories(protein: Any, carbs: Any, fat: Any) -> int | float:
+    return _round((_number(protein, 0) * 4) + (_number(carbs, 0) * 4) + (_number(fat, 0) * 9))
+
+
 def _is_excluded(item: dict[str, Any]) -> bool:
     return item.get("excluded_from_analytics") is True or str(item.get("excluded_from_analytics") or "").lower() == "true"
 
@@ -432,10 +436,12 @@ def _normalize_food_log(payload: dict[str, Any], *, food_log_id: str | None = No
     item["date"] = str(item.get("date") or _today_iso())
     item["meal_type"] = str(item.get("meal_type") or "Food")
     item["food_name"] = str(item.get("food_name") or item.get("name") or "Food").strip() or "Food"
-    item["calories"] = _number(item.get("calories"), 0)
     item["protein"] = _number(item.get("protein", item.get("protein_g")), 0)
     item["carbs"] = _number(item.get("carbs", item.get("carbs_g")), 0)
     item["fat"] = _number(item.get("fat", item.get("fat_g")), 0)
+    item["calories"] = _number(item.get("calories"), 0)
+    if item["calories"] <= 0 and (item["protein"] > 0 or item["carbs"] > 0 or item["fat"] > 0):
+        item["calories"] = _macro_calories(item["protein"], item["carbs"], item["fat"])
     if "fiber" not in item and "fiber_g" in item:
         item["fiber"] = item.get("fiber_g")
     if "sugar" not in item and "sugar_g" in item:

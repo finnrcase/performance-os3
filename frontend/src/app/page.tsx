@@ -1474,10 +1474,35 @@ type MealTemplate = {
   fat: number;
 };
 
+type MealTemplateSummary = {
+  template_name: string;
+  calories: number;
+  protein: number;
+  carbs: number;
+  fat: number;
+  foods: number;
+};
+
 type NutritionShortcutData = {
   items: FoodShortcut[];
   frequent_foods: Array<{ food_name: string; calories: number; protein: number; carbs: number; fat: number; default_meal_type: string; is_favorite?: boolean }>;
   meal_templates: MealTemplate[];
+};
+
+type QuickFoodLogStatus = {
+  pending: number;
+  added?: boolean;
+  error?: string | null;
+};
+
+type QuickFoodLogJob = {
+  id: string;
+  statusKey: string;
+  date: string;
+  label: string;
+  optimisticEntry: NutritionEntry;
+  refreshShortcuts?: boolean;
+  run: () => Promise<NutritionEntry | null>;
 };
 
 const DEFAULT_MEAL_TYPE = "Food";
@@ -2677,6 +2702,7 @@ function FoodLogList({
       {entries.map((entry, index) => {
         const entryId = entry.food_log_id || `${entry.date}-${entry.food_name}-${index}`;
         const selectedIcon = normalizeFoodIconType(entry.iconType);
+        const isOptimistic = String(entry.food_log_id ?? "").startsWith("optimistic:");
         const isEditing = Boolean(entry.food_log_id && editingId === entry.food_log_id);
         const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
         const amountLabel = foodAmountLabel(entry);
@@ -2693,6 +2719,7 @@ function FoodLogList({
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
                     {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+                    {isOptimistic ? <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-xs font-medium text-emerald-100">Queued</span> : null}
                   </div>
                   {amountLabel ? <p className="mt-1 text-xs text-zinc-500">{amountLabel}</p> : null}
                 </div>
@@ -2709,7 +2736,7 @@ function FoodLogList({
                     <button
                       type="button"
                       onClick={() => onEdit(entry)}
-                      disabled={!entry.food_log_id || isSaving}
+                      disabled={!entry.food_log_id || isOptimistic || isSaving}
                       className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Edit ${entry.food_name || "food entry"}`}
                     >
@@ -2721,7 +2748,7 @@ function FoodLogList({
                     <button
                       type="button"
                       onClick={() => onRemove(entry)}
-                      disabled={!entry.food_log_id || removingId === entry.food_log_id || isSaving}
+                      disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
                       className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Remove ${entry.food_name || "food entry"}`}
                     >
@@ -2946,6 +2973,42 @@ function shortcutMutationPayload(shortcut: FoodShortcut) {
     notes: shortcut.notes ?? "",
     source: shortcut.source || "manual",
     icon_type: foodPresetIconType(shortcut),
+  };
+}
+
+function shortcutQuickLogKey(shortcut: Pick<FoodShortcut, "shortcut_id">) {
+  return `shortcut:${shortcut.shortcut_id}`;
+}
+
+function frequentFoodQuickLogKey(foodName: string) {
+  return `frequent:${foodName}`;
+}
+
+function mealTemplateQuickLogKey(templateName: string) {
+  return `template:${templateName}`;
+}
+
+function optimisticFoodEntry(
+  id: string,
+  date: string,
+  foodName: string,
+  macros: Pick<NutritionEntry, "calories" | "protein" | "carbs" | "fat"> & Partial<Pick<NutritionEntry, "fiber" | "sodium" | "potassium" | "iconType" | "serving_description" | "source">>,
+): NutritionEntry {
+  return {
+    food_log_id: id,
+    date,
+    meal_type: DEFAULT_MEAL_TYPE,
+    food_name: foodName,
+    calories: finiteNumberOrNull(macros.calories) ?? 0,
+    protein: finiteNumberOrNull(macros.protein) ?? 0,
+    carbs: finiteNumberOrNull(macros.carbs) ?? 0,
+    fat: finiteNumberOrNull(macros.fat) ?? 0,
+    fiber: macros.fiber ?? null,
+    sodium: macros.sodium ?? null,
+    potassium: macros.potassium ?? null,
+    iconType: macros.iconType ?? null,
+    serving_description: macros.serving_description ?? "Queued preset",
+    source: macros.source ?? "optimistic",
   };
 }
 
@@ -3215,7 +3278,7 @@ function FoodPresetIconPicker({
 function PresetFoodTile({
   shortcut,
   toneIndex,
-  pending,
+  status,
   disabled,
   editing,
   editMode,
@@ -3223,18 +3286,28 @@ function PresetFoodTile({
 }: Readonly<{
   shortcut: PresetFoodShortcut;
   toneIndex: number;
-  pending: boolean;
+  status?: QuickFoodLogStatus;
   disabled?: boolean;
   editing: boolean;
   editMode: boolean;
   onClick: () => void;
 }>) {
   const tone = FOOD_PRESET_TILE_TONES[toneIndex % FOOD_PRESET_TILE_TONES.length];
+  const pendingCount = status?.pending ?? 0;
+  const label = status?.error
+    ? "Retry"
+    : pendingCount > 1
+      ? `Adding ${pendingCount}`
+      : pendingCount === 1
+        ? "Adding..."
+        : status?.added
+          ? "Added"
+          : shortcut.shortcut_name;
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={pending || disabled}
+      disabled={disabled}
       className={cx(
         "group relative aspect-square min-w-0 rounded-lg border p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
         editing ? "accent-outline" : "border-white/10",
@@ -3243,11 +3316,13 @@ function PresetFoodTile({
       title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
     >
       {editMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
+      {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
+      {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
       <span className="flex h-full flex-col items-center justify-center gap-2">
         <span className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-black/20 text-zinc-300 transition group-hover:border-[var(--accent-border)] group-hover:text-[var(--accent-primary)]">
           <FoodPresetIcon type={foodPresetIconType(shortcut)} className="h-6 w-6" />
         </span>
-        <span className="line-clamp-2 break-words leading-4">{pending ? "Adding..." : shortcut.shortcut_name}</span>
+        <span className={cx("line-clamp-2 break-words leading-4", status?.error ? "text-red-100" : "")}>{label}</span>
       </span>
     </button>
   );
@@ -3565,6 +3640,14 @@ function calculateServingPreview(form: ServingScaleForm) {
   };
 }
 
+function calculateMacroCalories(protein: unknown, carbs: unknown, fat: unknown) {
+  const proteinGrams = finiteNumberOrNull(protein) ?? 0;
+  const carbGrams = finiteNumberOrNull(carbs) ?? 0;
+  const fatGrams = finiteNumberOrNull(fat) ?? 0;
+  const calories = proteinGrams * 4 + carbGrams * 4 + fatGrams * 9;
+  return Math.round(calories * 10) / 10;
+}
+
 const FOOD_PROGRESS_COLOR_STOPS = [
   { percent: 0, color: [248, 113, 113] },
   { percent: 35, color: [251, 146, 60] },
@@ -3642,34 +3725,6 @@ function normalizeDashboardMacroProgress(raw: unknown, fallbackTarget?: unknown)
     over,
     percent: Math.max(0, Math.min(100, percent)),
   };
-}
-
-function WearableMiniChart({
-  title,
-  data,
-  dataKey,
-  stroke,
-}: Readonly<{
-  title: string;
-  data: Array<Record<string, string | number>>;
-  dataKey: string;
-  stroke: string;
-}>) {
-  if (!data.length) {
-    return null;
-  }
-  return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
-      <p className="text-xs font-medium text-zinc-400">{title}</p>
-      <ChartFrame className="mt-2 h-20">
-        <ResponsiveContainer width="100%" height="100%">
-          <RechartsLineChart data={data}>
-            <Line dataKey={dataKey} stroke={stroke} strokeWidth={2} dot={false} />
-          </RechartsLineChart>
-        </ResponsiveContainer>
-      </ChartFrame>
-    </div>
-  );
 }
 
 function statusBadgeClass(status: string) {
@@ -3804,76 +3859,6 @@ function relativeSyncTime(value: string) {
   if (minutes < 60) return `Last synced ${minutes} minutes ago`;
   const hours = Math.round(minutes / 60);
   return `Last synced ${hours} hour${hours === 1 ? "" : "s"} ago`;
-}
-
-function WeeklyPerformanceReportCard({ report, onViewDetails }: Readonly<{ report?: WeeklyReport; onViewDetails: () => void }>) {
-  const [expanded, setExpanded] = useState(false);
-  const statusClass = report?.status === "ready"
-    ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100"
-    : "border-zinc-300/20 bg-zinc-300/10 text-zinc-200";
-  const rows = report?.rows?.length ? report.rows : [
-    { label: "Weight", value: "Need data", detail: "Daily weigh-ins unlock weekly change." },
-    { label: "Nutrition", value: "Need data", detail: "Food logs unlock macro averages." },
-    { label: "Training", value: "Need data", detail: "Hevy and Strava sessions unlock trends." },
-  ];
-
-  return (
-    <Card className="col-span-full overflow-hidden p-0">
-      <button
-        type="button"
-        onClick={() => setExpanded((value) => !value)}
-        className="flex w-full items-center justify-between gap-4 px-5 py-4 text-left transition hover:bg-white/[0.035]"
-      >
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2">
-            <p className="accent-text text-xs font-semibold uppercase tracking-[0.18em]">Weekly</p>
-            <span className={`rounded-full border px-2 py-0.5 text-[11px] font-medium capitalize ${statusClass}`}>{report?.status ?? "learning"}</span>
-          </div>
-          <h2 className="mt-1 text-lg font-semibold text-white">Weekly Performance Report</h2>
-          <p className="mt-1 truncate text-sm text-zinc-400">{report?.summary ?? "Weekly nutrition, training, running, weight, and recovery summary will appear here."}</p>
-        </div>
-        <ChevronDown className={cx("h-5 w-5 shrink-0 text-zinc-400 transition-transform duration-200", expanded && "rotate-180")} />
-      </button>
-      <div className={cx("grid transition-[grid-template-rows] duration-300 ease-out", expanded ? "grid-rows-[1fr]" : "grid-rows-[0fr]")}>
-        <div className="min-h-0 overflow-hidden">
-          <div className="border-t border-white/10 p-5">
-            <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-              <div>
-                <p className="text-sm font-semibold text-white">{report?.period_label ?? "Last 7 days"}</p>
-                <p className="mt-2 max-w-3xl text-sm leading-6 text-zinc-400">{report?.summary ?? "Keep logging this week to make the report more specific."}</p>
-              </div>
-              <button onClick={onViewDetails} className="w-fit rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">
-                View details
-              </button>
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-              {rows.map((row) => (
-                <div key={`${row.label}-${row.value}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                  <p className="text-xs font-medium uppercase tracking-[0.12em] text-zinc-500">{row.label}</p>
-                  <p className="mt-2 text-sm font-semibold text-white">{row.value}</p>
-                  <p className="mt-1 text-xs leading-5 text-zinc-400">{row.detail}</p>
-                </div>
-              ))}
-            </div>
-            <div className="mt-4 grid gap-3 md:grid-cols-3">
-              <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.06] p-3">
-                <p className="text-xs font-medium uppercase tracking-[0.12em] text-emerald-200/80">Best trend</p>
-                <p className="mt-2 text-sm leading-6 text-emerald-50">{report?.best_trend ?? "Need more comparable lifting history."}</p>
-              </div>
-              <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
-                <p className="text-xs font-medium uppercase tracking-[0.12em] text-amber-200/80">Watch</p>
-                <p className="mt-2 text-sm leading-6 text-amber-50">{report?.watch ?? "No clear weak signal yet."}</p>
-              </div>
-              <div className="accent-outline rounded-lg border p-3">
-                <p className="text-xs font-medium uppercase tracking-[0.12em]">Next week</p>
-                <p className="mt-2 text-sm leading-6 text-zinc-100">{report?.recommendation ?? "Keep targets stable and build another week of clean logs."}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </Card>
-  );
 }
 
 function Dashboard({
@@ -4682,6 +4667,8 @@ function FoodPage({
   mealTemplates,
   forms,
   setForms,
+  manualCaloriesOverridden,
+  setManualCaloriesOverridden,
   manualFoodMode,
   setManualFoodMode,
   servingForm,
@@ -4720,6 +4707,8 @@ function FoodPage({
   manualSaving,
   manualError,
   aiParsingConfigured,
+  quickFoodLogStatuses,
+  quickFoodPendingCount,
 }: Readonly<{
   logs: NutritionEntry[];
   targets: Targets | null;
@@ -4734,6 +4723,8 @@ function FoodPage({
   mealTemplates: MealTemplate[];
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
+  manualCaloriesOverridden: boolean;
+  setManualCaloriesOverridden: React.Dispatch<React.SetStateAction<boolean>>;
   manualFoodMode: "direct" | "serving";
   setManualFoodMode: (mode: "direct" | "serving") => void;
   servingForm: ServingScaleForm;
@@ -4752,15 +4743,15 @@ function FoodPage({
   onSaveShortcut: (event: FormEvent) => void;
   onSaveMealTemplate: (event: FormEvent) => void;
   onSaveAndLogToday: (event: FormEvent) => void;
-  onLogShortcut: (shortcutId: string) => Promise<void> | void;
+  onLogShortcut: (shortcut: PresetFoodShortcut) => Promise<void> | void;
   onCreateShortcut: (shortcut: FoodShortcut) => Promise<void> | void;
   onCreateAndLogPreset: (shortcut: FoodShortcut) => Promise<void> | void;
-  onLogFrequentFood: (foodName: string) => Promise<void> | void;
+  onLogFrequentFood: (food: NutritionShortcutData["frequent_foods"][number]) => Promise<void> | void;
   onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
   onUpdateFoodLog: (entry: NutritionEntry, updates: { iconType: FoodIconType | null }) => Promise<void>;
   onUpdateShortcut: (shortcut: FoodShortcut) => Promise<void> | void;
   onDeleteShortcut: (shortcutId: string) => Promise<void> | void;
-  onLogMealTemplate: (templateName: string) => Promise<void>;
+  onLogMealTemplate: (template: MealTemplateSummary) => Promise<void> | void;
   onRenameMealTemplate: (templateName: string, nextName: string) => Promise<void>;
   shortcutSuggestion: { type: "shortcut" | "template" | "frequent"; label: string; id: string } | null;
   onUseSuggestion: () => void;
@@ -4772,6 +4763,8 @@ function FoodPage({
   manualSaving: boolean;
   manualError: string | null;
   aiParsingConfigured: boolean;
+  quickFoodLogStatuses: Record<string, QuickFoodLogStatus>;
+  quickFoodPendingCount: number;
 }>) {
   const [showFoodHistory, setShowFoodHistory] = useState(false);
   const [shortcutQuery, setShortcutQuery] = useState("");
@@ -4829,7 +4822,7 @@ function FoodPage({
       current.foods += 1;
       templates.set(name, current);
       return templates;
-    }, new Map<string, { template_name: string; calories: number; protein: number; carbs: number; fat: number; foods: number }>())
+    }, new Map<string, MealTemplateSummary>())
       .values(),
   ).sort((a, b) => a.template_name.localeCompare(b.template_name));
   const filteredTemplateSummaries = templateSummaries.filter((template) => normalizeSearchText(template.template_name).includes(normalizedShortcutQuery));
@@ -4853,13 +4846,8 @@ function FoodPage({
       setPendingTemplateAction(null);
     }
   };
-  const logTemplate = async (templateName: string) => {
-    setPendingTemplateAction(`log:${templateName}`);
-    try {
-      await onLogMealTemplate(templateName);
-    } finally {
-      setPendingTemplateAction(null);
-    }
+  const logTemplate = async (template: MealTemplateSummary) => {
+    await onLogMealTemplate(template);
   };
   const beginFoodLogEdit = (entry: NutritionEntry) => {
     if (!entry.food_log_id) return;
@@ -4910,25 +4898,15 @@ function FoodPage({
       setEditingShortcut({ ...shortcut });
       return;
     }
-    setPendingPresetAction(`shortcut:${shortcut.shortcut_id}`);
-    try {
-      if (isDefaultPresetShortcut(shortcut)) {
-        await onCreateAndLogPreset(shortcut);
-      } else {
-        await onLogShortcut(shortcut.shortcut_id);
-      }
-    } finally {
-      setPendingPresetAction(null);
+    if (isDefaultPresetShortcut(shortcut)) {
+      await onCreateAndLogPreset(shortcut);
+    } else {
+      await onLogShortcut(shortcut);
     }
   };
   const handleFrequentTileClick = async (food: NutritionShortcutData["frequent_foods"][number]) => {
     if (presetEditMode) return;
-    setPendingPresetAction(`frequent:${food.food_name}`);
-    try {
-      await onLogFrequentFood(food.food_name);
-    } finally {
-      setPendingPresetAction(null);
-    }
+    await onLogFrequentFood(food);
   };
   const handleSaveShortcutEdit = async () => {
     if (!editingShortcut) return;
@@ -4964,6 +4942,44 @@ function FoodPage({
     foodAiDebug?.logInsertStatus === "error" ||
     foodAiDebug?.refreshStatus === "error",
   );
+  const calculatedDirectCalories = calculateMacroCalories(forms.nutrition.protein, forms.nutrition.carbs, forms.nutrition.fat);
+  const hasDirectMacroCalories = calculatedDirectCalories > 0;
+  const updateDirectMacro = (key: keyof Pick<NutritionEntry, "protein" | "carbs" | "fat">, value: string) => {
+    const nextValue = value === "" ? 0 : Number(value);
+    setForms((state) => {
+      const nextNutrition = {
+        ...state.nutrition,
+        [key]: Number.isFinite(nextValue) ? nextValue : 0,
+      };
+      return {
+        ...state,
+        nutrition: {
+          ...nextNutrition,
+          calories: manualCaloriesOverridden
+            ? nextNutrition.calories
+            : calculateMacroCalories(nextNutrition.protein, nextNutrition.carbs, nextNutrition.fat),
+        },
+      };
+    });
+  };
+  const applyCalculatedCalories = () => {
+    setManualCaloriesOverridden(false);
+    setForms((state) => ({
+      ...state,
+      nutrition: {
+        ...state.nutrition,
+        calories: calculateMacroCalories(state.nutrition.protein, state.nutrition.carbs, state.nutrition.fat),
+      },
+    }));
+  };
+  const updateDirectCalories = (value: string) => {
+    if (value === "") {
+      applyCalculatedCalories();
+      return;
+    }
+    setManualCaloriesOverridden(true);
+    setForms((state) => ({ ...state, nutrition: { ...state.nutrition, calories: Number(value) } }));
+  };
 
   return (
     <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start" data-testid="food-page">
@@ -5128,10 +5144,20 @@ function FoodPage({
             <>
               <TextInput label="Food name" required value={forms.nutrition.food_name} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, food_name: value } }))} />
               <TextInput label="Amount / serving optional" value={forms.nutrition.serving_description ?? ""} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, serving_description: value } }))} />
-              <TextInput label="Calories" type="number" min={0} step="any" value={forms.nutrition.calories} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, calories: Number(value) } }))} />
-              <TextInput label="Protein" type="number" min={0} step="any" value={forms.nutrition.protein} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, protein: Number(value) } }))} />
-              <TextInput label="Carbs" type="number" min={0} step="any" value={forms.nutrition.carbs} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, carbs: Number(value) } }))} />
-              <TextInput label="Fat" type="number" min={0} step="any" value={forms.nutrition.fat} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, fat: Number(value) } }))} />
+              <TextInput label="Calories" type="number" min={0} step="any" value={forms.nutrition.calories} onChange={updateDirectCalories} />
+              {(hasDirectMacroCalories || manualCaloriesOverridden) ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs text-zinc-400">
+                  <span>{manualCaloriesOverridden ? "Calories manually overridden" : "Calories calculated from macros"}</span>
+                  {manualCaloriesOverridden ? (
+                    <button type="button" onClick={applyCalculatedCalories} className="accent-text font-semibold">
+                      Use macro calories
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
+              <TextInput label="Protein" type="number" min={0} step="any" value={forms.nutrition.protein} onChange={(value) => updateDirectMacro("protein", value)} />
+              <TextInput label="Carbs" type="number" min={0} step="any" value={forms.nutrition.carbs} onChange={(value) => updateDirectMacro("carbs", value)} />
+              <TextInput label="Fat" type="number" min={0} step="any" value={forms.nutrition.fat} onChange={(value) => updateDirectMacro("fat", value)} />
               <TextInput label="Fiber optional" type="number" min={0} step="any" value={forms.nutrition.fiber ?? ""} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, fiber: value === "" ? null : Number(value) } }))} />
             </>
           ) : (
@@ -5553,18 +5579,25 @@ function FoodPage({
             eyebrow="Fast log"
             title="Preset foods & meals"
             action={
-              <button
-                type="button"
-                onClick={() => {
-                  setPresetEditMode((value) => !value);
-                  setEditingShortcut(null);
-                  cancelTemplateRename();
-                }}
-                className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition", presetEditMode ? "accent-outline" : "border-white/10 text-zinc-200 hover:bg-white/[0.04]")}
-              >
-                <Pencil className="h-4 w-4" />
-                {presetEditMode ? "Done editing" : "Edit Presets"}
-              </button>
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                {quickFoodPendingCount ? (
+                  <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2.5 py-1 text-xs font-semibold text-emerald-100">
+                    {quickFoodPendingCount} queued
+                  </span>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPresetEditMode((value) => !value);
+                    setEditingShortcut(null);
+                    cancelTemplateRename();
+                  }}
+                  className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition", presetEditMode ? "accent-outline" : "border-white/10 text-zinc-200 hover:bg-white/[0.04]")}
+                >
+                  <Pencil className="h-4 w-4" />
+                  {presetEditMode ? "Done editing" : "Edit Presets"}
+                </button>
+              </div>
             }
           />
           <div className="space-y-4">
@@ -5587,14 +5620,14 @@ function FoodPage({
               <div className="space-y-4">
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
                   {filteredShortcuts.map((shortcut, index) => {
-                    const pending = pendingPresetAction === `shortcut:${shortcut.shortcut_id}`;
                     const editing = presetEditMode && editingShortcut?.shortcut_id === shortcut.shortcut_id;
+                    const status = quickFoodLogStatuses[shortcutQuickLogKey(shortcut)];
                     return (
                       <PresetFoodTile
                         key={shortcut.shortcut_id}
                         shortcut={shortcut}
                         toneIndex={index}
-                        pending={pending}
+                        status={status}
                         disabled={Boolean(pendingPresetAction?.startsWith("edit:"))}
                         editing={editing}
                         editMode={presetEditMode}
@@ -5634,24 +5667,39 @@ function FoodPage({
               filteredTemplateSummaries.length ? (
               <div className="space-y-4">
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
-                  {filteredTemplateSummaries.map((template) => (
-                    <button
-                      key={template.template_name}
-                      type="button"
-                      onClick={() => presetEditMode ? beginTemplateRename(template.template_name) : void logTemplate(template.template_name)}
-                      disabled={pendingTemplateAction === `log:${template.template_name}` || pendingTemplateAction === `rename:${template.template_name}`}
-                      className={cx(
-                        "group relative aspect-square min-w-0 rounded-lg border bg-violet-300/[0.045] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-violet-300/[0.075] disabled:cursor-not-allowed disabled:opacity-60",
-                        editingTemplateName === template.template_name ? "border-violet-200/60 shadow-[0_0_22px_rgba(196,181,253,0.12)]" : "border-violet-300/15",
-                      )}
-                      title={presetEditMode ? `Rename ${template.template_name}` : `Add ${template.template_name} to today`}
-                    >
-                      {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-violet-200/70" /> : null}
-                      <span className="flex h-full items-center justify-center break-words leading-4">
-                        {pendingTemplateAction === `log:${template.template_name}` ? "Adding..." : template.template_name}
-                      </span>
-                    </button>
-                  ))}
+                  {filteredTemplateSummaries.map((template) => {
+                    const status = quickFoodLogStatuses[mealTemplateQuickLogKey(template.template_name)];
+                    const pendingCount = status?.pending ?? 0;
+                    const label = status?.error
+                      ? "Retry"
+                      : pendingCount > 1
+                        ? `Adding ${pendingCount}`
+                        : pendingCount === 1
+                          ? "Adding..."
+                          : status?.added
+                            ? "Added"
+                            : template.template_name;
+                    return (
+                      <button
+                        key={template.template_name}
+                        type="button"
+                        onClick={() => presetEditMode ? beginTemplateRename(template.template_name) : void logTemplate(template)}
+                        disabled={pendingTemplateAction === `rename:${template.template_name}`}
+                        className={cx(
+                          "group relative aspect-square min-w-0 rounded-lg border bg-violet-300/[0.045] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-violet-300/[0.075] disabled:cursor-not-allowed disabled:opacity-60",
+                          editingTemplateName === template.template_name ? "border-violet-200/60 shadow-[0_0_22px_rgba(196,181,253,0.12)]" : "border-violet-300/15",
+                        )}
+                        title={presetEditMode ? `Rename ${template.template_name}` : `Add ${template.template_name} to today`}
+                      >
+                        {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-violet-200/70" /> : null}
+                        {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
+                        {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
+                        <span className={cx("flex h-full items-center justify-center break-words leading-4", status?.error ? "text-red-100" : "")}>
+                          {label}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
                 {editingTemplateName ? (
                   <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-4">
@@ -5688,21 +5736,36 @@ function FoodPage({
             {shortcutTab === "frequent" ? (
               filteredFrequentFoods.length ? (
                 <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
-                  {filteredFrequentFoods.map((food) => (
-                    <button
-                      key={food.food_name}
-                      type="button"
-                      onClick={() => void handleFrequentTileClick(food)}
-                      disabled={presetEditMode || pendingPresetAction === `frequent:${food.food_name}`}
-                      className="relative aspect-square min-w-0 rounded-lg border border-white/10 bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60"
-                      title={`Add ${food.food_name} to today`}
-                    >
-                      {food.is_favorite ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-300" /> : null}
-                      <span className="flex h-full items-center justify-center break-words leading-4">
-                        {pendingPresetAction === `frequent:${food.food_name}` ? "Adding..." : food.food_name}
-                      </span>
-                    </button>
-                  ))}
+                  {filteredFrequentFoods.map((food) => {
+                    const status = quickFoodLogStatuses[frequentFoodQuickLogKey(food.food_name)];
+                    const pendingCount = status?.pending ?? 0;
+                    const label = status?.error
+                      ? "Retry"
+                      : pendingCount > 1
+                        ? `Adding ${pendingCount}`
+                        : pendingCount === 1
+                          ? "Adding..."
+                          : status?.added
+                            ? "Added"
+                            : food.food_name;
+                    return (
+                      <button
+                        key={food.food_name}
+                        type="button"
+                        onClick={() => void handleFrequentTileClick(food)}
+                        disabled={presetEditMode}
+                        className="relative aspect-square min-w-0 rounded-lg border border-white/10 bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60"
+                        title={`Add ${food.food_name} to today`}
+                      >
+                        {food.is_favorite ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-300" /> : null}
+                        {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
+                        {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
+                        <span className={cx("flex h-full items-center justify-center break-words leading-4", status?.error ? "text-red-100" : "")}>
+                          {label}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               ) : (
                 <EmptyState title="No frequent foods yet" description="Frequent foods appear after repeated logging." action="Log food" onAction={() => undefined} />
@@ -9840,6 +9903,116 @@ function AccentThemePicker({ value, onChange }: Readonly<{ value: AccentTheme; o
   );
 }
 
+function settingsStatusBadgeClass(status?: string) {
+  const normalized = String(status || "").toLowerCase();
+  if (normalized.includes("connected") || normalized === "configured" || normalized === "green") {
+    return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  }
+  if (normalized.includes("reconnect") || normalized.includes("expired") || normalized.includes("syncing") || normalized.includes("warning") || normalized === "yellow") {
+    return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  }
+  if (normalized.includes("error") || normalized === "red") {
+    return "border-red-400/25 bg-red-400/10 text-red-100";
+  }
+  return "border-zinc-500/30 bg-zinc-500/10 text-zinc-300";
+}
+
+function settingsStatusLabel(status?: string) {
+  const value = String(status || "Not configured").trim();
+  if (!value) return "Not configured";
+  return value.replaceAll("_", " ");
+}
+
+function settingsHealthCard(settings: SettingsData | null, id: string) {
+  return settings?.health?.find((card) => card.id === id);
+}
+
+function settingsService(settings: SettingsData | null, id: string) {
+  return settings?.services?.[id];
+}
+
+function settingsLastSync(settings: SettingsData | null, id: string) {
+  const health = settingsHealthCard(settings, id);
+  const service = settingsService(settings, id);
+  const diagnostic = id === "hevy"
+    ? settings?.hevy
+    : id === "strava"
+      ? settings?.strava
+      : id === "withings"
+        ? settings?.withings
+        : id === "openai"
+          ? settings?.openai
+          : undefined;
+  return health?.last_synced_at || service?.last_synced_at || diagnostic?.last_successful_sync || "";
+}
+
+function SettingsConnectionCard({
+  title,
+  description,
+  status,
+  lastSync,
+  actions = [],
+}: Readonly<{
+  title: string;
+  description: string;
+  status?: string;
+  lastSync?: string;
+  actions?: Array<{ label: string; onClick: () => void; disabled?: boolean; variant?: "primary" | "secondary" | "danger" }>;
+}>) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-semibold text-white">{title}</p>
+          <p className="mt-1 text-sm leading-6 text-zinc-400">{description}</p>
+        </div>
+        <span className={cx("shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", settingsStatusBadgeClass(status))}>
+          {settingsStatusLabel(status)}
+        </span>
+      </div>
+      <p className="mt-3 text-xs text-zinc-500">
+        {lastSync ? `Last sync ${relativeSyncTime(lastSync)}` : "Last sync not available"}
+      </p>
+      {actions.length ? (
+        <div className="mt-4 flex flex-wrap gap-2">
+          {actions.map((action) => (
+            <button
+              key={action.label}
+              type="button"
+              onClick={action.onClick}
+              disabled={action.disabled}
+              className={cx(
+                "h-10 rounded-lg px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50",
+                action.variant === "primary"
+                  ? "accent-bg"
+                  : action.variant === "danger"
+                    ? "border border-red-300/20 text-red-100 hover:bg-red-300/10"
+                    : "border border-white/10 text-zinc-200 hover:bg-white/[0.04]",
+              )}
+            >
+              {action.label}
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function SettingsInfoRows({ rows }: Readonly<{ rows: Array<{ label: string; value: string; detail?: string }> }>) {
+  return (
+    <div className="grid gap-3 md:grid-cols-2">
+      {rows.map((row) => (
+        <div key={row.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+          <p className="text-xs font-medium uppercase tracking-[0.18em] text-zinc-500">{row.label}</p>
+          <p className="mt-1 text-sm font-semibold text-white">{row.value}</p>
+          {row.detail ? <p className="mt-1 text-xs leading-5 text-zinc-500">{row.detail}</p> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 function SettingsPage({
   settings,
@@ -9878,99 +10051,171 @@ function SettingsPage({
   onImportStrava: () => void;
   onClearWithings: () => void;
 }>) {
-  const withingsConnected = settings?.statuses.withings === "Connected";
-  const stravaStatus = settings?.statuses.strava ?? "Not configured";
+  const withingsConnected = settings?.statuses?.withings === "Connected";
+  const stravaStatus = settings?.statuses?.strava ?? "Not configured";
   const stravaReconnect = stravaStatus === "Connected" || stravaStatus === "Reconnect required" || stravaStatus === "Expired/Reauth required";
+  const stravaConnected = stravaStatus === "Connected";
+  const hevyStatus = settings?.statuses?.hevy_api_key ?? settingsHealthCard(settings, "hevy")?.status ?? "Not configured";
+  const withingsStatus = settings?.statuses?.withings ?? settingsHealthCard(settings, "withings")?.status ?? "Not configured";
+  const fitbitStatus = settings?.statuses?.fitbit_google_health ?? settings?.statuses?.fitbit_client_id ?? "Not configured";
+  const openAiStatus = settings?.statuses?.openai_api_key ?? settingsService(settings, "openai")?.status ?? "Not configured";
+  const appleHealthStatus = settings?.statuses?.apple_health_export_file ?? "Local upload";
   return (
     <div className="space-y-4">
-      <DiagnosticStatusDashboard settings={settings} />
-      {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
-      <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
+      <Card>
+        <SectionHeader eyebrow="Connections" title="Integrations" />
+        <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
+          <SettingsConnectionCard
+            title="Hevy"
+            description={settingsHealthCard(settings, "hevy")?.detail ?? "Workout import and training history."}
+            status={hevyStatus}
+            lastSync={settingsLastSync(settings, "hevy")}
+            actions={[{ label: "Sync Hevy", onClick: onSyncHevy, variant: "secondary" }]}
+          />
+          <SettingsConnectionCard
+            title="Strava"
+            description={settingsHealthCard(settings, "strava")?.detail ?? "OAuth connection for run and cardio imports."}
+            status={stravaStatus}
+            lastSync={settingsLastSync(settings, "strava")}
+            actions={[{ label: stravaReconnect ? "Reconnect Strava" : "Connect Strava", onClick: () => onConnectStrava(stravaReconnect), variant: "primary" }]}
+          />
+          <SettingsConnectionCard
+            title="Withings"
+            description={settingsHealthCard(settings, "withings")?.detail ?? "Scale measurements and body composition sync."}
+            status={withingsStatus}
+            lastSync={settingsLastSync(settings, "withings")}
+            actions={[
+              { label: withingsConnected ? "Reconnect Withings" : "Connect Withings", onClick: onConnectWithings, variant: "primary" },
+              { label: "Disconnect", onClick: onClearWithings, disabled: !withingsConnected, variant: "danger" },
+            ]}
+          />
+          <SettingsConnectionCard
+            title="Fitbit / Google Health"
+            description="Prepared for wearable recovery signals when OAuth sync is enabled."
+            status={fitbitStatus}
+            lastSync={settingsLastSync(settings, "fitbit")}
+          />
+          <SettingsConnectionCard
+            title="OpenAI"
+            description={settingsService(settings, "openai")?.message ?? "Food parser and higher-accuracy nutrition parsing."}
+            status={openAiStatus}
+            lastSync={settingsLastSync(settings, "openai")}
+            actions={[{ label: "Test Food Parser", onClick: onTestOpenAI, variant: "secondary" }]}
+          />
+          <SettingsConnectionCard
+            title="Apple Health"
+            description="Local export upload support for web-based imports."
+            status={appleHealthStatus}
+            lastSync={settingsLastSync(settings, "apple_health")}
+          />
+        </div>
+      </Card>
+      <Card>
+        <SectionHeader eyebrow="Preferences" title="App Preferences" />
+        <SettingsInfoRows
+          rows={[
+            { label: "Language", value: "English", detail: "Interface copy and date formatting use the current app locale." },
+            { label: "Units", value: "lb", detail: "Weight and nutrition views use imperial display units." },
+            { label: "Mobile layout", value: "Bottom tabs on phones", detail: "Desktop and tablet keep the sidebar layout." },
+            { label: "Auto-refresh", value: "After sync actions", detail: "Dashboard and history refresh after imports and manual syncs." },
+          ]}
+        />
+      </Card>
       <AccentThemePicker value={accentTheme} onChange={onAccentThemeChange} />
-      {false ? (
       <Card>
-        <SectionHeader eyebrow="Diagnostics" title="Backend connection" />
-        <p className="text-sm text-zinc-400">
-          Active backend base URL:{" "}
-          <span className="accent-text-strong font-mono">{publicApiBaseLabel()}</span>
-        </p>
-        <p className="mt-1 text-xs text-zinc-500">
-          Resolved from NEXT_PUBLIC_API_URL. Requests time out after {Math.round(DEFAULT_API_TIMEOUT_MS / 1000)}s.
-        </p>
+        <SectionHeader eyebrow="Nutrition & AI" title="Food Logging Preferences" />
+        <SettingsInfoRows
+          rows={[
+            { label: "AI food parsing", value: "Hybrid saved-food first", detail: "Saved foods and shortcuts are matched before model estimates." },
+            { label: "Higher accuracy", value: "Use when confidence is low", detail: "Ambiguous entries can escalate without changing the normal quick path." },
+            { label: "Macro calories", value: "Auto-calculate by default", detail: "Manual calories are still respected when overridden." },
+            { label: "Default logging", value: "Quick-log saved foods", detail: "Presets log fast; AI-estimated foods stay reviewable before saving." },
+            { label: "Low confidence", value: "Confirm before logging", detail: "Assumptions stay visible before uncertain AI estimates are saved." },
+          ]}
+        />
       </Card>
-      ) : null}
       <Card>
-        <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
-        <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
-          {Object.entries(integrationLabels).map(([key, label]) => (
-            <TextInput
-              key={key}
-              label={`${label} (${settings?.statuses[key] ?? "Not configured"})`}
-              type={key.includes("secret") || key.includes("key") ? "password" : "text"}
-              value={forms.settings[key] ?? ""}
-              placeholder={settings?.integrations[key] ?? "Leave blank if not configured"}
-              onChange={(value) => setForms((state) => ({ ...state, settings: { ...state.settings, [key]: value } }))}
-            />
+        <SectionHeader eyebrow="Data & Sync" title="Manual Sync Actions" />
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          {[
+            { label: "Sync Hevy", detail: "Refresh workout history and training summaries.", onClick: onSyncHevy, disabled: false },
+            { label: "Manual Strava Import", detail: "Import recent run/cardio activities.", onClick: onImportStrava, disabled: !stravaConnected },
+            { label: "Sync Weight Now", detail: "Pull the latest Withings scale measurement.", onClick: onSyncWithings, disabled: !withingsConnected },
+            { label: "Sync Withings History", detail: "Backfill historical weight and body composition.", onClick: onSyncWithingsHistory, disabled: !withingsConnected },
+          ].map((action) => (
+            <div key={action.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-sm font-semibold text-white">{action.label}</p>
+              <p className="mt-1 min-h-10 text-xs leading-5 text-zinc-500">{action.detail}</p>
+              <button
+                type="button"
+                onClick={action.onClick}
+                disabled={action.disabled}
+                className="mt-3 h-10 w-full rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Run
+              </button>
+            </div>
           ))}
-          <button className="accent-bg h-11 rounded-lg text-sm font-semibold md:col-span-2">Save settings locally</button>
-        </form>
+        </div>
       </Card>
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card>
-          <SectionHeader eyebrow="Strava" title="OAuth connection" />
-          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.strava ?? "Not configured"}</span></p>
-          <button onClick={() => onConnectStrava(stravaReconnect)} className="mt-4 h-11 rounded-lg bg-orange-300 px-4 text-sm font-semibold text-zinc-950">
-            {stravaReconnect ? "Reconnect Strava" : "Connect Strava"}
-          </button>
-          <p className="mt-3 text-xs text-zinc-500">Uses OAuth2 scopes: read and activity:read_all. Tokens are stored server-side and never displayed.</p>
-        </Card>
-        <Card>
-          <SectionHeader eyebrow="OpenAI" title="Food parser" />
-          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.openai_api_key ?? "Not configured"}</span></p>
-          <button onClick={onTestOpenAI} className="mt-4 h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950">
-            Test OpenAI Food Parser
-          </button>
-          <p className="mt-3 text-xs text-zinc-500">Uses OPENAI_API_KEY from settings, environment, or `.env`.</p>
-        </Card>
-        <Card>
-          <SectionHeader eyebrow="Fitbit / Google Health" title="Wearable recovery" />
-          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.fitbit_google_health ?? "Not configured"}</span></p>
-          <p className="mt-3 text-xs leading-5 text-zinc-500">Prepared for sleep, HRV, resting HR, and recovery trend ingestion. Full OAuth sync is not implemented yet.</p>
-        </Card>
-        <Card>
-          <SectionHeader eyebrow="Withings" title="Scale measurements" />
-          <p className="text-sm text-zinc-400">Status: <span className="accent-text-strong">{settings?.statuses.withings ?? "Not configured"}</span></p>
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button onClick={onConnectWithings} className="h-11 rounded-lg bg-sky-300 px-4 text-sm font-semibold text-zinc-950">
-              {settings?.statuses.withings === "Connected" ? "Reconnect Withings" : "Connect Withings"}
-            </button>
-            <button onClick={onSyncWithings} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
-              Sync Withings Now
-            </button>
-            <button onClick={onSyncWithingsHistory} disabled={settings?.statuses.withings !== "Connected"} className="h-11 rounded-lg border border-white/10 px-4 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
-              Sync Withings History
-            </button>
-            <button onClick={onClearWithings} disabled={!withingsConnected} className="h-11 rounded-lg border border-red-300/20 px-4 text-sm font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50">
-              Disconnect
-            </button>
+      <details className="group rounded-xl border border-white/10 bg-white/[0.025] p-4">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
+            <p className="text-xs font-medium uppercase tracking-[0.24em] text-zinc-500">Advanced / Debug</p>
+            <h2 className="mt-1 text-lg font-semibold text-white">Diagnostics and local connection fields</h2>
+            <p className="mt-1 text-sm text-zinc-500">Raw statuses, API tests, and saved integration values are tucked away here.</p>
           </div>
-        </Card>
-        <Card>
-          <SectionHeader eyebrow="Apple Health" title="Local upload only" />
-          <p className="text-sm leading-6 text-zinc-400">
-            Apple Health stays file-upload based for the web MVP. HealthKit requires an iOS app and explicit user permissions; future web support should parse exported ZIP/XML data first.
-          </p>
-        </Card>
-      </div>
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {Object.entries(integrationLabels).map(([key, label]) => (
-          <Card key={key}>
-            <p className="font-semibold text-white">{label}</p>
-            <p className="mt-2 text-sm text-zinc-400">Saved value: {settings?.integrations[key] ?? "Not configured"}</p>
-            <p className="accent-text-strong mt-3 inline-flex rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs">{settings?.statuses[key] ?? "Not configured"}</p>
+          <ChevronDown className="h-5 w-5 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+        </summary>
+        <div className="mt-4 space-y-4">
+          <Card>
+            <SectionHeader eyebrow="Integrations" title="API keys and local connection info" />
+            <form onSubmit={onSubmit} className="grid gap-4 md:grid-cols-2">
+              {Object.entries(integrationLabels).map(([key, label]) => (
+                <TextInput
+                  key={key}
+                  label={label}
+                  type={key.includes("secret") || key.includes("key") ? "password" : "text"}
+                  value={forms.settings[key] ?? ""}
+                  placeholder={settings?.integrations?.[key] ?? "Leave blank if not configured"}
+                  onChange={(value) => setForms((state) => ({ ...state, settings: { ...state.settings, [key]: value } }))}
+                />
+              ))}
+              <button className="accent-bg h-11 rounded-lg text-sm font-semibold md:col-span-2">Save settings locally</button>
+            </form>
           </Card>
-        ))}
-      </div>
+          <Card>
+            <SectionHeader eyebrow="Diagnostics" title="Backend connection" />
+            <p className="text-sm text-zinc-400">
+              Active backend base URL:{" "}
+              <span className="accent-text-strong font-mono">{publicApiBaseLabel()}</span>
+            </p>
+            <p className="mt-1 text-xs text-zinc-500">
+              Resolved from NEXT_PUBLIC_API_URL. Requests time out after {Math.round(DEFAULT_API_TIMEOUT_MS / 1000)}s.
+            </p>
+          </Card>
+          <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
+          <DiagnosticStatusDashboard settings={settings} />
+          {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+          <Card>
+            <SectionHeader eyebrow="Raw state" title="Saved integration values" />
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {Object.entries(integrationLabels).map(([key, label]) => (
+                <div key={key} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                  <p className="font-semibold text-white">{label}</p>
+                  <p className="mt-2 text-sm text-zinc-400">Saved value: {settings?.integrations?.[key] ?? "Not configured"}</p>
+                  <p className={cx("mt-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold", settingsStatusBadgeClass(settings?.statuses?.[key]))}>
+                    {settingsStatusLabel(settings?.statuses?.[key])}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </Card>
+          <p className="text-xs leading-5 text-zinc-500">
+            Apple Health remains file-upload based for the web app. HealthKit requires an iOS app and explicit user permissions.
+          </p>
+        </div>
+      </details>
       <AquariumEasterEgg />
     </div>
   );
@@ -10129,6 +10374,9 @@ function HomeContent() {
   const [foodAiDebug, setFoodAiDebug] = useState<FoodAiDebugState | null>(null);
   const [parseLoading, setParseLoading] = useState(false);
   const [manualFoodMode, setManualFoodMode] = useState<"direct" | "serving">("direct");
+  const [manualCaloriesOverridden, setManualCaloriesOverridden] = useState(false);
+  const [quickFoodLogStatuses, setQuickFoodLogStatuses] = useState<Record<string, QuickFoodLogStatus>>({});
+  const [quickFoodPendingCount, setQuickFoodPendingCount] = useState(0);
   const [servingForm, setServingForm] = useState<ServingScaleForm>({
     food_name: "",
     serving_size_grams: 56,
@@ -10158,6 +10406,11 @@ function HomeContent() {
   const [startupDebug, setStartupDebug] = useState<StartupDebugEntry[]>([]);
   const [showDebugPanel, setShowDebugPanel] = useState(false);
   const mobileNavRef = useRef<HTMLDivElement | null>(null);
+  const quickFoodQueueRef = useRef<QuickFoodLogJob[]>([]);
+  const quickFoodProcessingRef = useRef(false);
+  const quickFoodProcessRef = useRef<() => void>(() => undefined);
+  const quickFoodLastClickRef = useRef<Record<string, number>>({});
+  const materializedDefaultShortcutIdsRef = useRef<Record<string, string>>({});
   const mobileItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const [mobileHighlight, setMobileHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
   const bottomNavRef = useRef<HTMLDivElement | null>(null);
@@ -10705,6 +10958,172 @@ function HomeContent() {
   const refreshFoodShortcutsOnly = useCallback(async () => {
     setShortcutData(await apiGet<NutritionShortcutData>("/api/nutrition/shortcuts", SETTINGS_API_TIMEOUT_MS));
   }, []);
+
+  const refreshNutritionLogsOnly = useCallback(async () => {
+    const data = await apiGet<{ items: NutritionEntry[] }>("/api/nutrition/logs?days=90&limit=300", SETTINGS_API_TIMEOUT_MS);
+    setNutritionLogs(data.items);
+    return data;
+  }, []);
+
+  const updateQuickFoodStatus = useCallback((statusKey: string, update: (current: QuickFoodLogStatus) => QuickFoodLogStatus) => {
+    setQuickFoodLogStatuses((current) => ({
+      ...current,
+      [statusKey]: update(current[statusKey] ?? { pending: 0, added: false, error: null }),
+    }));
+  }, []);
+
+  const adjustDashboardFoodTotals = useCallback((date: string, entry: Pick<NutritionEntry, "calories" | "protein" | "carbs" | "fat">, direction: 1 | -1) => {
+    setDashboard((current) => {
+      if (!current || current.date !== date) return current;
+      const targets = recordOrEmpty(current.targets);
+      const currentNutrition = recordOrEmpty(current.nutrition_today);
+      const totals = {
+        calories: Math.max(0, (finiteNumberOrNull(currentNutrition.calories) ?? finiteNumberOrNull(current.food?.calories?.eaten) ?? 0) + ((finiteNumberOrNull(entry.calories) ?? 0) * direction)),
+        protein: Math.max(0, (finiteNumberOrNull(currentNutrition.protein) ?? finiteNumberOrNull(current.food?.protein?.eaten) ?? 0) + ((finiteNumberOrNull(entry.protein) ?? 0) * direction)),
+        carbs: Math.max(0, (finiteNumberOrNull(currentNutrition.carbs) ?? finiteNumberOrNull(current.food?.carbs?.eaten) ?? 0) + ((finiteNumberOrNull(entry.carbs) ?? 0) * direction)),
+        fat: Math.max(0, (finiteNumberOrNull(currentNutrition.fat) ?? finiteNumberOrNull(current.food?.fat?.eaten) ?? 0) + ((finiteNumberOrNull(entry.fat) ?? 0) * direction)),
+      };
+      const metric = (value: number, target: unknown) => {
+        const safeTarget = finiteNumberOrNull(target);
+        return {
+          eaten: value,
+          target: safeTarget,
+          left: safeTarget ? Math.max(safeTarget - value, 0) : null,
+          over: safeTarget ? Math.max(value - safeTarget, 0) : null,
+          percent: safeTarget ? Math.min(Math.max((value / safeTarget) * 100, 0), 100) : 0,
+        };
+      };
+      return {
+        ...current,
+        nutrition_today: totals,
+        food: {
+          calories: metric(totals.calories, finiteNumberOrNull(targets.target_calories) ?? current.food?.calories?.target),
+          protein: metric(totals.protein, finiteNumberOrNull(targets.protein_grams) ?? current.food?.protein?.target),
+          carbs: metric(totals.carbs, finiteNumberOrNull(targets.carb_grams) ?? current.food?.carbs?.target),
+          fat: metric(totals.fat, finiteNumberOrNull(targets.fat_grams) ?? current.food?.fat?.target),
+          has_targets: Boolean(finiteNumberOrNull(targets.target_calories) ?? current.food?.has_targets),
+          has_food_logged: Object.values(totals).some((value) => value > 0),
+        },
+      };
+    });
+  }, []);
+
+  const addOptimisticFoodEntry = useCallback((entry: NutritionEntry) => {
+    setNutritionLogs((current) => [...current, entry]);
+    adjustDashboardFoodTotals(entry.date, entry, 1);
+  }, [adjustDashboardFoodTotals]);
+
+  const rollbackOptimisticFoodEntry = useCallback((entry: NutritionEntry) => {
+    setNutritionLogs((current) => current.filter((item) => item.food_log_id !== entry.food_log_id));
+    adjustDashboardFoodTotals(entry.date, entry, -1);
+  }, [adjustDashboardFoodTotals]);
+
+  const replaceOptimisticFoodEntry = useCallback((optimisticEntry: NutritionEntry, savedEntry: NutritionEntry) => {
+    setNutritionLogs((current) => current.map((item) => item.food_log_id === optimisticEntry.food_log_id ? savedEntry : item));
+    const delta = {
+      calories: (finiteNumberOrNull(savedEntry.calories) ?? 0) - (finiteNumberOrNull(optimisticEntry.calories) ?? 0),
+      protein: (finiteNumberOrNull(savedEntry.protein) ?? 0) - (finiteNumberOrNull(optimisticEntry.protein) ?? 0),
+      carbs: (finiteNumberOrNull(savedEntry.carbs) ?? 0) - (finiteNumberOrNull(optimisticEntry.carbs) ?? 0),
+      fat: (finiteNumberOrNull(savedEntry.fat) ?? 0) - (finiteNumberOrNull(optimisticEntry.fat) ?? 0),
+    };
+    adjustDashboardFoodTotals(savedEntry.date || optimisticEntry.date, delta, 1);
+  }, [adjustDashboardFoodTotals]);
+
+  const processQuickFoodQueue = useCallback(() => {
+    if (quickFoodProcessingRef.current) return;
+    quickFoodProcessingRef.current = true;
+    void (async () => {
+      const refreshDates = new Set<string>();
+      let shouldRefreshShortcuts = false;
+      while (quickFoodQueueRef.current.length) {
+        const job = quickFoodQueueRef.current.shift();
+        if (!job) continue;
+        try {
+          const savedEntry = await job.run();
+          if (savedEntry) {
+            replaceOptimisticFoodEntry(job.optimisticEntry, savedEntry);
+          }
+          updateQuickFoodStatus(job.statusKey, (current) => ({
+            ...current,
+            pending: Math.max(0, current.pending - 1),
+            added: true,
+            error: null,
+          }));
+          window.setTimeout(() => {
+            updateQuickFoodStatus(job.statusKey, (current) => ({ ...current, added: false }));
+          }, 1200);
+          refreshDates.add(job.date);
+          shouldRefreshShortcuts = shouldRefreshShortcuts || Boolean(job.refreshShortcuts);
+          setMessage(`Added ${job.label}.`);
+        } catch (error) {
+          const messageText = error instanceof Error ? error.message : `Could not log ${job.label}.`;
+          rollbackOptimisticFoodEntry(job.optimisticEntry);
+          updateQuickFoodStatus(job.statusKey, (current) => ({
+            ...current,
+            pending: Math.max(0, current.pending - 1),
+            added: false,
+            error: messageText,
+          }));
+          setApiError(messageText);
+        } finally {
+          setQuickFoodPendingCount((count) => Math.max(0, count - 1));
+        }
+      }
+      quickFoodProcessingRef.current = false;
+      if (refreshDates.size) {
+        void Promise.all([
+          ...Array.from(refreshDates).map((date) => refreshTodayFoodOnly(date)),
+          refreshNutritionLogsOnly(),
+          shouldRefreshShortcuts ? refreshFoodShortcutsOnly() : Promise.resolve(),
+          ...Array.from(refreshDates).map((date) => refreshDashboardCoreOnly(date).catch((error) => {
+            console.warn("[dashboard] refresh after quick food queue failed", error);
+          })),
+        ]).catch((error) => {
+          console.warn("[food] quick log settle refresh failed", error);
+        });
+      }
+      if (quickFoodQueueRef.current.length) {
+        quickFoodProcessRef.current();
+      }
+    })();
+  }, [
+    refreshDashboardCoreOnly,
+    refreshFoodShortcutsOnly,
+    refreshNutritionLogsOnly,
+    refreshTodayFoodOnly,
+    replaceOptimisticFoodEntry,
+    rollbackOptimisticFoodEntry,
+    updateQuickFoodStatus,
+  ]);
+
+  useEffect(() => {
+    quickFoodProcessRef.current = processQuickFoodQueue;
+  }, [processQuickFoodQueue]);
+
+  const queueQuickFoodLog = useCallback((job: Omit<QuickFoodLogJob, "id"> & { dedupeKey: string }) => {
+    const now = Date.now();
+    const lastClickAt = quickFoodLastClickRef.current[job.dedupeKey] ?? 0;
+    if (now - lastClickAt < 300) {
+      return;
+    }
+    quickFoodLastClickRef.current[job.dedupeKey] = now;
+    const queuedJob: QuickFoodLogJob = {
+      ...job,
+      id: `quick-food:${now}:${Math.random().toString(36).slice(2)}`,
+    };
+    setMessage(null);
+    setApiError(null);
+    addOptimisticFoodEntry(queuedJob.optimisticEntry);
+    updateQuickFoodStatus(queuedJob.statusKey, (current) => ({
+      ...current,
+      pending: current.pending + 1,
+      added: false,
+      error: null,
+    }));
+    setQuickFoodPendingCount((count) => count + 1);
+    quickFoodQueueRef.current.push(queuedJob);
+    processQuickFoodQueue();
+  }, [addOptimisticFoodEntry, processQuickFoodQueue, updateQuickFoodStatus]);
 
   const submitFoodAndRefreshToday = useCallback(async (
     event: FormEvent,
@@ -11322,6 +11741,8 @@ function HomeContent() {
         mealTemplates={shortcutData.meal_templates}
         forms={forms}
         setForms={setForms}
+        manualCaloriesOverridden={manualCaloriesOverridden}
+        setManualCaloriesOverridden={setManualCaloriesOverridden}
         manualFoodMode={manualFoodMode}
         setManualFoodMode={setManualFoodMode}
         servingForm={servingForm}
@@ -11374,6 +11795,8 @@ function HomeContent() {
         manualSaving={manualFoodSaving}
         manualError={manualFoodError}
         aiParsingConfigured={Boolean(settings?.services?.openai?.configured ?? (settings?.statuses.openai_api_key === "Configured" || settings?.statuses.openai_api_key === "Connected"))}
+        quickFoodLogStatuses={quickFoodLogStatuses}
+        quickFoodPendingCount={quickFoodPendingCount}
         shortcutSuggestion={shortcutSuggestion}
         onUseSuggestion={() => {
           if (!shortcutSuggestion) return;
@@ -11630,38 +12053,102 @@ function HomeContent() {
             setAiText("");
           }, "Saved shortcut/template and logged food today.")
         }
-        onLogShortcut={(shortcutId) =>
-          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend(`/api/nutrition/shortcuts/${shortcutId}/log`, "POST", {
-              date: forms.nutrition.date,
-              meal_type: DEFAULT_MEAL_TYPE,
-            });
-          }, "Shortcut logged.")
-        }
+        onLogShortcut={(shortcut) => {
+          const date = forms.nutrition.date || todayString();
+          const statusKey = shortcutQuickLogKey(shortcut);
+          queueQuickFoodLog({
+            dedupeKey: statusKey,
+            statusKey,
+            date,
+            label: shortcut.shortcut_name,
+            optimisticEntry: optimisticFoodEntry(`optimistic:${statusKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`, date, shortcut.shortcut_name, {
+              calories: shortcut.calories,
+              protein: shortcut.protein,
+              carbs: shortcut.carbs,
+              fat: shortcut.fat,
+              fiber: shortcut.fiber,
+              sodium: shortcut.sodium,
+              potassium: shortcut.potassium,
+              iconType: suggestFoodIconType(shortcut.shortcut_name),
+              serving_description: "Saved preset queued",
+              source: "saved_shortcut",
+            }),
+            run: async () => {
+              const response = await apiSend<{ item: NutritionEntry }>(`/api/nutrition/shortcuts/${shortcut.shortcut_id}/log`, "POST", {
+                date,
+                meal_type: DEFAULT_MEAL_TYPE,
+              });
+              return response.item;
+            },
+          });
+        }}
         onCreateShortcut={(shortcut) =>
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
             await refreshFoodShortcutsOnly();
           }, "Preset saved.")
         }
-        onCreateAndLogPreset={(shortcut) =>
-          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
-            const created = await apiSend<{ item: FoodShortcut }>("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
-            await refreshFoodShortcutsOnly();
-            await apiSend(`/api/nutrition/shortcuts/${created.item.shortcut_id}/log`, "POST", {
-              date: forms.nutrition.date,
-              meal_type: DEFAULT_MEAL_TYPE,
-            });
-          }, "Preset saved and logged.")
-        }
-        onLogFrequentFood={(foodName) =>
-          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend(`/api/nutrition/frequent-foods/${encodeURIComponent(foodName)}/log`, "POST", {
-              date: forms.nutrition.date,
-              meal_type: DEFAULT_MEAL_TYPE,
-            });
-          }, "Frequent food logged.")
-        }
+        onCreateAndLogPreset={(shortcut) => {
+          const date = forms.nutrition.date || todayString();
+          const statusKey = shortcutQuickLogKey(shortcut);
+          queueQuickFoodLog({
+            dedupeKey: statusKey,
+            statusKey,
+            date,
+            label: shortcut.shortcut_name,
+            refreshShortcuts: true,
+            optimisticEntry: optimisticFoodEntry(`optimistic:${statusKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`, date, shortcut.shortcut_name, {
+              calories: shortcut.calories,
+              protein: shortcut.protein,
+              carbs: shortcut.carbs,
+              fat: shortcut.fat,
+              fiber: shortcut.fiber,
+              sodium: shortcut.sodium,
+              potassium: shortcut.potassium,
+              iconType: suggestFoodIconType(shortcut.shortcut_name),
+              serving_description: "Preset queued",
+              source: "default_preset",
+            }),
+            run: async () => {
+              let shortcutId = materializedDefaultShortcutIdsRef.current[shortcut.shortcut_id];
+              if (!shortcutId) {
+                const created = await apiSend<{ item: FoodShortcut }>("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
+                shortcutId = created.item.shortcut_id;
+                materializedDefaultShortcutIdsRef.current[shortcut.shortcut_id] = shortcutId;
+              }
+              const response = await apiSend<{ item: NutritionEntry }>(`/api/nutrition/shortcuts/${shortcutId}/log`, "POST", {
+                date,
+                meal_type: DEFAULT_MEAL_TYPE,
+              });
+              return response.item;
+            },
+          });
+        }}
+        onLogFrequentFood={(food) => {
+          const date = forms.nutrition.date || todayString();
+          const statusKey = frequentFoodQuickLogKey(food.food_name);
+          queueQuickFoodLog({
+            dedupeKey: statusKey,
+            statusKey,
+            date,
+            label: food.food_name,
+            optimisticEntry: optimisticFoodEntry(`optimistic:${statusKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`, date, food.food_name, {
+              calories: food.calories,
+              protein: food.protein,
+              carbs: food.carbs,
+              fat: food.fat,
+              serving_description: "Frequent food queued",
+              source: "frequent_food",
+            }),
+            run: async () => {
+              const response = await apiSend<{ item: NutritionEntry }>(`/api/nutrition/frequent-foods/${encodeURIComponent(food.food_name)}/log`, "POST", {
+                date,
+                meal_type: DEFAULT_MEAL_TYPE,
+              });
+              return response.item;
+            },
+          });
+        }}
         onDeleteFoodLog={(entry) =>
           submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
             if (!entry.food_log_id) throw new Error("Food log ID is missing.");
@@ -11686,14 +12173,31 @@ function HomeContent() {
             await refreshFoodShortcutsOnly();
           }, "Shortcut deleted.")
         }
-        onLogMealTemplate={(templateName) =>
-          submitFoodAndRefreshToday({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend(`/api/nutrition/meal-templates/${encodeURIComponent(templateName)}/log`, "POST", {
-              date: forms.nutrition.date || todayString(),
-              meal_type: DEFAULT_MEAL_TYPE,
-            });
-          }, "Meal template added to log.")
-        }
+        onLogMealTemplate={(template) => {
+          const date = forms.nutrition.date || todayString();
+          const statusKey = mealTemplateQuickLogKey(template.template_name);
+          queueQuickFoodLog({
+            dedupeKey: statusKey,
+            statusKey,
+            date,
+            label: template.template_name,
+            optimisticEntry: optimisticFoodEntry(`optimistic:${statusKey}:${Date.now()}:${Math.random().toString(36).slice(2)}`, date, template.template_name, {
+              calories: template.calories,
+              protein: template.protein,
+              carbs: template.carbs,
+              fat: template.fat,
+              serving_description: `${template.foods} item meal queued`,
+              source: "meal_template",
+            }),
+            run: async () => {
+              const response = await apiSend<{ item?: NutritionEntry; items?: NutritionEntry[] }>(`/api/nutrition/meal-templates/${encodeURIComponent(template.template_name)}/log`, "POST", {
+                date,
+                meal_type: DEFAULT_MEAL_TYPE,
+              });
+              return response.item ?? response.items?.[0] ?? null;
+            },
+          });
+        }}
         onRenameMealTemplate={(templateName, nextName) =>
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/meal-templates/${encodeURIComponent(templateName)}`, "PUT", {
@@ -11781,6 +12285,7 @@ function HomeContent() {
                   fiber: null,
                 },
               }));
+              setManualCaloriesOverridden(false);
             } finally {
               setManualFoodSaving(false);
             }
