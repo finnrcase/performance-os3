@@ -249,6 +249,7 @@ type ParsedFood = {
   sugar?: number | null;
   sodium?: number | null;
   confidence: "low" | "medium" | "high" | string;
+  confidence_score?: number | null;
   verification_needed?: boolean;
   verification_reason?: string;
   source?: "ai_estimate" | "verified_online" | "saved_shortcut" | "manual" | string;
@@ -258,6 +259,7 @@ type ParsedFood = {
   original_text?: string;
   assumptions?: string[];
   needs_review?: boolean;
+  needs_confirmation?: boolean;
   notes: string;
 };
 
@@ -1255,6 +1257,7 @@ type FoodParseResponse = {
   success: boolean;
   error_code: string | null;
   message: string;
+  parser?: FoodParserMeta;
   debug: {
     backend_endpoint_reached?: boolean;
     openai_key_configured?: boolean;
@@ -1269,7 +1272,26 @@ type FoodParseResponse = {
     parser_cached?: boolean;
     external_lookup_status?: string;
     external_lookup_statuses?: string[];
+    parser?: FoodParserMeta;
+    escalated?: boolean;
+    escalation_reason?: string;
+    final_model?: string;
+    estimated_input_tokens?: number;
+    estimated_output_tokens?: number;
+    estimated_cost_usd?: number;
   };
+};
+
+type FoodParserMeta = {
+  default_model_used?: boolean;
+  escalated?: boolean;
+  escalation_reason?: string;
+  final_model?: string;
+  model_used?: string;
+  estimated_input_tokens?: number;
+  estimated_output_tokens?: number;
+  estimated_cost_usd?: number;
+  calls?: Array<Record<string, unknown>>;
 };
 
 type FoodAiFlowStep = {
@@ -1305,6 +1327,13 @@ type FoodAiDebugState = {
   refreshEndpoint?: string;
   refreshStatus?: string;
   refreshCalories?: number;
+  default_model_used?: boolean;
+  escalated?: boolean;
+  escalation_reason?: string;
+  final_model?: string;
+  estimated_input_tokens?: number;
+  estimated_output_tokens?: number;
+  estimated_cost_usd?: number;
   exactError?: string;
   updatedAt?: string;
 };
@@ -1349,11 +1378,13 @@ type FoodAnalyzeItem = {
   sugar_g: number | null;
   sodium_mg: number | null;
   confidence: "low" | "medium" | "high" | string;
+  confidence_score?: number | null;
   source: "usda_fdc" | "existing_database" | "openai_estimate" | "web_source" | string;
   source_id: string | null;
   source_url: string | null;
   assumptions: string[];
   needs_review: boolean;
+  needs_confirmation?: boolean;
 };
 
 type FoodAnalyzeTotals = {
@@ -1379,6 +1410,7 @@ type FoodAnalyzeResponse = {
   source?: string;
   parser_source?: string;
   external_lookup_status?: string;
+  parser?: FoodParserMeta;
   debug: FoodParseResponse["debug"];
   steps?: Record<string, unknown>;
 };
@@ -1696,6 +1728,14 @@ function isAuthFailureReason(reason: string) {
     || lowered.includes("invalid session")
     || lowered.includes("unauthor")
     || lowered.includes("forbidden")
+  );
+}
+
+export default function Home() {
+  return (
+    <AppRootErrorBoundary>
+      <HomeContent />
+    </AppRootErrorBoundary>
   );
 }
 
@@ -2048,6 +2088,39 @@ class TargetSectionErrorBoundary extends Component<
           <p className="mt-2 text-sm leading-6 text-amber-100/75">{this.props.description ?? "Insufficient data to render this section."}</p>
           {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
         </Card>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+class AppRootErrorBoundary extends Component<
+  Readonly<{ children: React.ReactNode }>,
+  { hasError: boolean; message: string }
+> {
+  state = { hasError: false, message: "" };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "Adaptive data temporarily unavailable.",
+    };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <main data-accent-theme="lime" className="min-h-screen bg-[#07080b] p-4 text-zinc-100 sm:p-6 lg:p-8">
+          <Card className="border-amber-300/25 bg-amber-300/[0.06]">
+            <SectionHeader eyebrow="Performance OS" title="Adaptive data temporarily unavailable" />
+            <p className="text-sm leading-6 text-amber-100/80">The app shell is still available, but one top-level dashboard payload could not render safely.</p>
+            {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
+          </Card>
+        </main>
       );
     }
     return this.props.children;
@@ -2833,6 +2906,7 @@ const DEFAULT_PRESET_FOODS: PresetFoodShortcut[] = [
   { shortcut_id: "default-preset-built-puff-bar", shortcut_name: "Built Puff Bar", icon_type: "protein_bar", calories: 140, protein: 17, carbs: 15, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", icon_type: "protein_shake", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-oats-overnight", shortcut_name: "Oats Overnight", icon_type: "oats", calories: 280, protein: 20, carbs: 35, fat: 7, fiber: 6, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-chicken-bowl", shortcut_name: "Chicken Bowl", icon_type: "meal_bowl", calories: 650, protein: 45, carbs: 70, fat: 20, fiber: 8, sodium: null, potassium: null, notes: "Seed preset. Edit to match your usual bowl.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-bibigo-rice", shortcut_name: "Bibigo Rice", icon_type: "rice", calories: 310, protein: 6, carbs: 68, fat: 1, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-tuna", shortcut_name: "Tuna", icon_type: "tuna", calories: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", icon_type: "protein_shake", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
@@ -3323,19 +3397,42 @@ function TextInput({
   step?: number | string;
   disabled?: boolean;
 }>) {
+  const isNumeric = type === "number";
+  const [focusedNumericValue, setFocusedNumericValue] = useState<string | null>(null);
+  const displayValue = isNumeric && focusedNumericValue !== null ? focusedNumericValue : value;
+  const clearZeroOnFocus = () => {
+    if (!isNumeric) return;
+    if (value === 0 || value === "0") {
+      setFocusedNumericValue("");
+    }
+  };
+  const handleChange = (nextValue: string) => {
+    if (isNumeric) {
+      setFocusedNumericValue(nextValue);
+    }
+    onChange(nextValue);
+  };
+  const handleBlur = () => {
+    if (isNumeric) {
+      setFocusedNumericValue(null);
+    }
+  };
+
   return (
     <label className="space-y-2 text-sm text-zinc-400">
       <span>{label}</span>
       <input
         className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
-        value={value}
+        value={displayValue}
         type={type}
         placeholder={placeholder}
         required={required}
         min={min}
         step={step}
         disabled={disabled}
-        onChange={(event) => onChange(event.target.value)}
+        onFocus={clearZeroOnFocus}
+        onBlur={handleBlur}
+        onChange={(event) => handleChange(event.target.value)}
       />
     </label>
   );
@@ -3419,7 +3516,12 @@ function savedFoodMatchesQuery(query: string, name: string) {
   return name.includes(query);
 }
 
-function findSavedFoodMatch(text: string, shortcuts: FoodShortcut[], templates: MealTemplate[], frequentFoods: NutritionShortcutData["frequent_foods"] = []) {
+type SavedFoodMatch =
+  | { type: "shortcut"; label: string; id: string; item: FoodShortcut | PresetFoodShortcut }
+  | { type: "frequent"; label: string; id: string; item: NutritionShortcutData["frequent_foods"][number] }
+  | { type: "template"; label: string; id: string };
+
+function findSavedFoodMatch(text: string, shortcuts: Array<FoodShortcut | PresetFoodShortcut>, templates: MealTemplate[], frequentFoods: NutritionShortcutData["frequent_foods"] = []): SavedFoodMatch | null {
   const query = normalizeSearchText(text);
   if (!query) {
     return null;
@@ -3429,14 +3531,14 @@ function findSavedFoodMatch(text: string, shortcuts: FoodShortcut[], templates: 
     return savedFoodMatchesQuery(query, name);
   });
   if (shortcut) {
-    return { type: "shortcut" as const, label: shortcut.shortcut_name, id: shortcut.shortcut_id };
+    return { type: "shortcut" as const, label: shortcut.shortcut_name, id: shortcut.shortcut_id, item: shortcut };
   }
   const frequent = frequentFoods.find((item) => {
     const name = normalizeSearchText(item.food_name);
     return savedFoodMatchesQuery(query, name);
   });
   if (frequent) {
-    return { type: "frequent" as const, label: frequent.food_name, id: frequent.food_name };
+    return { type: "frequent" as const, label: frequent.food_name, id: frequent.food_name, item: frequent };
   }
   const templateNames = Array.from(new Set(templates.map((item) => item.template_name)));
   const templateName = templateNames.find((name) => {
@@ -3795,6 +3897,7 @@ function Dashboard({
   onSaveMilePr: (event: FormEvent) => void;
   onRecalculatePrs: () => void;
 }>) {
+  const [signalsExpanded, setSignalsExpanded] = useState(false);
   const food = data?.food;
   const weight = data?.weight;
   const recovery = data?.recovery;
@@ -3862,10 +3965,6 @@ function Dashboard({
   const runCalories = finiteNumberOrNull(runSummary.calories_burned);
   const runHeartRate = finiteNumberOrNull(runSummary.average_heart_rate);
   const todayVolume = finiteNumberOrNull(lift?.today_volume);
-  const recoveryTrend = arrayOrEmpty<Record<string, string | number>>(recovery?.trend);
-  const recoverySleep = arrayOrEmpty<Record<string, string | number>>(recovery?.sleep);
-  const recoveryHrv = arrayOrEmpty<Record<string, string | number>>(recovery?.hrv);
-  const recoveryRestingHr = arrayOrEmpty<Record<string, string | number>>(recovery?.resting_hr);
   const recoveryScore = finiteNumberOrNull(recovery?.latest_score);
   const extraRunReasoning = stringList(recovery?.extra_run_readiness?.reasoning);
   const macroWeeklyScore = finiteNumberOrNull(macroAdherence?.weekly_score);
@@ -3948,163 +4047,193 @@ function Dashboard({
         ) : <p className="mt-4 text-sm text-zinc-500">{weight?.message ?? "No bodyweight data yet."}</p>}
       </Card>
 
-      <Card>
-        <SectionHeader eyebrow="Training" title="Today's Training" action={<button onClick={() => setActivePage("training")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Training</button>} />
-        <div className="space-y-3">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Planned</p>
-            <p className="mt-1 text-xl font-semibold text-white">Today: {plannedWorkout}</p>
-          </div>
-          <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Completed</p>
-            <p className="mt-1 text-sm font-semibold text-zinc-100">{completedTraining ? `Completed: ${completedTraining}` : "Workout not logged yet"}</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <span className={cx("rounded-full border px-2.5 py-1 text-xs font-medium", lift?.schedule_match === "matched" || lift?.schedule_match === "matched_plus_extra_run" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : lift?.schedule_match === "different" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.04] text-zinc-400")}>
-                {stringOrFallback(lift?.match_label, "Workout not logged yet")}
-              </span>
-              {stringOrFallback(lift?.cardio_indicator) ? <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">{stringOrFallback(lift?.cardio_indicator)}</span> : null}
-              {trainingSources.map((source) => (
-                <span key={source} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{source}</span>
-              ))}
-            </div>
-            {stringOrFallback(lift?.recovery_status_relative_to_plan) ? <p className="mt-2 text-xs text-zinc-500">Recovery context: {stringOrFallback(lift?.recovery_status_relative_to_plan)}</p> : null}
-          </div>
-        </div>
-        {lift?.extra_run_added ? <p className="accent-outline mt-3 rounded-lg border p-3 text-sm font-semibold">Recovery run added</p> : null}
-        {todayVolume !== null ? <p className="mt-4 text-sm text-amber-200">Lift volume: {Math.round(todayVolume).toLocaleString()}</p> : null}
-        {stringOrFallback(lift?.comparison) ? <p className="mt-2 text-xs text-zinc-500">{stringOrFallback(lift?.comparison)}</p> : null}
-        {runDistanceMiles !== null ? (
-          <div className="mt-4 border-t border-white/10 pt-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
-            <p className="accent-text-strong mt-1 text-sm font-semibold">
-              {runDistanceMiles.toFixed(2)} mi{runCount > 1 ? " total" : ""} · {formatRunDuration(runDurationMinutes)} · {formatRunPace(runPace)}{runCount > 1 ? " avg" : ""}
-            </p>
-            {(runCalories || runHeartRate) ? (
-              <p className="mt-1 text-xs text-zinc-500">
-                {[runCalories ? `${Math.round(runCalories)} kcal` : "", runHeartRate ? `${Math.round(runHeartRate)} bpm avg` : ""].filter(Boolean).join(" · ")}
-              </p>
-            ) : null}
-          </div>
-        ) : null}
-      </Card>
-
-      <Card>
-        <SectionHeader eyebrow="Training" title="Workout Quality" />
-        <div className="flex items-center gap-4">
-          <div className={`grid h-20 w-20 shrink-0 place-items-center rounded-full border-4 bg-white/[0.035] ${qualityStyles.ring}`}>
-            <span className="text-xl font-semibold">{workoutQualityScoreText(workoutQuality?.score)}</span>
-          </div>
-          <div className="min-w-0">
-            <p className="text-xl font-semibold text-white">{stringOrFallback(workoutQuality?.rating, stringOrFallback(workoutQuality?.score_label, "No recent lift"))}</p>
-            <p className="mt-2 text-sm font-semibold text-zinc-100">{workoutQualityTitle || "Latest lift pending"}</p>
-            <p className="mt-1 text-xs uppercase tracking-[0.12em] text-zinc-500">{workoutQualityMeta || "Lift summary"}</p>
-          </div>
-        </div>
-        <p className="mt-4 text-sm leading-6 text-zinc-400">{stringOrFallback(workoutQuality?.summary, stringOrFallback(workoutQuality?.explanation, "No recent lifting workout found."))}</p>
-        {qualityExerciseChanges ? <p className="mt-2 text-xs leading-5 text-zinc-500">{qualityExerciseChanges}</p> : null}
-        <div className="mt-4 h-2 rounded-full bg-white/10">
-          <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${qualityScorePercent}%` }} />
-        </div>
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${qualityStyles.badge}`}>
-            {stringOrFallback(workoutQuality?.confidence, "low")} confidence
-          </span>
-          {workoutMuscleGroups.map((group) => (
-            <span key={group} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{group}</span>
-          ))}
-          {qualityComparison ? <span className="text-xs text-zinc-500">{qualityComparison}</span> : null}
-        </div>
-      </Card>
-
-      <Card>
-        <SectionHeader eyebrow="Wearables" title="Recovery" action={<button onClick={() => setActivePage("settings")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Connect wearable</button>} />
-        {recovery?.connected ? (
-          <div className="space-y-3">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <p className="text-3xl font-semibold text-white">{recoveryScore !== null ? Math.round(recoveryScore) : "Sync pending"}</p>
-                <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{stringOrFallback(recovery.classification, "sync pending")}</p>
-              </div>
-              <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{stringOrFallback(recovery.source, "wearable")}</p>
-            </div>
-            <WearableMiniChart title="Recovery trend" data={recoveryTrend} dataKey="recovery_score" stroke="#34d399" />
-            <WearableMiniChart title="Sleep trend" data={recoverySleep} dataKey="sleep_hours" stroke="#60a5fa" />
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <WearableMiniChart title="HRV trend" data={recoveryHrv} dataKey="hrv" stroke="#a78bfa" />
-              <WearableMiniChart title="Resting HR trend" data={recoveryRestingHr} dataKey="resting_hr" stroke="#fb7185" />
-            </div>
-            <p className="text-sm text-zinc-500">{stringOrFallback(recovery.message, "Recovery data sync pending.")}</p>
-          </div>
-        ) : (
-          <EmptyState title="Connect Fitbit/Google Health to enable recovery tracking." description="Recovery will show wearable sleep, HRV, resting HR, and readiness trends once connected." action="Connect wearable" onAction={() => setActivePage("settings")} />
-        )}
-        <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-4">
-          <div className="flex items-center justify-between gap-3">
-            <p className="text-sm font-semibold text-white">Extra Run Today?</p>
-            <span className={`rounded-full border px-3 py-1 text-xs font-medium capitalize ${statusBadgeClass(String(recovery?.extra_run_readiness?.status ?? "insufficient_data"))}`}>
-              {String(recovery?.extra_run_readiness?.status ?? "insufficient data").replace("_", " ")}
-            </span>
-          </div>
-          <p className="mt-3 text-sm leading-6 text-zinc-300">{stringOrFallback(recovery?.extra_run_readiness?.message, "Connect wearable data for run readiness.")}</p>
-          <p className="accent-text-strong mt-2 text-sm font-semibold">{stringOrFallback(recovery?.extra_run_readiness?.recommended_run, "Connect wearable data")}</p>
-          {extraRunReasoning.length ? (
-            <p className="mt-2 text-xs leading-5 text-zinc-500">{extraRunReasoning[0]}</p>
-          ) : null}
-        </div>
-      </Card>
-
-      <TargetSectionErrorBoundary title="Optimization signals unavailable" description="Insufficient recommendation data for this dashboard tile." resetKey={`${data?.date ?? ""}-${recommendationConfidence}`}>
+      <TargetSectionErrorBoundary title="Training tile unavailable" description="Training and workout-quality data could not render safely." resetKey={`${data?.date ?? ""}-${workoutQuality?.score ?? ""}`}>
         <Card className="xl:col-span-2">
-          <SectionHeader eyebrow="Adaptive" title="Optimization Signals" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Details</button>} />
-        {nutritionRecommendation || adaptiveRecommendation ? (
-          <button
-            type="button"
-            onClick={() => setActivePage("goals")}
-            className="mb-3 w-full rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-3 text-left transition hover:bg-emerald-300/[0.08]"
-          >
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <SectionHeader eyebrow="Training" title="Today's Training" action={<button onClick={() => setActivePage("training")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Training</button>} />
+          <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.7fr)]">
+            <div className="space-y-3">
               <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Nutrition recommendation</p>
-                <p className="mt-1 text-sm font-semibold text-white">
-                  {recommendationTitle}
-                </p>
-                <p className="mt-1 text-xs leading-5 text-zinc-400">{recommendationReason}</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Planned</p>
+                <p className="mt-1 text-xl font-semibold text-white">Today: {plannedWorkout}</p>
               </div>
-              <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
-                {recommendationConfidence} · {Math.round(recommendationDataQualityScore)}/100
-              </span>
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Completed</p>
+                <p className="mt-1 text-sm font-semibold text-zinc-100">{completedTraining ? `Completed: ${completedTraining}` : "Workout not logged yet"}</p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <span className={cx("rounded-full border px-2.5 py-1 text-xs font-medium", lift?.schedule_match === "matched" || lift?.schedule_match === "matched_plus_extra_run" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : lift?.schedule_match === "different" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.04] text-zinc-400")}>
+                    {stringOrFallback(lift?.match_label, "Workout not logged yet")}
+                  </span>
+                  {stringOrFallback(lift?.cardio_indicator) ? <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">{stringOrFallback(lift?.cardio_indicator)}</span> : null}
+                  {trainingSources.map((source) => (
+                    <span key={source} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{source}</span>
+                  ))}
+                </div>
+                {stringOrFallback(lift?.recovery_status_relative_to_plan) ? <p className="mt-2 text-xs text-zinc-500">Recovery context: {stringOrFallback(lift?.recovery_status_relative_to_plan)}</p> : null}
+              </div>
+              {lift?.extra_run_added ? <p className="accent-outline rounded-lg border p-3 text-sm font-semibold">Recovery run added</p> : null}
+              {todayVolume !== null ? <p className="text-sm text-amber-200">Lift volume: {Math.round(todayVolume).toLocaleString()}</p> : null}
+              {stringOrFallback(lift?.comparison) ? <p className="text-xs text-zinc-500">{stringOrFallback(lift?.comparison)}</p> : null}
+              {runDistanceMiles !== null ? (
+                <div className="border-t border-white/10 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
+                  <p className="accent-text-strong mt-1 text-sm font-semibold">
+                    {runDistanceMiles.toFixed(2)} mi{runCount > 1 ? " total" : ""} · {formatRunDuration(runDurationMinutes)} · {formatRunPace(runPace)}{runCount > 1 ? " avg" : ""}
+                  </p>
+                  {(runCalories || runHeartRate) ? (
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {[runCalories ? `${Math.round(runCalories)} kcal` : "", runHeartRate ? `${Math.round(runHeartRate)} bpm avg` : ""].filter(Boolean).join(" · ")}
+                    </p>
+                  ) : null}
+                </div>
+              ) : null}
             </div>
-            {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
-          </button>
-        ) : null}
-        <div className="grid gap-3 xl:grid-cols-3">
-          <div className="accent-outline rounded-lg border p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{macroWeeklyScore !== null ? `${Math.round(macroWeeklyScore)}%` : "--"}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{stringOrFallback(macroAdherence?.summary, "Insufficient finalized nutrition data.")}</p>
-          </div>
-          <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau watch</p>
-            {topPlateauAlerts.length ? (
-              <div className="mt-2 space-y-2">
-                {topPlateauAlerts.slice(0, 2).map((alert) => (
-                  <p key={`${alert.type}-${alert.name}-${alert.signal}`} className="text-sm leading-5 text-amber-50">{stringOrFallback(alert.message, "Possible plateau signal needs more data.")}</p>
-                ))}
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <div className="flex items-center gap-4">
+                <div className={`grid h-20 w-20 shrink-0 place-items-center rounded-full border-4 bg-white/[0.035] ${qualityStyles.ring}`}>
+                  <span className="text-xl font-semibold">{workoutQualityScoreText(workoutQuality?.score)}</span>
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Workout quality</p>
+                  <p className="mt-1 text-xl font-semibold text-white">{stringOrFallback(workoutQuality?.rating, stringOrFallback(workoutQuality?.score_label, "No recent lift"))}</p>
+                  <p className="mt-2 text-sm font-semibold text-zinc-100">{workoutQualityTitle || "Latest lift pending"}</p>
+                  <p className="mt-1 text-xs uppercase tracking-[0.12em] text-zinc-500">{workoutQualityMeta || "Lift summary"}</p>
+                </div>
               </div>
-            ) : (
-              <p className="mt-2 text-sm leading-5 text-zinc-400">{stringOrFallback(plateauWatch?.summary, "Insufficient data for plateau detection.")}</p>
-            )}
+              <p className="mt-4 text-sm leading-6 text-zinc-400">{stringOrFallback(workoutQuality?.summary, stringOrFallback(workoutQuality?.explanation, "No recent lifting workout found."))}</p>
+              {qualityExerciseChanges ? <p className="mt-2 text-xs leading-5 text-zinc-500">{qualityExerciseChanges}</p> : null}
+              <div className="mt-4 h-2 rounded-full bg-white/10">
+                <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${qualityScorePercent}%` }} />
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${qualityStyles.badge}`}>
+                  {stringOrFallback(workoutQuality?.confidence, "low")} confidence
+                </span>
+                {workoutMuscleGroups.map((group) => (
+                  <span key={group} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{group}</span>
+                ))}
+                {qualityComparison ? <span className="text-xs text-zinc-500">{qualityComparison}</span> : null}
+              </div>
+            </div>
           </div>
-          <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-3">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
-            <p className="mt-2 text-sm font-semibold text-white">{baselineTitle}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{baselineSummary}</p>
-          </div>
-        </div>
         </Card>
       </TargetSectionErrorBoundary>
 
-      <WeeklyPerformanceReportCard report={weeklyReport} onViewDetails={() => setActivePage("history")} />
+      <TargetSectionErrorBoundary title="Recovery tile unavailable" description="Recovery data could not render safely." resetKey={`${data?.date ?? ""}-${recoveryScore ?? ""}`}>
+        <Card>
+          <SectionHeader
+            eyebrow="Recovery"
+            title="Readiness"
+            action={!recovery?.connected ? <button onClick={() => setActivePage("settings")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Connect</button> : <button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Open</button>}
+          />
+          {recoveryScore !== null || recovery?.connected ? (
+            <div>
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-3xl font-semibold text-white">{recoveryScore !== null ? Math.round(recoveryScore) : "--"}</p>
+                  <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{stringOrFallback(recovery?.classification, "sync pending")}</p>
+                </div>
+                <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{stringOrFallback(recovery?.source, "recovery")}</p>
+              </div>
+              <p className="mt-4 text-sm leading-6 text-zinc-400">{stringOrFallback(recovery?.message, "Recovery data sync pending.")}</p>
+            </div>
+          ) : (
+            <p className="text-sm leading-6 text-zinc-400">No recovery data yet</p>
+          )}
+          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-3">
+            <div className="flex items-center justify-between gap-3">
+              <p className="text-sm font-semibold text-white">Extra run</p>
+              <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${statusBadgeClass(String(recovery?.extra_run_readiness?.status ?? "insufficient_data"))}`}>
+                {String(recovery?.extra_run_readiness?.status ?? "insufficient data").replace("_", " ")}
+              </span>
+            </div>
+            <p className="mt-2 text-sm leading-6 text-zinc-300">{stringOrFallback(recovery?.extra_run_readiness?.message, "Connect wearable data for run readiness.")}</p>
+            {extraRunReasoning.length ? (
+              <p className="mt-1 text-xs leading-5 text-zinc-500">{extraRunReasoning[0]}</p>
+            ) : null}
+          </div>
+        </Card>
+      </TargetSectionErrorBoundary>
+
+      <TargetSectionErrorBoundary title="Optimization signals unavailable" description="Insufficient recommendation data for this dashboard tile." resetKey={`${data?.date ?? ""}-${recommendationConfidence}`}>
+        <Card className="xl:col-span-2">
+          <button
+            type="button"
+            aria-expanded={signalsExpanded}
+            onClick={() => setSignalsExpanded((value) => !value)}
+            className="flex w-full items-center justify-between gap-4 text-left"
+          >
+            <div className="min-w-0">
+              <p className="accent-text text-xs font-semibold uppercase tracking-[0.18em]">Adaptive</p>
+              <h2 className="mt-1 text-lg font-semibold text-white">Signals</h2>
+              <p className="mt-1 truncate text-sm text-zinc-400">{recommendationReason}</p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs font-semibold capitalize text-zinc-200">
+                {recommendationConfidence}
+              </span>
+              <ChevronDown className={cx("h-5 w-5 text-zinc-400 transition-transform duration-200", signalsExpanded && "rotate-180")} />
+            </div>
+          </button>
+          {signalsExpanded ? (
+            <div className="mt-4 border-t border-white/10 pt-4">
+              <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <p className="text-sm font-semibold text-white">Optimization Signals</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500">{weeklyReport?.summary ?? "Weekly report details live in Data & History."}</p>
+                </div>
+                <button onClick={() => setActivePage("history")} className="w-fit rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">
+                  Weekly Report
+                </button>
+              </div>
+              {nutritionRecommendation || adaptiveRecommendation ? (
+                <button
+                  type="button"
+                  onClick={() => setActivePage("goals")}
+                  className="mb-3 w-full rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-3 text-left transition hover:bg-emerald-300/[0.08]"
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Nutrition recommendation</p>
+                      <p className="mt-1 text-sm font-semibold text-white">
+                        {recommendationTitle}
+                      </p>
+                      <p className="mt-1 text-xs leading-5 text-zinc-400">{recommendationReason}</p>
+                    </div>
+                    <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
+                      {recommendationConfidence} · {Math.round(recommendationDataQualityScore)}/100
+                    </span>
+                  </div>
+                  {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
+                </button>
+              ) : null}
+              <div className="grid gap-3 xl:grid-cols-3">
+                <div className="accent-outline rounded-lg border p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
+                  <p className="mt-2 text-2xl font-semibold text-white">{macroWeeklyScore !== null ? `${Math.round(macroWeeklyScore)}%` : "--"}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{stringOrFallback(macroAdherence?.summary, "Insufficient finalized nutrition data.")}</p>
+                </div>
+                <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau watch</p>
+                  {topPlateauAlerts.length ? (
+                    <div className="mt-2 space-y-2">
+                      {topPlateauAlerts.slice(0, 2).map((alert) => (
+                        <p key={`${alert.type}-${alert.name}-${alert.signal}`} className="text-sm leading-5 text-amber-50">{stringOrFallback(alert.message, "Possible plateau signal needs more data.")}</p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="mt-2 text-sm leading-5 text-zinc-400">{stringOrFallback(plateauWatch?.summary, "Insufficient data for plateau detection.")}</p>
+                  )}
+                </div>
+                <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
+                  <p className="mt-2 text-sm font-semibold text-white">{baselineTitle}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{baselineSummary}</p>
+                </div>
+              </div>
+            </div>
+          ) : null}
+        </Card>
+      </TargetSectionErrorBoundary>
 
       <Card className="col-span-full">
         <SectionHeader
@@ -5283,8 +5412,11 @@ function FoodPage({
                 <p><span className="font-semibold text-white">diagnostic_force_openai:</span> {foodAiDebug.diagnostic_force_openai === undefined ? "false" : String(foodAiDebug.diagnostic_force_openai)}</p>
                 <p><span className="font-semibold text-white">openai_called:</span> {foodAiDebug.openai_called === undefined ? "unknown" : String(foodAiDebug.openai_called)}</p>
                 <p><span className="font-semibold text-white">model_used:</span> {foodAiDebug.model_used || "unknown"}</p>
+                <p><span className="font-semibold text-white">escalated:</span> {foodAiDebug.escalated === undefined ? "false" : String(foodAiDebug.escalated)}</p>
+                <p><span className="font-semibold text-white">final_model:</span> {foodAiDebug.final_model || foodAiDebug.model_used || "unknown"}</p>
                 <p><span className="font-semibold text-white">parser_source:</span> {foodAiDebug.parser_source || "unknown"}</p>
                 <p><span className="font-semibold text-white">external_lookup_status:</span> {foodAiDebug.external_lookup_status || "unknown"}</p>
+                <p><span className="font-semibold text-white">estimated_cost_usd:</span> {Number.isFinite(foodAiDebug.estimated_cost_usd) ? `$${Number(foodAiDebug.estimated_cost_usd).toFixed(4)}` : "unknown"}</p>
                 <p><span className="font-semibold text-white">raw_items_count:</span> {foodAiDebug.raw_items_count ?? "unknown"}</p>
                 <p><span className="font-semibold text-white">normalized_items_count:</span> {foodAiDebug.normalized_items_count ?? foodAiDebug.parsedItemCount ?? 0}</p>
                 <p><span className="font-semibold text-white">frontend_received_items:</span> {foodAiDebug.frontend_received_items === undefined ? "unknown" : String(foodAiDebug.frontend_received_items)}</p>
@@ -5296,6 +5428,11 @@ function FoodPage({
                 <p><span className="font-semibold text-white">Saved rows:</span> {foodAiDebug.logCreated ?? 0}{foodAiDebug.logRequested !== undefined ? ` / ${foodAiDebug.logRequested}` : ""}</p>
                 <p><span className="font-semibold text-white">Refresh:</span> {foodAiDebug.refreshStatus || "not started"}</p>
               </div>
+              {foodAiDebug.escalation_reason ? (
+                <p className="mt-3 rounded-lg border border-amber-300/25 bg-amber-300/10 p-2 text-xs text-amber-100">
+                  Escalation reason: {foodAiDebug.escalation_reason}
+                </p>
+              ) : null}
               {foodAiDebug.exactError ? (
                 <p className="mt-3 rounded-lg border border-red-300/25 bg-red-300/10 p-2 text-xs text-red-100">
                   {foodAiDebug.exactError}
@@ -5356,6 +5493,7 @@ function FoodPage({
                   <div className="space-y-2 text-sm text-zinc-400">
                     <span>Source</span>
                     <select className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition" value={food.source || "openai_estimate"} onChange={(event) => setParsedFoods((items) => items.map((item, itemIndex) => itemIndex === index ? { ...item, source: event.target.value } : item))}>
+                      <option value="saved_shortcut">Saved shortcut</option>
                       <option value="usda_fdc">USDA</option>
                       <option value="existing_database">Existing database</option>
                       <option value="openai_estimate">OpenAI estimate</option>
@@ -5364,6 +5502,9 @@ function FoodPage({
                   </div>
                   <div className={cx("sm:col-span-2 rounded-lg border p-3 text-sm", food.confidence === "low" || food.verification_status?.includes("unavailable") || food.verification_status?.includes("conflict") ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.035] text-zinc-300")}>
                     <p className="font-medium text-white">Review notes</p>
+                    {food.needs_confirmation || food.confidence === "low" ? (
+                      <p className="mt-1 font-medium text-amber-100">Needs confirmation before logging.</p>
+                    ) : null}
                     <p className="mt-1">Original: {food.original_text || food.food_name}</p>
                     {food.assumptions?.length ? (
                       <ul className="mt-2 list-disc space-y-1 pl-5">
@@ -5934,6 +6075,10 @@ function RecoveryPage({
   const sleepQualityScore = sleepWindow.length
     ? Math.round(Math.min(100, ((Math.min(sevenDaySleepAverage ?? 0, 8) / 8) * 70) + (((averageEfficiency ?? 80) / 100) * 30)))
     : null;
+  const adaptiveSignals = recordOrEmpty(adaptiveRecommendation?.signals);
+  const adaptiveRecoverySignal = recordOrEmpty(adaptiveSignals.recovery);
+  const adaptiveRecoveryStatus = stringOrFallback(adaptiveRecoverySignal.status);
+  const adaptiveRecoveryImplication = stringOrFallback(adaptiveRecoverySignal.nutrition_implication);
   const recoveryImpact = sleepQualityScore === null
     ? "Sleep tracking will appear here once Fitbit / Google Fit is connected."
     : sleepQualityScore >= 82
@@ -6172,15 +6317,15 @@ function RecoveryPage({
               <p className="text-sm font-semibold text-blue-100">Recovery impact</p>
               <p className="mt-2 text-sm leading-6 text-zinc-300">{recoveryImpact}</p>
             </div>
-            {adaptiveRecommendation?.signals.recovery ? (
+            {adaptiveRecoveryStatus || adaptiveRecoveryImplication ? (
               <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] p-4">
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                   <div>
                     <p className="text-sm font-semibold text-emerald-100">Nutrition impact</p>
-                    <p className="mt-2 text-sm leading-6 text-zinc-300">{adaptiveRecommendation.signals.recovery.nutrition_implication}</p>
+                    <p className="mt-2 text-sm leading-6 text-zinc-300">{adaptiveRecoveryImplication || "Adaptive data temporarily unavailable."}</p>
                   </div>
                   <span className="w-fit rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold capitalize text-emerald-100">
-                    {adaptiveRecommendation.signals.recovery.status}
+                    {adaptiveRecoveryStatus || "insufficient data"}
                   </span>
                 </div>
               </div>
@@ -7506,6 +7651,19 @@ function HistoryPage({
       : [];
   const latestHevyWorkoutDate = trainingSummaryStatus?.latest_hevy_workout_date ?? "";
   const latestHevyWorkoutTitle = trainingSummaryStatus?.latest_hevy_workout_title ?? "";
+  const historyAdaptiveSignals = recordOrEmpty(adaptiveRecommendation?.signals);
+  const historyBodyComposition = recordOrEmpty(historyAdaptiveSignals.bodyComposition);
+  const historyAdaptiveReasons = stringList(adaptiveRecommendation?.reasoning);
+  const historyAdaptiveTrends = stringList(adaptiveRecommendation?.detectedTrends);
+  const historyMissingWarnings = stringList(adaptiveRecommendation?.missingDataWarnings);
+  const optimizationMacroAdherence = recordOrEmpty(optimization?.macro_adherence);
+  const optimizationPlateau = recordOrEmpty(optimization?.plateau_detection);
+  const optimizationBaseline = recordOrEmpty(optimization?.personal_baseline);
+  const optimizationMacroComponents = recordOrEmpty(optimizationMacroAdherence.components);
+  const optimizationPlateauDetails = arrayOrEmpty<OptimizationData["plateau_detection"]["details"][number]>(optimizationPlateau.details);
+  const optimizationBaselineInsights = arrayOrEmpty<OptimizationData["personal_baseline"]["insights"][number]>(optimizationBaseline.insights);
+  const optimizationMacroDaily = arrayOrEmpty<OptimizationData["macro_adherence"]["daily"][number]>(optimizationMacroAdherence.daily);
+  const optimizationMacroCorrelations = arrayOrEmpty<OptimizationData["macro_adherence"]["correlations"][number]>(optimizationMacroAdherence.correlations);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -8108,9 +8266,9 @@ function HistoryPage({
             </div>
             <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.055] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Composition</p>
-              <p className="mt-2 text-lg font-semibold capitalize text-white">{adaptiveRecommendation.signals.bodyComposition?.lean_gain_quality ?? "unknown"}</p>
+              <p className="mt-2 text-lg font-semibold capitalize text-white">{stringOrFallback(historyBodyComposition.lean_gain_quality, "unknown")}</p>
               <p className="mt-2 text-sm leading-6 text-zinc-400">
-                Lean trend {adaptiveRecommendation.signals.bodyComposition?.lean_mass_trend_14 ?? "--"} lb/wk · Fat trend {adaptiveRecommendation.signals.bodyComposition?.fat_mass_trend_14 ?? "--"} lb/wk
+                Lean trend {formatWholeNumber(historyBodyComposition.lean_mass_trend_14)} lb/wk · Fat trend {formatWholeNumber(historyBodyComposition.fat_mass_trend_14)} lb/wk
               </p>
             </div>
           </div>
@@ -8118,19 +8276,19 @@ function HistoryPage({
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
               <p className="text-sm font-semibold text-white">Why it changed</p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
-                {(adaptiveRecommendation.reasoning.length ? adaptiveRecommendation.reasoning : ["No target change is currently justified."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+                {(historyAdaptiveReasons.length ? historyAdaptiveReasons : ["No target change is currently justified."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
               </ul>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
               <p className="text-sm font-semibold text-white">Personal trends</p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
-                {(adaptiveRecommendation.detectedTrends?.length ? adaptiveRecommendation.detectedTrends : ["More overlapping history is needed before stronger personal trends are useful."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+                {(historyAdaptiveTrends.length ? historyAdaptiveTrends : ["More overlapping history is needed before stronger personal trends are useful."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
               </ul>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
               <p className="text-sm font-semibold text-white">Data gaps</p>
               <ul className="mt-3 space-y-2 text-sm leading-6 text-zinc-400">
-                {(adaptiveRecommendation.missingDataWarnings?.length ? adaptiveRecommendation.missingDataWarnings : ["No major data gaps detected."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
+                {(historyMissingWarnings.length ? historyMissingWarnings : ["No major data gaps detected."]).slice(0, 6).map((item) => <li key={item}>{item}</li>)}
               </ul>
             </div>
           </div>
@@ -8142,19 +8300,19 @@ function HistoryPage({
           <div className="grid gap-3 lg:grid-cols-3">
             <div className="accent-outline rounded-lg border p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
-              <p className="mt-2 text-3xl font-semibold text-white">{optimization.macro_adherence.weekly_score !== null ? Math.round(optimization.macro_adherence.weekly_score) : "--"}</p>
-              <p className="mt-2 text-sm leading-6 text-zinc-400">{optimization.macro_adherence.summary}</p>
+              <p className="mt-2 text-3xl font-semibold text-white">{formatWholeNumber(optimizationMacroAdherence.weekly_score)}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">{stringOrFallback(optimizationMacroAdherence.summary, "Adaptive data temporarily unavailable.")}</p>
               <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
-                {Object.entries(optimization.macro_adherence.components).map(([key, value]) => (
-                  <span key={key} className="rounded-lg border border-white/10 bg-black/10 px-2 py-1 capitalize text-zinc-300">{key}: {value !== null ? Math.round(value) : "--"}</span>
+                {Object.entries(optimizationMacroComponents).map(([key, value]) => (
+                  <span key={key} className="rounded-lg border border-white/10 bg-black/10 px-2 py-1 capitalize text-zinc-300">{key}: {formatWholeNumber(value)}</span>
                 ))}
               </div>
             </div>
             <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau detection</p>
-              <p className="mt-2 text-sm leading-6 text-zinc-300">{optimization.plateau_detection.summary}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-300">{stringOrFallback(optimizationPlateau.summary, "Adaptive data temporarily unavailable.")}</p>
               <div className="mt-3 space-y-2">
-                {(optimization.plateau_detection.details.length ? optimization.plateau_detection.details : [{ name: "Clear", message: "No conservative plateau flags are active.", severity: "low", signal: "clear", duration_weeks: 0, type: "clear", muscle_group: "" }]).slice(0, 5).map((alert) => (
+                {(optimizationPlateauDetails.length ? optimizationPlateauDetails : [{ name: "Clear", message: "No conservative plateau flags are active.", severity: "low", signal: "clear", duration_weeks: 0, type: "clear", muscle_group: "" }]).slice(0, 5).map((alert) => (
                   <div key={`${alert.type}-${alert.name}-${alert.signal}`} className="rounded-lg border border-white/10 bg-black/10 p-2">
                     <p className="text-sm font-semibold text-white">{alert.name}</p>
                     <p className="mt-1 text-xs leading-5 text-zinc-400">{alert.message}</p>
@@ -8164,9 +8322,9 @@ function HistoryPage({
             </div>
             <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-4">
               <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
-              <p className="mt-2 text-sm leading-6 text-zinc-300">{optimization.personal_baseline.summary}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-300">{stringOrFallback(optimizationBaseline.summary, "Adaptive data temporarily unavailable.")}</p>
               <div className="mt-3 space-y-2">
-                {(optimization.personal_baseline.insights.length ? optimization.personal_baseline.insights : [{ title: "Learning", summary: "More overlapping history is needed before baseline ranges are useful.", confidence: "low", metric: "learning" }]).slice(0, 5).map((insight) => (
+                {(optimizationBaselineInsights.length ? optimizationBaselineInsights : [{ title: "Learning", summary: "More overlapping history is needed before baseline ranges are useful.", confidence: "low", metric: "learning" }]).slice(0, 5).map((insight) => (
                   <div key={`${insight.metric}-${insight.title}`} className="rounded-lg border border-white/10 bg-black/10 p-2">
                     <div className="flex items-center justify-between gap-2">
                       <p className="text-sm font-semibold text-white">{insight.title}</p>
@@ -8178,10 +8336,10 @@ function HistoryPage({
               </div>
             </div>
           </div>
-          {optimization.macro_adherence.daily.length ? (
+          {optimizationMacroDaily.length ? (
             <ChartFrame className="mt-4 h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <RechartsLineChart data={optimization.macro_adherence.daily}>
+                <RechartsLineChart data={optimizationMacroDaily}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} />
@@ -8191,9 +8349,9 @@ function HistoryPage({
               </ResponsiveContainer>
             </ChartFrame>
           ) : null}
-          {optimization.macro_adherence.correlations.length ? (
+          {optimizationMacroCorrelations.length ? (
             <div className="mt-4 grid gap-3 md:grid-cols-3">
-              {optimization.macro_adherence.correlations.map((correlation) => (
+              {optimizationMacroCorrelations.map((correlation) => (
                 <div key={correlation.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
                   <p className="text-sm font-semibold text-white">{correlation.label}</p>
                   <p className="mt-2 text-xs leading-5 text-zinc-400">{correlation.summary}</p>
@@ -9935,8 +10093,8 @@ function initialIntegrationNotice(kind: "message" | "error") {
   return null;
 }
 
-export default function Home() {
-  const [activePage, setActivePage] = useState<PageId>(() => initialPageFromUrl());
+function HomeContent() {
+  const [activePage, setActivePage] = useState<PageId>("dashboard");
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [nutritionLogs, setNutritionLogs] = useState<NutritionEntry[]>([]);
   const [nutritionHistory, setNutritionHistory] = useState<DailyNutritionSummary[]>([]);
@@ -9992,8 +10150,8 @@ export default function Home() {
   const [hevySyncing, setHevySyncing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("Waking backend...");
-  const [message, setMessage] = useState<string | null>(() => initialIntegrationNotice("message"));
-  const [apiError, setApiError] = useState<string | null>(() => initialIntegrationNotice("error"));
+  const [message, setMessage] = useState<string | null>(null);
+  const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
   const [systemFailure, setSystemFailure] = useState<SystemFailureReport | null>(null);
   const [rateLimited, setRateLimited] = useState(false);
@@ -10008,6 +10166,15 @@ export default function Home() {
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
+
+  useEffect(() => {
+    const timeout = window.setTimeout(() => {
+      setActivePage(initialPageFromUrl());
+      setMessage(initialIntegrationNotice("message"));
+      setApiError(initialIntegrationNotice("error"));
+    }, 0);
+    return () => window.clearTimeout(timeout);
+  }, []);
 
   useLayoutEffect(() => {
     const measureActiveNavItems = () => {
@@ -10494,11 +10661,11 @@ export default function Home() {
     });
     setDashboard((current) => {
       if (!current || current.date !== date) return current;
-      const targets = current.targets;
+      const targets = recordOrEmpty(current.targets);
       const totals = payload.totals;
-      const metric = (value: number, target: number | null | undefined) => {
+      const metric = (value: number, target: unknown) => {
         const safeValue = Number(value) || 0;
-        const safeTarget = target ? Number(target) : null;
+        const safeTarget = finiteNumberOrNull(target);
         return {
           eaten: safeValue,
           target: safeTarget,
@@ -10520,7 +10687,7 @@ export default function Home() {
           protein: metric(totals.protein, targets.protein_grams),
           carbs: metric(totals.carbs, targets.carb_grams),
           fat: metric(totals.fat, targets.fat_grams),
-          has_targets: Boolean(targets.target_calories && targets.protein_grams && targets.carb_grams && targets.fat_grams),
+          has_targets: Boolean(finiteNumberOrNull(targets.target_calories) && finiteNumberOrNull(targets.protein_grams) && finiteNumberOrNull(targets.carb_grams) && finiteNumberOrNull(targets.fat_grams)),
           has_food_logged: Boolean((Number(totals.calories) || 0) > 0 || (Number(totals.protein) || 0) > 0 || (Number(totals.carbs) || 0) > 0 || (Number(totals.fat) || 0) > 0),
         },
       };
@@ -10917,16 +11084,56 @@ export default function Home() {
     sugar: item.sugar_g,
     sodium: item.sodium_mg,
     confidence: item.confidence,
+    confidence_score: typeof item.confidence_score === "number" ? item.confidence_score : null,
     source: item.source,
     source_id: item.source_id,
     source_url: item.source_url ?? "",
     assumptions: item.assumptions,
-    needs_review: item.needs_review,
-    verification_needed: item.needs_review,
+    needs_review: Boolean(item.needs_review || item.needs_confirmation),
+    needs_confirmation: Boolean(item.needs_review || item.needs_confirmation),
+    verification_needed: Boolean(item.needs_review || item.needs_confirmation),
     verification_reason: item.assumptions.join(" "),
-    verification_status: item.needs_review ? "review_required" : "ready",
+    verification_status: item.needs_review || item.needs_confirmation ? "review_required" : "ready",
     notes: item.assumptions.join(" ") || "Review before saving.",
   });
+
+  const draftFromSavedFoodMatch = (match: Extract<SavedFoodMatch, { type: "shortcut" | "frequent" }>): ParsedFood => {
+    const isShortcut = match.type === "shortcut";
+    const item = match.item;
+    const shortcutItem = isShortcut ? item as FoodShortcut | PresetFoodShortcut : null;
+    const frequentItem = !isShortcut ? item as NutritionShortcutData["frequent_foods"][number] : null;
+    const name = shortcutItem?.shortcut_name ?? frequentItem?.food_name ?? match.label;
+    const sourceId = shortcutItem?.shortcut_id ?? frequentItem?.food_name ?? match.id;
+    return {
+      food_name: name,
+      display_name: name,
+      normalized_name: normalizeSearchText(name).replaceAll(" ", "_"),
+      original_text: aiText.trim() || name,
+      quantity: "1",
+      quantity_value: 1,
+      unit: "serving",
+      serving_description: "1 saved serving",
+      calories: Number(item.calories) || 0,
+      protein: Number(item.protein) || 0,
+      carbs: Number(item.carbs) || 0,
+      fat: Number(item.fat) || 0,
+      fiber: "fiber" in item ? item.fiber ?? null : null,
+      sugar: null,
+      sodium: "sodium" in item ? item.sodium ?? null : null,
+      confidence: "high",
+      confidence_score: 1,
+      source: match.type === "shortcut" ? "saved_shortcut" : "existing_database",
+      source_id: sourceId,
+      source_url: "",
+      assumptions: [`Matched ${match.type === "shortcut" ? "saved shortcut" : "frequent food"}: ${name}`],
+      needs_review: false,
+      needs_confirmation: false,
+      verification_needed: false,
+      verification_reason: "Exact stored macros were used before AI parsing.",
+      verification_status: "ready",
+      notes: match.type === "shortcut" && "notes" in item && item.notes ? item.notes : "Exact stored macros were used.",
+    };
+  };
 
   const parsedShortcutName = () => {
     const cleanText = aiText.trim();
@@ -11206,39 +11413,108 @@ export default function Home() {
               updateFoodAiFlowStep("Input", "ok", `${cleanedText.length} character(s) ready for analysis.`);
               updateFoodAiDebug({
                 endpoint_called: "/api/food/analyze-text",
-                request_body_received: { date: forms.nutrition.date, text: cleanedText },
+                request_body_received: { date: forms.nutrition.date, text: cleanedText, force_openai: forceAiParse },
                 frontend_received_items: false,
                 log_insert_attempted: false,
                 log_insert_success: false,
                 analyzeEndpoint: "/api/food/analyze-text",
-                analyzeRequestBody: { date: forms.nutrition.date, text: cleanedText },
+                analyzeRequestBody: { date: forms.nutrition.date, text: cleanedText, force_openai: forceAiParse },
                 analyzeResponseStatus: "pending",
                 parsedItemCount: 0,
               });
-              const savedMatch = findSavedFoodMatch(cleanedText, shortcutData.items, shortcutData.meal_templates, shortcutData.frequent_foods);
+              const shortcutCandidates = [...shortcutData.items, ...DEFAULT_PRESET_FOODS];
+              const savedMatch = findSavedFoodMatch(cleanedText, shortcutCandidates, shortcutData.meal_templates, shortcutData.frequent_foods);
               if (savedMatch && !forceAiParse) {
+                if (savedMatch.type === "shortcut" || savedMatch.type === "frequent") {
+                  const drafts = [draftFromSavedFoodMatch(savedMatch)];
+                  setForceAiParse(false);
+                  setShortcutSuggestion(null);
+                  setParsedFoods(drafts);
+                  setParseResult({
+                    foods: drafts,
+                    total: {
+                      calories: drafts.reduce((sum, food) => sum + (Number(food.calories) || 0), 0),
+                      protein: drafts.reduce((sum, food) => sum + (Number(food.protein) || 0), 0),
+                      carbs: drafts.reduce((sum, food) => sum + (Number(food.carbs) || 0), 0),
+                      fat: drafts.reduce((sum, food) => sum + (Number(food.fat) || 0), 0),
+                    },
+                    source: "saved_shortcut",
+                    cached: true,
+                    success: true,
+                    error_code: null,
+                    message: "Matched exact stored macros. Review before saving.",
+                    parser: {
+                      default_model_used: false,
+                      escalated: false,
+                      final_model: "saved_shortcut",
+                      model_used: "saved_shortcut",
+                      estimated_input_tokens: 0,
+                      estimated_output_tokens: 0,
+                      estimated_cost_usd: 0,
+                    },
+                    debug: {
+                      backend_endpoint_reached: false,
+                      openai_called: false,
+                      parser_source: "saved_shortcut",
+                      parser_cached: true,
+                      final_model: "saved_shortcut",
+                      estimated_input_tokens: 0,
+                      estimated_output_tokens: 0,
+                      estimated_cost_usd: 0,
+                    },
+                  });
+                  updateFoodAiDebug({
+                    analyzeResponseStatus: "ok",
+                    analyzeResponseMs: Math.round(performance.now() - parseStarted),
+                    openai_called: false,
+                    model_used: "saved_shortcut",
+                    parser_source: "saved_shortcut",
+                    external_lookup_status: "skipped",
+                    raw_items_count: drafts.length,
+                    normalized_items_count: drafts.length,
+                    response_shape: { has_items: true, has_foods: true, has_totals: true, has_total: true, status: "ok" },
+                    frontend_received_items: true,
+                    parsedItemCount: drafts.length,
+                    default_model_used: false,
+                    escalated: false,
+                    final_model: "saved_shortcut",
+                    estimated_input_tokens: 0,
+                    estimated_output_tokens: 0,
+                    estimated_cost_usd: 0,
+                  });
+                  updateFoodAiFlowStep("Saved match", "ok", `${savedMatch.label} matched exact stored macros.`);
+                  updateFoodAiFlowStep("Review", "ok", "Saved-food draft is visible below. Review it, then click Save to today.");
+                  return;
+                }
                 setShortcutSuggestion(savedMatch);
-                updateFoodAiDebug({ exactError: "Saved shortcut matched before AI parsing. Use it or choose Parse new anyway." });
+                updateFoodAiDebug({ exactError: "Saved meal template matched before AI parsing. Use it or choose Parse new anyway." });
                 updateFoodAiFlowStep("Saved match", "pending", `${savedMatch.label} matched locally. Use it or choose Parse new anyway.`);
-                throw new Error("Saved shortcut found. Use it or choose Parse new anyway.");
+                throw new Error("Saved meal template found. Use it or choose Parse new anyway.");
               }
               updateFoodAiFlowStep("Saved match", "ok", forceAiParse ? "Bypassing saved match and parsing new food." : "No saved shortcut blocked the parser.");
               setForceAiParse(false);
               setShortcutSuggestion(null);
               setParseLoading(true);
               updateFoodAiFlowStep("Request", "pending", "POST /api/food/analyze-text");
-              const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: cleanedText });
+              const analyzed = await apiSend<FoodAnalyzeResponse>("/api/food/analyze-text", "POST", { date: forms.nutrition.date, text: cleanedText, force_openai: forceAiParse });
               updateFoodAiFlowStep("Request", "ok", `/api/food/analyze-text responded in ${Math.round(performance.now() - parseStarted)}ms.`);
               const analyzedItems = Array.isArray(analyzed.items) ? analyzed.items : Array.isArray(analyzed.foods) ? analyzed.foods : [];
               updateFoodAiDebug({
                 analyzeResponseStatus: analyzed.status || (analyzed.success ? "ok" : "error"),
                 analyzeResponseMs: Math.round(performance.now() - parseStarted),
                 openai_called: Boolean(analyzed.steps?.openai_called ?? analyzed.debug?.openai_called),
-                model_used: String(analyzed.steps?.model_used || analyzed.debug?.model || "unknown"),
+                model_used: String(analyzed.steps?.model_used || analyzed.parser?.final_model || analyzed.debug?.final_model || analyzed.debug?.model || "unknown"),
                 parser_source: String(analyzed.parser_source || analyzed.debug?.parser_source || analyzed.source || "unknown"),
                 external_lookup_status: String(analyzed.external_lookup_status || analyzed.debug?.external_lookup_status || "unknown"),
                 raw_items_count: Number(analyzed.steps?.raw_items_count ?? analyzedItems.length),
                 normalized_items_count: analyzedItems.length,
+                default_model_used: Boolean(analyzed.steps?.default_model_used ?? analyzed.parser?.default_model_used),
+                escalated: Boolean(analyzed.steps?.escalated ?? analyzed.parser?.escalated ?? analyzed.debug?.escalated),
+                escalation_reason: String(analyzed.steps?.escalation_reason || analyzed.parser?.escalation_reason || analyzed.debug?.escalation_reason || ""),
+                final_model: String(analyzed.steps?.model_used || analyzed.parser?.final_model || analyzed.debug?.final_model || ""),
+                estimated_input_tokens: Number(analyzed.steps?.estimated_input_tokens ?? analyzed.parser?.estimated_input_tokens ?? analyzed.debug?.estimated_input_tokens ?? 0),
+                estimated_output_tokens: Number(analyzed.steps?.estimated_output_tokens ?? analyzed.parser?.estimated_output_tokens ?? analyzed.debug?.estimated_output_tokens ?? 0),
+                estimated_cost_usd: Number(analyzed.steps?.estimated_cost_usd ?? analyzed.parser?.estimated_cost_usd ?? analyzed.debug?.estimated_cost_usd ?? 0),
                 response_shape: {
                   has_items: Array.isArray(analyzed.items),
                   has_foods: Array.isArray(analyzed.foods),
@@ -11271,6 +11547,7 @@ export default function Home() {
                 success: analyzed.success,
                 error_code: analyzed.error_code,
                 message: [analyzed.message, ...analyzed.warnings].filter(Boolean).join(" "),
+                parser: analyzed.parser,
                 debug: analyzed.debug,
               });
               setParsedFoods(drafts);
@@ -12084,7 +12361,13 @@ export default function Home() {
                 </div>
               </Card>
             ) : (
-              pageContent[activePage]
+              <TargetSectionErrorBoundary
+                title={`${currentPage.label} temporarily unavailable`}
+                description="Adaptive data temporarily unavailable."
+                resetKey={`${activePage}-${dashboard?.date ?? ""}-${dashboard?.targets?.target_calories ?? ""}`}
+              >
+                {pageContent[activePage]}
+              </TargetSectionErrorBoundary>
             )}
               </>
             )}

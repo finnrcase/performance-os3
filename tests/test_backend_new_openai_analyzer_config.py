@@ -68,6 +68,8 @@ def test_openai_config_agrees_across_settings_status_and_analyzer_when_missing()
     with (
         patch("src.ai.food_parser.openai_analyzer_config", return_value=config),
         patch("src.ai.food_parser.get_openai_key_status", return_value=False),
+        patch("src.ai.food_parser._local_saved_food_response", return_value=None),
+        patch("src.ai.food_parser._cached_response", return_value=None),
     ):
         settings = client.get("/api/settings").json()
         integrations = client.get("/api/integrations/status?external_checks=false").json()
@@ -367,7 +369,7 @@ def test_food_analyze_text_uses_openai_when_external_lookup_403s():
     assert "external nutrition lookup failed: 403" in result["warnings"]
 
 
-def test_food_route_defaults_to_openai_primary_and_fails_open_on_lookup_403():
+def test_food_route_uses_saved_food_first_then_openai_when_no_match():
     config = {
         "openai_key_configured": True,
         "api_key_source": "environment",
@@ -428,11 +430,11 @@ def test_food_route_defaults_to_openai_primary_and_fails_open_on_lookup_403():
     assert data["success"] is True
     assert data["items"][0]["display_name"] == "Beans"
     assert data["steps"]["openai_called"] is True
-    assert data["steps"]["force_openai"] is True
+    assert data["steps"]["force_openai"] is False
     assert data["parser_source"] == "openai"
     assert data["external_lookup_status"] == "failed_403"
     assert "external nutrition lookup failed: 403" in data["warnings"]
-    analyze_mock.assert_called_once_with("beans", force_openai=True)
+    analyze_mock.assert_called_once_with("beans", force_openai=False)
 
 
 def test_saved_food_match_does_not_hijack_multi_food_ai_parse():
@@ -441,3 +443,85 @@ def test_saved_food_match_does_not_hijack_multi_food_ai_parse():
     assert _saved_food_match("banana", "banana") is True
     assert _saved_food_match("banana and protein shake", "banana") is False
     assert _saved_food_match("banana, protein shake", "banana") is False
+
+
+def test_default_saved_food_shortcut_skips_openai():
+    from src.ai import food_parser
+
+    with (
+        patch("src.ai.food_parser.get_openai_key_status", return_value=False),
+        patch("src.ai.food_parser._call_openai") as openai_mock,
+        patch("src.ai.food_parser.search_food_macros") as usda_mock,
+    ):
+        result = food_parser.analyze_food_text("Built Puff Bar")
+
+    assert result["success"] is True
+    assert result["parser_source"] == "saved_shortcut"
+    assert result["items"][0]["display_name"] == "Built Puff Bar"
+    assert result["items"][0]["source"] == "existing_database"
+    assert result["items"][0]["calories"] == 140
+    assert result["parser"]["default_model_used"] is False
+    assert result["parser"]["escalated"] is False
+    openai_mock.assert_not_called()
+    usda_mock.assert_not_called()
+
+
+def test_ambiguous_food_escalates_after_default_parse():
+    from src.ai import food_parser
+
+    default_payload = {
+        "foods": [
+            {
+                "food_name": "Beans",
+                "display_name": "Beans",
+                "normalized_name": "beans",
+                "original_text": "beans",
+                "quantity": 1,
+                "unit": "cup",
+                "serving_description": "1 cup cooked beans",
+                "calories": 240,
+                "protein": 15,
+                "carbs": 44,
+                "fat": 1,
+                "fiber": 15,
+                "sugar": 1,
+                "sodium": 5,
+                "confidence": "medium",
+                "source": "openai_estimate",
+                "source_id": None,
+                "source_url": None,
+                "assumptions": ["Assumed one cup cooked beans."],
+                "needs_review": True,
+                "verification_needed": False,
+                "verification_reason": "",
+                "notes": "Estimate.",
+            }
+        ]
+    }
+    escalated_payload = {
+        "foods": [
+            {
+                **default_payload["foods"][0],
+                "confidence": "low",
+                "assumptions": ["Assumed cooked black beans, 1 cup."],
+                "needs_review": True,
+            }
+        ]
+    }
+
+    with (
+        patch("src.ai.food_parser.get_openai_key_status", return_value=True),
+        patch("src.ai.food_parser._get_openai_api_key", return_value="sk-test"),
+        patch("src.ai.food_parser._call_openai", side_effect=[default_payload, escalated_payload]) as openai_mock,
+        patch("src.ai.food_parser.search_food_macros", return_value=None),
+        patch("src.ai.food_parser.verify_food_online", return_value={"verified": False, "macros": {}, "source": "test", "confidence": "low", "message": "No confident external match."}),
+    ):
+        result = food_parser.analyze_food_text("beans", force_openai=True)
+
+    assert result["success"] is True
+    assert result["parser"]["default_model_used"] is True
+    assert result["parser"]["escalated"] is True
+    assert "Ambiguous" in result["parser"]["escalation_reason"]
+    assert result["items"][0]["needs_confirmation"] is True
+    assert result["items"][0]["confidence"] == "low"
+    assert openai_mock.call_count == 2

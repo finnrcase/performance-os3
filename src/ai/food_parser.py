@@ -52,10 +52,12 @@ FOOD_CACHE_COLUMNS = [
     "last_used_at",
 ]
 
-# Model used for structured food analysis. Override with the FOOD_ANALYSIS_MODEL
-# env var only when you intentionally want a different high-quality model.
-FOOD_ANALYSIS_DEFAULT_MODEL = "gpt-5.5"
-FOOD_ANALYSIS_REASONING_EFFORT = "medium"
+# Food parsing runs as a staged pipeline: exact local matches first, a fast
+# structured parser second, and a stronger parser only for ambiguous input.
+FOOD_ANALYSIS_DEFAULT_MODEL = "gpt-5.4-mini"
+FOOD_ANALYSIS_ESCALATION_DEFAULT_MODEL = "gpt-5.5"
+FOOD_ANALYSIS_REASONING_EFFORT = "low"
+FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT = "medium"
 DEPRECATED_OR_LOW_ACCURACY_MODELS = {
     "gpt-3.5-turbo",
     "gpt-4",
@@ -64,10 +66,52 @@ DEPRECATED_OR_LOW_ACCURACY_MODELS = {
     "gpt-4o-mini",
     "gpt-5-mini",
     "gpt-5-nano",
-    "gpt-5.4-mini",
     "gpt-5.4-nano",
 }
 CONFIDENCE_VALUES = {"low", "medium", "high"}
+CONFIDENCE_SCORES = {"low": 0.55, "medium": 0.72, "high": 0.92}
+LOW_CONFIDENCE_THRESHOLD = 0.75
+AMBIGUOUS_FOOD_TERMS = {
+    "beans",
+    "bowl",
+    "sandwich",
+    "shake",
+    "smoothie",
+    "wrap",
+    "salad",
+    "pasta",
+    "rice",
+    "chicken",
+    "beef",
+    "taco",
+    "burrito",
+    "plate",
+    "meal",
+}
+BRANDED_FOOD_HINTS = {
+    "built",
+    "nurri",
+    "oats overnight",
+    "kirkland",
+    "fairlife",
+    "chipotle",
+    "bibigo",
+    "quest",
+    "barebells",
+    "rxbar",
+}
+DEFAULT_SAVED_FOOD_SHORTCUTS: list[dict[str, Any]] = [
+    {"shortcut_id": "default-preset-built-puff-bar", "shortcut_name": "Built Puff Bar", "calories": 140, "protein": 17, "carbs": 15, "fat": 3, "fiber": 0, "notes": "Seed preset. Edit to match your label.", "source": "default_preset"},
+    {"shortcut_id": "default-preset-nurri-shake", "shortcut_name": "Nurri Shake", "calories": 150, "protein": 30, "carbs": 3, "fat": 3, "fiber": 0, "notes": "Seed preset. Edit to match your label.", "source": "default_preset"},
+    {"shortcut_id": "default-preset-oats-overnight", "shortcut_name": "Oats Overnight", "calories": 280, "protein": 20, "carbs": 35, "fat": 7, "fiber": 6, "notes": "Seed preset. Edit to match your label.", "source": "default_preset"},
+    {"shortcut_id": "default-preset-chicken-bowl", "shortcut_name": "Chicken Bowl", "calories": 650, "protein": 45, "carbs": 70, "fat": 20, "fiber": 8, "notes": "Seed preset. Edit to match your usual bowl.", "source": "default_preset"},
+    {"shortcut_id": "default-preset-banana", "shortcut_name": "Banana", "calories": 105, "protein": 1, "carbs": 27, "fat": 0, "fiber": 3, "notes": "Seed preset. Edit to match your usual serving.", "source": "default_preset"},
+]
+MODEL_COST_PER_MILLION_TOKENS = {
+    # Conservative estimates for internal cost visibility only.
+    "gpt-5.4-mini": {"input": 0.80, "output": 3.20},
+    "gpt-5.5": {"input": 5.00, "output": 15.00},
+}
 logger = logging.getLogger(__name__)
 
 _TITLE_MINOR_WORDS = {"of", "and", "with", "the", "a", "an", "in", "on", "to", "for"}
@@ -79,25 +123,43 @@ _LEADING_QUANTITY_RE = re.compile(
 )
 
 
-def food_analysis_model() -> str:
-    """Return the configured OpenAI model for food text analysis."""
-    model = os.getenv("FOOD_ANALYSIS_MODEL", "").strip() or FOOD_ANALYSIS_DEFAULT_MODEL
+def _configured_food_model(env_name: str, fallback: str) -> str:
+    model = os.getenv(env_name, "").strip() or fallback
     if model in DEPRECATED_OR_LOW_ACCURACY_MODELS:
         raise ValueError(
-            f"FOOD_ANALYSIS_MODEL={model} is not allowed for nutrition parsing. "
-            f"Use {FOOD_ANALYSIS_DEFAULT_MODEL} or another current high-intelligence model."
+            f"{env_name}={model} is not allowed for nutrition parsing. "
+            f"Use {fallback} or another current structured-output model."
         )
     return model
 
 
-def food_analysis_model_info() -> dict[str, Any]:
+def food_analysis_model() -> str:
+    """Return the configured fast/default OpenAI model for food text analysis."""
+    return _configured_food_model("FOOD_ANALYSIS_MODEL", FOOD_ANALYSIS_DEFAULT_MODEL)
+
+
+def food_analysis_escalation_model() -> str:
+    """Return the configured stronger model used only for low-confidence parses."""
+    return _configured_food_model("FOOD_ANALYSIS_ESCALATION_MODEL", FOOD_ANALYSIS_ESCALATION_DEFAULT_MODEL)
+
+
+def food_analysis_model_info(stage: str = "default") -> dict[str, Any]:
     """Return non-secret model configuration metadata for logs/debug."""
-    configured = os.getenv("FOOD_ANALYSIS_MODEL", "").strip()
+    is_escalation = stage == "escalation"
+    env_name = "FOOD_ANALYSIS_ESCALATION_MODEL" if is_escalation else "FOOD_ANALYSIS_MODEL"
+    configured = os.getenv(env_name, "").strip()
+    model = food_analysis_escalation_model() if is_escalation else food_analysis_model()
+    reasoning_env = "FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT" if is_escalation else "FOOD_ANALYSIS_REASONING_EFFORT"
+    fallback_effort = FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT if is_escalation else FOOD_ANALYSIS_REASONING_EFFORT
     return {
-        "model": food_analysis_model(),
+        "stage": stage,
+        "model": model,
+        "default_model": food_analysis_model(),
+        "escalation_model": food_analysis_escalation_model(),
         "model_source": "env" if configured else "default",
         "fallback_model_used": False,
-        "reasoning_effort": os.getenv("FOOD_ANALYSIS_REASONING_EFFORT", "").strip() or FOOD_ANALYSIS_REASONING_EFFORT,
+        "reasoning_effort": os.getenv(reasoning_env, "").strip() or fallback_effort,
+        "escalation_reasoning_effort": os.getenv("FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT", "").strip() or FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT,
         "supports_structured_outputs": True,
         "supports_image_input": True,
     }
@@ -202,9 +264,12 @@ def openai_analyzer_config() -> dict[str, Any]:
         "openai_key_configured": get_openai_key_status(),
         "api_key_source": "environment" if os.getenv("OPENAI_API_KEY", "").strip() else "settings" if _read_settings_key() else "missing",
         "model": model_info.get("model") or FOOD_ANALYSIS_DEFAULT_MODEL,
+        "default_model": model_info.get("default_model") or FOOD_ANALYSIS_DEFAULT_MODEL,
+        "escalation_model": model_info.get("escalation_model") or FOOD_ANALYSIS_ESCALATION_DEFAULT_MODEL,
         "model_source": model_info.get("model_source", "default"),
         "fallback_model_used": bool(model_info.get("fallback_model_used", False)),
         "reasoning_effort": model_info.get("reasoning_effort", FOOD_ANALYSIS_REASONING_EFFORT),
+        "escalation_reasoning_effort": model_info.get("escalation_reasoning_effort", FOOD_ANALYSIS_ESCALATION_REASONING_EFFORT),
         "supports_structured_outputs": bool(model_info.get("supports_structured_outputs", True)),
         "supports_image_input": bool(model_info.get("supports_image_input", True)),
         "model_error": model_error,
@@ -213,7 +278,10 @@ def openai_analyzer_config() -> dict[str, Any]:
 
 def _to_float(value: Any) -> float:
     try:
-        return round(max(float(value or 0), 0.0), 1)
+        parsed = float(value or 0)
+        if not pd.notna(parsed):
+            return 0.0
+        return round(max(parsed, 0.0), 1)
     except (TypeError, ValueError):
         return 0.0
 
@@ -222,9 +290,73 @@ def _optional_float(value: Any) -> float | None:
     try:
         if value in [None, ""]:
             return None
-        return round(max(float(value), 0.0), 1)
+        parsed = float(value)
+        if not pd.notna(parsed):
+            return None
+        return round(max(parsed, 0.0), 1)
     except (TypeError, ValueError):
         return None
+
+
+def _confidence_score(confidence: str | None, explicit_score: Any = None) -> float:
+    parsed = _optional_float(explicit_score)
+    if parsed is not None:
+        return round(min(max(parsed, 0.0), 1.0), 2)
+    return CONFIDENCE_SCORES.get(str(confidence or "medium").strip().lower(), CONFIDENCE_SCORES["medium"])
+
+
+def _estimated_token_count(value: Any) -> int:
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    return max(1, int(len(text) / 4))
+
+
+def _usage_value(usage: Any, *names: str) -> int | None:
+    for name in names:
+        value = getattr(usage, name, None)
+        if isinstance(value, (int, float)):
+            return int(value)
+        if isinstance(usage, dict) and isinstance(usage.get(name), (int, float)):
+            return int(usage[name])
+    return None
+
+
+def _estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> float:
+    rates = MODEL_COST_PER_MILLION_TOKENS.get(model, MODEL_COST_PER_MILLION_TOKENS.get(FOOD_ANALYSIS_ESCALATION_DEFAULT_MODEL, {"input": 0, "output": 0}))
+    cost = ((input_tokens / 1_000_000) * float(rates.get("input", 0))) + ((output_tokens / 1_000_000) * float(rates.get("output", 0)))
+    return round(cost, 6)
+
+
+def _call_cost_metadata(*, model: str, input_payload: Any, output_payload: Any, response: Any | None, stage: str, latency_ms: float) -> dict[str, Any]:
+    usage = getattr(response, "usage", None) if response is not None else None
+    input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens") or _estimated_token_count(input_payload)
+    output_tokens = _usage_value(usage, "output_tokens", "completion_tokens") or _estimated_token_count(output_payload)
+    return {
+        "stage": stage,
+        "model_used": model,
+        "estimated_input_tokens": input_tokens,
+        "estimated_output_tokens": output_tokens,
+        "estimated_cost_usd": _estimate_cost_usd(model, input_tokens, output_tokens),
+        "latency_ms": round(latency_ms, 1),
+    }
+
+
+def _parser_summary(calls: list[dict[str, Any]], *, escalated: bool, escalation_reason: str = "", final_model: str = "") -> dict[str, Any]:
+    final = final_model or (calls[-1].get("model_used") if calls else "")
+    return {
+        "default_model_used": any(call.get("stage") == "default" for call in calls),
+        "escalated": escalated,
+        "escalation_reason": escalation_reason,
+        "final_model": final,
+        "model_used": final,
+        "estimated_input_tokens": int(sum(int(call.get("estimated_input_tokens") or 0) for call in calls)),
+        "estimated_output_tokens": int(sum(int(call.get("estimated_output_tokens") or 0) for call in calls)),
+        "estimated_cost_usd": round(sum(float(call.get("estimated_cost_usd") or 0) for call in calls), 6),
+        "calls": calls,
+    }
+
+
+def _non_openai_parser_summary(source: str) -> dict[str, Any]:
+    return _parser_summary([], escalated=False, final_model=source)
 
 
 def _split_fallback_foods(food_text: str) -> list[str]:
@@ -254,53 +386,104 @@ def _saved_food_match(query: str, candidate_name: str) -> bool:
     return normalized_query in normalized_name
 
 
+def _shortcut_food(row: dict[str, Any], *, source_label: str, note: str) -> dict[str, Any]:
+    name = str(row.get("shortcut_name") or row.get("food_name") or row.get("name") or "").strip()
+    source_id = str(row.get("shortcut_id") or row.get("source_id") or "").strip() or None
+    return {
+        "food_name": name,
+        "display_name": name,
+        "normalized_name": _normalized_name(name),
+        "original_text": name,
+        "quantity": 1,
+        "unit": "serving",
+        "serving_description": str(row.get("serving_description") or "1 saved serving").strip(),
+        "calories": row.get("calories", 0),
+        "protein": row.get("protein", row.get("protein_g", 0)),
+        "carbs": row.get("carbs", row.get("carbs_g", 0)),
+        "fat": row.get("fat", row.get("fat_g", 0)),
+        "fiber": row.get("fiber", row.get("fiber_g")),
+        "sugar": row.get("sugar", row.get("sugar_g")),
+        "sodium": row.get("sodium", row.get("sodium_mg")),
+        "confidence": "high",
+        "confidence_score": 1,
+        "verification_needed": False,
+        "verification_reason": note,
+        "source": source_label,
+        "source_id": source_id,
+        "verification_status": "ready",
+        "source_url": str(row.get("source_url") or "").strip(),
+        "assumptions": [note],
+        "needs_review": False,
+        "needs_confirmation": False,
+        "notes": str(row.get("notes") or note).strip(),
+    }
+
+
+def _shortcut_response(row: dict[str, Any], *, source_label: str, note: str, message: str) -> dict[str, Any]:
+    return _response(
+        foods=[_shortcut_food(row, source_label=source_label, note=note)],
+        source=source_label,
+        cached=True,
+        success=True,
+        message=message,
+        parser=_non_openai_parser_summary(source_label),
+    )
+
+
 def _local_saved_food_response(query: str) -> dict | None:
     """Check reusable local foods before calling OpenAI."""
     try:
         from src.ai.nutrition_verifier import load_verified_food_cache
         from src.nutrition import load_food_shortcuts, load_frequent_foods
 
+        try:
+            from backend_new.db import fetch_json_rows
+
+            for row in fetch_json_rows("food_shortcuts", limit=500):
+                if not isinstance(row, dict) or row.get("_db_error"):
+                    continue
+                name = _normalize_query(row.get("shortcut_name", ""))
+                if _saved_food_match(query, name):
+                    return _shortcut_response(
+                        row,
+                        source_label="saved_shortcut",
+                        note="Matched saved shortcut before AI parsing.",
+                        message="Loaded exact macros from saved shortcut.",
+                    )
+        except Exception:
+            pass
+
         shortcuts = load_food_shortcuts()
         for _, row in shortcuts.iterrows():
             name = _normalize_query(row.get("shortcut_name", ""))
             if _saved_food_match(query, name):
-                food = {
-                    "food_name": row.get("shortcut_name", ""),
-                    "quantity": "",
-                    "calories": row.get("calories", 0),
-                    "protein": row.get("protein", 0),
-                    "carbs": row.get("carbs", 0),
-                    "fat": row.get("fat", 0),
-                    "confidence": "high",
-                    "verification_needed": False,
-                    "verification_reason": "Matched saved shortcut before OpenAI.",
-                    "source": "saved_shortcut",
-                    "verification_status": "cached",
-                    "source_url": "",
-                    "notes": "Loaded from saved food shortcut.",
-                }
-                return _response(foods=[food], source="saved_shortcut", cached=True, success=True, message="Loaded from saved shortcut.")
+                return _shortcut_response(
+                    row.to_dict(),
+                    source_label="saved_shortcut",
+                    note="Matched saved shortcut before AI parsing.",
+                    message="Loaded exact macros from saved shortcut.",
+                )
 
         frequent = load_frequent_foods()
         for _, row in frequent.iterrows():
             name = _normalize_query(row.get("food_name", ""))
             if _saved_food_match(query, name):
-                food = {
-                    "food_name": row.get("food_name", ""),
-                    "quantity": "",
-                    "calories": row.get("calories", 0),
-                    "protein": row.get("protein", 0),
-                    "carbs": row.get("carbs", 0),
-                    "fat": row.get("fat", 0),
-                    "confidence": "high",
-                    "verification_needed": False,
-                    "verification_reason": "Matched frequent food before OpenAI.",
-                    "source": "saved_shortcut",
-                    "verification_status": "cached",
-                    "source_url": "",
-                    "notes": "Loaded from frequent food.",
-                }
-                return _response(foods=[food], source="saved_shortcut", cached=True, success=True, message="Loaded from frequent food.")
+                return _shortcut_response(
+                    row.to_dict(),
+                    source_label="existing_database",
+                    note="Matched frequent food before AI parsing.",
+                    message="Loaded exact macros from frequent food.",
+                )
+
+        for row in DEFAULT_SAVED_FOOD_SHORTCUTS:
+            name = _normalize_query(row.get("shortcut_name", ""))
+            if _saved_food_match(query, name):
+                return _shortcut_response(
+                    row,
+                    source_label="saved_shortcut",
+                    note="Matched built-in food shortcut before AI parsing.",
+                    message="Loaded exact macros from built-in shortcut.",
+                )
 
         verified = load_verified_food_cache()
         for _, row in verified.iterrows():
@@ -321,7 +504,14 @@ def _local_saved_food_response(query: str) -> dict | None:
                     "source_url": row.get("source_url", ""),
                     "notes": "Loaded from verified food cache.",
                 }
-                return _response(foods=[food], source="verified_cache", cached=True, success=True, message="Loaded from verified food cache.")
+                return _response(
+                    foods=[food],
+                    source="verified_cache",
+                    cached=True,
+                    success=True,
+                    message="Loaded from verified food cache.",
+                    parser=_non_openai_parser_summary("verified_cache"),
+                )
     except Exception:
         return None
     return None
@@ -344,8 +534,10 @@ def _normalize_food(food: dict[str, Any], fallback_name: str) -> dict:
     if confidence not in CONFIDENCE_VALUES:
         confidence = "medium"
         notes.append("Confidence was normalized to medium.")
+    confidence_score = _confidence_score(confidence, food.get("confidence_score"))
     verification_needed = bool(food.get("verification_needed", False))
     heuristic_needed, heuristic_reason = should_verify_food(food_name, confidence, verification_needed)
+    needs_review = bool(food.get("needs_review", food.get("needs_confirmation", heuristic_needed or confidence_score < LOW_CONFIDENCE_THRESHOLD)))
 
     normalized = {
         "food_name": food_name,
@@ -371,7 +563,9 @@ def _normalize_food(food: dict[str, Any], fallback_name: str) -> dict:
         "verification_status": str(food.get("verification_status") or ("needed" if heuristic_needed else "not_needed")).strip(),
         "source_url": str(food.get("source_url") or "").strip(),
         "assumptions": food.get("assumptions") if isinstance(food.get("assumptions"), list) else [],
-        "needs_review": bool(food.get("needs_review", heuristic_needed or confidence != "high")),
+        "confidence_score": confidence_score,
+        "needs_review": needs_review,
+        "needs_confirmation": needs_review,
         "notes": str(food.get("notes") or "").strip(),
     }
 
@@ -408,8 +602,11 @@ def _response(
     success: bool,
     message: str,
     error_code: str | None = None,
+    parser: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
 ) -> dict:
     normalized_foods = [_normalize_food(food, food.get("food_name", "")) for food in foods or []]
+    parser_payload = parser or _non_openai_parser_summary(source)
     return {
         "foods": normalized_foods,
         "total": _total(normalized_foods),
@@ -418,10 +615,20 @@ def _response(
         "success": success,
         "error_code": error_code,
         "message": message,
+        "warnings": warnings or [],
+        "parser": parser_payload,
         "debug": {
             "backend_endpoint_reached": True,
             **openai_analyzer_config(),
             "parsing_status": "success" if success else "failure",
+            "parser": parser_payload,
+            "openai_called": bool(parser_payload.get("default_model_used") or parser_payload.get("escalated")),
+            "escalated": bool(parser_payload.get("escalated")),
+            "escalation_reason": parser_payload.get("escalation_reason", ""),
+            "final_model": parser_payload.get("final_model", ""),
+            "estimated_input_tokens": parser_payload.get("estimated_input_tokens", 0),
+            "estimated_output_tokens": parser_payload.get("estimated_output_tokens", 0),
+            "estimated_cost_usd": parser_payload.get("estimated_cost_usd", 0),
         },
     }
 
@@ -596,7 +803,7 @@ def test_openai_connection() -> dict[str, Any]:
         result["error_type"] = "ModelConfigurationError"
         result["message"] = str(config["model_error"])
         return result
-    api_key = _get_openai_api_key()
+    api_key = _get_openai_api_key() if get_openai_key_status() else ""
     if not api_key:
         result["error_type"] = "MissingApiKey"
         result["message"] = "OPENAI_API_KEY is not configured. Manual food logging still works."
@@ -724,7 +931,7 @@ def _food_parse_schema() -> dict:
     }
 
 
-def _food_parse_system_prompt(*, includes_image: bool = False) -> str:
+def _food_parse_system_prompt(*, includes_image: bool = False, escalation_reason: str = "") -> str:
     image_rules = (
         "\nIMAGE / LABEL RULES:\n"
         "- If an image is provided and it contains a Nutrition Facts label, prioritize exact label extraction over estimation.\n"
@@ -732,6 +939,13 @@ def _food_parse_system_prompt(*, includes_image: bool = False) -> str:
         "- If the front package/brand is visible, preserve the brand and product name.\n"
         "- If label values are partially unreadable, return best-estimate values, confidence='low', needs_review=true, and explain what was unreadable in assumptions.\n"
     ) if includes_image else ""
+    escalation_rules = (
+        "\nESCALATION PASS:\n"
+        f"- This entry was escalated because: {escalation_reason}.\n"
+        "- Be more conservative about serving size assumptions and ambiguity.\n"
+        "- If the food remains ambiguous, keep confidence='low', needs_review=true, "
+        "and put the exact assumption the user must confirm in assumptions.\n"
+    ) if escalation_reason else ""
     return (
         "You are a precise nutrition analysis assistant for a personal health "
         "dashboard. Convert one messy free-form food log into structured, accurate "
@@ -768,6 +982,7 @@ def _food_parse_system_prompt(*, includes_image: bool = False) -> str:
         "Restaurant/menu items: preserve restaurant names when provided, decompose meals "
         "when useful, and estimate from typical published menu/macronutrient patterns.\n\n"
         f"{image_rules}"
+        f"{escalation_rules}"
         "Always set source to 'openai_estimate' — downstream code may upgrade it "
         "after a database or USDA lookup. original_text must echo the user's wording "
         "for that item. Split combined entries when useful for review (a protein "
@@ -791,15 +1006,22 @@ def _response_input(food_text: str, image_data_url: str | None = None) -> list[d
     ]
 
 
-def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = None) -> dict:
+def _call_openai(
+    food_text: str,
+    api_key: str,
+    *,
+    image_data_url: str | None = None,
+    stage: str = "default",
+    escalation_reason: str = "",
+) -> dict:
     """Call OpenAI with a strict JSON schema using the current Python SDK."""
     client = OpenAI(api_key=api_key)
-    model_info = food_analysis_model_info()
+    model_info = food_analysis_model_info(stage)
     model = str(model_info["model"])
     reasoning_effort = str(model_info["reasoning_effort"])
     started = time.perf_counter()
     input_payload = [
-        {"role": "system", "content": _food_parse_system_prompt(includes_image=bool(image_data_url))},
+        {"role": "system", "content": _food_parse_system_prompt(includes_image=bool(image_data_url), escalation_reason=escalation_reason)},
         *_response_input(food_text, image_data_url=image_data_url),
     ]
     kwargs: dict[str, Any] = {
@@ -813,12 +1035,13 @@ def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = N
                 "strict": True,
             }
         },
-        "max_output_tokens": 1500,
+        "max_output_tokens": 1800 if stage == "escalation" else 1500,
     }
     if model.startswith("gpt-5"):
         kwargs["reasoning"] = {"effort": reasoning_effort}
     logger.info(
-        "[food_ai] openai_request_start model=%s model_source=%s fallback_model_used=%s reasoning_effort=%s image_input=%s",
+        "[food_ai] openai_request_start stage=%s model=%s model_source=%s fallback_model_used=%s reasoning_effort=%s image_input=%s",
+        stage,
         model,
         model_info["model_source"],
         model_info["fallback_model_used"],
@@ -838,12 +1061,22 @@ def _call_openai(food_text: str, api_key: str, *, image_data_url: str | None = N
         )
         raise
     logger.info(
-        "[food_ai] openai_request_success model=%s fallback_model_used=%s latency_ms=%s",
+        "[food_ai] openai_request_success stage=%s model=%s fallback_model_used=%s latency_ms=%s",
+        stage,
         model,
         model_info["fallback_model_used"],
         round((time.perf_counter() - started) * 1000, 1),
     )
-    return _parse_model_json(response)
+    parsed = _parse_model_json(response)
+    parsed["_parser_call"] = _call_cost_metadata(
+        model=model,
+        input_payload=input_payload,
+        output_payload=parsed,
+        response=response,
+        stage=stage,
+        latency_ms=(time.perf_counter() - started) * 1000,
+    )
+    return parsed
 
 
 def _food_to_api_item(food: dict) -> dict:
@@ -871,6 +1104,8 @@ def _food_to_api_item(food: dict) -> dict:
         "source_url": food.get("source_url") or None,
         "assumptions": assumptions,
         "needs_review": bool(food.get("needs_review", True)),
+        "needs_confirmation": bool(food.get("needs_confirmation", food.get("needs_review", True))),
+        "confidence_score": food.get("confidence_score", _confidence_score(food.get("confidence", "medium"))),
     }
 
 
@@ -887,6 +1122,71 @@ def _api_totals(items: list[dict]) -> dict:
     return totals
 
 
+def _contains_ambiguous_food_term(query: str) -> bool:
+    text = _normalize_query(query)
+    return any(re.search(rf"\b{re.escape(term)}\b", text) for term in AMBIGUOUS_FOOD_TERMS)
+
+
+def _contains_branded_food_hint(query: str) -> bool:
+    text = _normalize_query(query)
+    if any(hint in text for hint in BRANDED_FOOD_HINTS):
+        return True
+    tokens = [token for token in re.split(r"\s+", str(query).strip()) if token]
+    return any(token.isupper() and len(token) > 2 and token.lower() not in {"kcal", "cal", "oz", "tbsp", "tsp"} for token in tokens)
+
+
+def _serving_size_unclear(food: dict[str, Any]) -> bool:
+    quantity_value = _optional_float(food.get("quantity_value") if "quantity_value" in food else food.get("quantity"))
+    unit = str(food.get("unit") or "").strip().lower()
+    serving = str(food.get("serving_description") or "").strip().lower()
+    assumptions = " ".join(str(item).lower() for item in food.get("assumptions", []) if item)
+    if quantity_value is None or quantity_value <= 0:
+        return True
+    if not unit and not serving:
+        return True
+    return bool(re.search(r"\b(assum|unclear|unknown|typical|standard|estimated serving|reasonable serving)\b", serving + " " + assumptions))
+
+
+def _macro_uncertainty_wide(food: dict[str, Any]) -> bool:
+    assumptions = " ".join(str(item).lower() for item in food.get("assumptions", []) if item)
+    notes = str(food.get("notes") or "").lower()
+    return bool(re.search(r"\b(uncertain|wide|rough|guess|varies|depends|unknown)\b", assumptions + " " + notes))
+
+
+def _escalation_reason(result: dict[str, Any], query: str) -> str:
+    foods = result.get("foods", [])
+    if not isinstance(foods, list) or not foods:
+        return "No structured foods returned by default parser"
+    if _looks_like_multi_food_query(query):
+        return "Multiple foods are combined in one phrase"
+    if _contains_ambiguous_food_term(query):
+        return "Ambiguous food or serving size"
+    if _contains_branded_food_hint(query) and all(str(food.get("source") or "").strip() == "openai_estimate" for food in foods):
+        return "Branded food was not found in saved foods or database"
+    for food in foods:
+        score = _confidence_score(str(food.get("confidence") or "medium"), food.get("confidence_score"))
+        if score < LOW_CONFIDENCE_THRESHOLD:
+            return f"Parser confidence below {LOW_CONFIDENCE_THRESHOLD}"
+        if _serving_size_unclear(food):
+            return "Serving size is unclear"
+        if _macro_uncertainty_wide(food):
+            return "Macro estimate has wide uncertainty"
+    return ""
+
+
+def _synthetic_call_metadata(stage: str, food_text: str, parsed: dict[str, Any]) -> dict[str, Any]:
+    model_info = food_analysis_model_info(stage)
+    model = str(model_info.get("model") or food_analysis_model())
+    return _call_cost_metadata(
+        model=model,
+        input_payload=food_text,
+        output_payload=parsed,
+        response=None,
+        stage=stage,
+        latency_ms=0,
+    )
+
+
 def analyze_food_text(food_text: str, *, image_data_url: str | None = None, force_openai: bool = False) -> dict:
     """Return the richer Food tab analyze response shape."""
     parsed = parse_food_text(food_text, image_data_url=image_data_url, force_openai=force_openai)
@@ -896,20 +1196,27 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None, forc
     for food in parsed.get("foods", []):
         normalized = _normalize_food(food, food.get("food_name", ""))
         usda_match = None
-        try:
-            logger.info("[food_ai] external_lookup_started url_or_service=usda_fdc query=%s", normalized["food_name"])
-            usda_match = search_food_macros(normalized["food_name"])
-            external_statuses.append("ok" if usda_match else "skipped")
-        except Exception as exc:
-            status = _external_lookup_status_from_exception(exc)
-            external_statuses.append(status)
-            warnings.append(_external_lookup_warning(exc))
-            logger.warning(
-                "[food_ai] external_lookup_failed status=%s url_or_service=usda_fdc error_type=%s message=%s openai_called=true",
-                status.replace("failed_", ""),
-                type(exc).__name__,
-                exc,
-            )
+        if normalized.get("source") in {"saved_shortcut", "existing_database", "verified_cache"}:
+            external_statuses.append("skipped")
+            normalized["source"] = "existing_database"
+            normalized["verification_needed"] = False
+            normalized["needs_review"] = False
+            normalized["needs_confirmation"] = False
+        else:
+            try:
+                logger.info("[food_ai] external_lookup_started url_or_service=usda_fdc query=%s", normalized["food_name"])
+                usda_match = search_food_macros(normalized["food_name"])
+                external_statuses.append("ok" if usda_match else "skipped")
+            except Exception as exc:
+                status = _external_lookup_status_from_exception(exc)
+                external_statuses.append(status)
+                warnings.append(_external_lookup_warning(exc))
+                logger.warning(
+                    "[food_ai] external_lookup_failed status=%s url_or_service=usda_fdc error_type=%s message=%s openai_called=true",
+                    status.replace("failed_", ""),
+                    type(exc).__name__,
+                    exc,
+                )
         if usda_match:
             macros = usda_match.get("macros", {})
             for source_key, target_key in [
@@ -926,7 +1233,7 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None, forc
             normalized["assumptions"].append("Matched USDA FoodData Central for source context; review serving-size scaling before saving.")
         elif normalized.get("source") in {"verified_online", "web_source"}:
             normalized["source"] = "web_source"
-        elif normalized.get("source") in {"saved_shortcut", "verified_cache"}:
+        elif normalized.get("source") in {"saved_shortcut", "verified_cache", "existing_database"}:
             normalized["source"] = "existing_database"
         else:
             normalized["source"] = "openai_estimate"
@@ -955,12 +1262,14 @@ def analyze_food_text(food_text: str, *, image_data_url: str | None = None, forc
         "success": bool(parsed.get("success")),
         "message": parsed.get("message", ""),
         "error_code": parsed.get("error_code"),
+        "parser": parsed.get("parser") if isinstance(parsed.get("parser"), dict) else _non_openai_parser_summary(str(parsed.get("source") or "")),
         "debug": {
             **(parsed.get("debug", {}) if isinstance(parsed.get("debug"), dict) else {}),
             "parser_source": parsed.get("source", ""),
             "parser_cached": bool(parsed.get("cached", False)),
             "external_lookup_status": external_lookup_status,
             "external_lookup_statuses": unique_statuses,
+            "parser": parsed.get("parser") if isinstance(parsed.get("parser"), dict) else {},
         },
     }
 
@@ -985,23 +1294,24 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None, force_
             return local_match
 
         cached = _cached_response(query)
-        if cached:
+        if cached and (not _escalation_reason(cached, cleaned_text) or not _get_openai_api_key()):
             refreshed = _verify_uncertain_foods(cached)
             if refreshed != cached:
                 _cache_result(query, refreshed)
             return refreshed
 
-    api_key = _get_openai_api_key()
+    api_key = _get_openai_api_key() if get_openai_key_status() else ""
     if not api_key:
         return _fallback_response(
             cleaned_text,
-            "OpenAI API key is not configured. Add OPENAI_API_KEY to .env or local settings.",
-            "missing_api_key",
+            "AI food parsing is not configured yet. You can still log foods manually.",
+            "openai_not_configured",
         )
 
     try:
         logger.info("[food_ai] pre_openai_step=openai_primary")
-        parsed = _call_openai(cleaned_text, api_key, image_data_url=image_data_url)
+        parsed = _call_openai(cleaned_text, api_key, image_data_url=image_data_url, stage="default")
+        parser_calls = [parsed.pop("_parser_call", None) or _synthetic_call_metadata("default", cleaned_text, parsed)]
         foods = parsed.get("foods", [])
         if not isinstance(foods, list) or not foods:
             raise ValueError("Model response did not include a non-empty foods array.")
@@ -1012,7 +1322,32 @@ def parse_food_text(food_text: str, *, image_data_url: str | None = None, force_
             cached=False,
             success=True,
             message=f"Parsed with {food_analysis_model()}. Review before saving.",
+            parser=_parser_summary(parser_calls, escalated=False),
         )
+        escalation_reason = "" if image_data_url else _escalation_reason(result, cleaned_text)
+        if escalation_reason:
+            logger.info("[food_ai] escalation_triggered reason=%s", escalation_reason)
+            escalated = _call_openai(
+                cleaned_text,
+                api_key,
+                image_data_url=image_data_url,
+                stage="escalation",
+                escalation_reason=escalation_reason,
+            )
+            parser_calls.append(escalated.pop("_parser_call", None) or _synthetic_call_metadata("escalation", cleaned_text, escalated))
+            escalated_foods = escalated.get("foods", [])
+            if isinstance(escalated_foods, list) and escalated_foods:
+                result = _response(
+                    foods=escalated_foods,
+                    source="openai",
+                    cached=False,
+                    success=True,
+                    message=f"Parsed with {food_analysis_escalation_model()} after low-confidence escalation. Review before saving.",
+                    parser=_parser_summary(parser_calls, escalated=True, escalation_reason=escalation_reason),
+                )
+            else:
+                result["parser"] = _parser_summary(parser_calls, escalated=True, escalation_reason=escalation_reason, final_model=food_analysis_model())
+                result["debug"]["parser"] = result["parser"]
         result = _verify_uncertain_foods(result)
         if not image_data_url and not force_openai:
             _cache_result(query, result)

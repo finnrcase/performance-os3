@@ -90,11 +90,13 @@ def _food_ai_item_to_api(item: dict[str, Any]) -> dict[str, Any]:
         "sugar_g": item.get("sugar_g", item.get("sugar")),
         "sodium_mg": item.get("sodium_mg", item.get("sodium")),
         "confidence": item.get("confidence") or "medium",
+        "confidence_score": item.get("confidence_score"),
         "source": item.get("source") or "openai_estimate",
         "source_id": item.get("source_id") or None,
         "source_url": item.get("source_url") or None,
         "assumptions": item.get("assumptions") if isinstance(item.get("assumptions"), list) else [],
         "needs_review": bool(item.get("needs_review", item.get("verification_needed", True))),
+        "needs_confirmation": bool(item.get("needs_confirmation", item.get("needs_review", item.get("verification_needed", True)))),
     }
 
 
@@ -134,13 +136,20 @@ def _food_ai_response(
     success = bool(result.get("success")) and bool(items)
     parser_source = str(result.get("source") or debug.get("parser_source") or "")
     parser_cached = bool(result.get("cached", debug.get("parser_cached", False)))
+    parser_meta = result.get("parser") if isinstance(result.get("parser"), dict) else debug.get("parser") if isinstance(debug.get("parser"), dict) else {}
     external_lookup_status = str(result.get("external_lookup_status") or debug.get("external_lookup_status") or "skipped")
-    openai_called = parser_source == "openai" and not parser_cached
+    openai_called = bool(parser_meta.get("default_model_used") or parser_meta.get("escalated") or (parser_source == "openai" and not parser_cached))
     merged_steps = {
         **steps,
         "parser_returned": True,
         "openai_called": openai_called,
-        "model_used": analyzer_config.get("model"),
+        "model_used": parser_meta.get("final_model") or parser_meta.get("model_used") or analyzer_config.get("model"),
+        "default_model_used": bool(parser_meta.get("default_model_used", openai_called)),
+        "escalated": bool(parser_meta.get("escalated", False)),
+        "escalation_reason": parser_meta.get("escalation_reason", ""),
+        "estimated_input_tokens": parser_meta.get("estimated_input_tokens", 0),
+        "estimated_output_tokens": parser_meta.get("estimated_output_tokens", 0),
+        "estimated_cost_usd": parser_meta.get("estimated_cost_usd", 0),
         "parser_source": parser_source,
         "external_lookup_status": external_lookup_status,
         "raw_items_count": len(raw_items) if isinstance(raw_items, list) else 0,
@@ -157,6 +166,7 @@ def _food_ai_response(
         "totals": totals,
         "total": totals,
         "warnings": result.get("warnings") if isinstance(result.get("warnings"), list) else [],
+        "parser": parser_meta,
         "parser_source": parser_source,
         "external_lookup_status": external_lookup_status,
         "success": success,
@@ -168,8 +178,15 @@ def _food_ai_response(
             "backend_endpoint_reached": True,
             "parser_source": parser_source,
             "parser_cached": parser_cached,
+            "parser": parser_meta,
             "external_lookup_status": external_lookup_status,
             "openai_called": openai_called,
+            "escalated": bool(parser_meta.get("escalated", False)),
+            "escalation_reason": parser_meta.get("escalation_reason", ""),
+            "final_model": parser_meta.get("final_model") or parser_meta.get("model_used") or analyzer_config.get("model"),
+            "estimated_input_tokens": parser_meta.get("estimated_input_tokens", 0),
+            "estimated_output_tokens": parser_meta.get("estimated_output_tokens", 0),
+            "estimated_cost_usd": parser_meta.get("estimated_cost_usd", 0),
             "failed_step": debug.get("failed_step") or (None if success else debug.get("parsing_status") or "parse"),
             "duration_ms": merged_steps["duration_ms"],
         },
@@ -758,7 +775,7 @@ def log_nutrition_shortcut(shortcut_id: str, payload: dict[str, Any] | None = No
 def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.perf_counter()
     text = str((payload or {}).get("text") or "").strip()
-    force_openai = bool((payload or {}).get("force_openai", True))
+    force_openai = bool((payload or {}).get("force_openai", False))
     steps: dict[str, Any] = {"route_entered": True, "text_length": len(text), "force_openai": force_openai}
     logger.info("[food_ai] route_entered endpoint=/api/food/analyze-text")
     logger.info("[food_ai] text_length=%s", len(text))
@@ -782,18 +799,10 @@ def analyze_food_text(payload: dict[str, Any]) -> dict[str, Any]:
     logger.info("[food_ai] openai_configured=%s", steps["openai_configured"])
     logger.info("[food_ai] model=%s", analyzer_config.get("model"))
     if not get_openai_key_status():
-        logger.warning("[food_ai] failed step=config_check error_type=OpenAINotConfigured message=missing OpenAI key")
-        return _food_ai_error_response(
-            analyzer_config=analyzer_config,
-            steps=steps,
-            started=started,
-            message="AI food parsing is not configured yet. You can still log foods manually.",
-            error_code="openai_not_configured",
-            failed_step="config_check",
-        )
+        logger.warning("[food_ai] config_check warning=missing OpenAI key; saved-food/parser fallback path will still run")
     try:
         logger.info("[food_ai] parser_request_start")
-        logger.info("[food_ai] pre_openai_step=openai_primary")
+        logger.info("[food_ai] pre_openai_step=saved_food_then_openai")
         result = analyze_text(text, force_openai=force_openai)
         response = _food_ai_response(result, analyzer_config, steps, started)
         logger.info(
