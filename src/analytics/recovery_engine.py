@@ -28,6 +28,7 @@ RECOVERY_ANALYTICS_COLUMNS = [
 RECOVERY_SIGNAL_EMPTY = {
     "status": "insufficient data",
     "confidence": "low",
+    "data_mode": "insufficient data",
     "score": None,
     "summary": "Log recovery or connect wearable data to personalize nutrition recovery adjustments.",
     "nutrition_implication": "Keep nutrition targets stable until recovery data is available.",
@@ -239,13 +240,20 @@ def _base_readiness(row: pd.Series) -> float:
     return sleep_score + sleep_quality_score + motivation_score + fatigue_score + soreness_score + stress_score
 
 
-def _calorie_deficit(nutrition_df: pd.DataFrame, target_calories: float) -> pd.DataFrame:
+def _calorie_deficit(nutrition_df: pd.DataFrame, target_calories: float | int | None) -> pd.DataFrame:
     """Calculate daily calorie deficit against the recovery target."""
     daily_df = _daily_nutrition(nutrition_df)
     if daily_df.empty:
         return pd.DataFrame(columns=["date", "calorie_deficit"])
+    try:
+        target = float(target_calories or 0)
+    except (TypeError, ValueError):
+        target = 0
+    if target <= 0:
+        daily_df["calorie_deficit"] = 0.0
+        return daily_df[["date", "calorie_deficit"]]
 
-    daily_df["calorie_deficit"] = (float(target_calories) - daily_df["calories"]).clip(lower=0)
+    daily_df["calorie_deficit"] = (target - daily_df["calories"]).clip(lower=0)
     return daily_df[["date", "calorie_deficit"]]
 
 
@@ -284,7 +292,7 @@ def calculate_recovery_score(
     recovery_df: pd.DataFrame,
     training_df: pd.DataFrame | None = None,
     nutrition_df: pd.DataFrame | None = None,
-    target_calories=2850,
+    target_calories=None,
 ) -> pd.DataFrame:
     """Calculate advanced daily recovery scores and explanations."""
     training_df = training_df if training_df is not None else pd.DataFrame()
@@ -365,12 +373,30 @@ def analyze_recovery_signal(
     recovery_df: pd.DataFrame,
     training_df: pd.DataFrame | None = None,
     nutrition_df: pd.DataFrame | None = None,
-    target_calories=2850,
+    target_calories=None,
     performance_signal: dict | None = None,
     workload_data: dict | None = None,
 ) -> dict:
     """Return a nutrition-facing recovery/readiness signal with explainable drivers."""
     if recovery_df is None or recovery_df.empty:
+        inferred_drivers: list[dict] = []
+        performance_label = str((performance_signal or {}).get("label") or "insufficient data")
+        if performance_label in {"declining", "fatigue/performance stagnation"}:
+            _add_driver(inferred_drivers, "Workout performance", "strained", f"Hevy performance is {performance_label}.", performance_label)
+        workload_current = (workload_data or {}).get("current", {})
+        if str(workload_current.get("recovery_demand") or "") == "high":
+            _add_driver(inferred_drivers, "Training/running demand", "strained", "Recent Hevy/Strava workload is creating high recovery demand.", "high")
+        if inferred_drivers:
+            return {
+                **dict(RECOVERY_SIGNAL_EMPTY),
+                "status": "strained",
+                "confidence": "low",
+                "data_mode": "inferred recovery",
+                "summary": "Recovery is inferred from workload and performance because measured recovery data is missing.",
+                "nutrition_implication": "Use carbs around training, but log recovery or connect wearable data before making precise recovery-driven changes.",
+                "suggested_action": "Log sleep, fatigue, soreness, HRV, or resting heart rate.",
+                "drivers": inferred_drivers[:6],
+            }
         return dict(RECOVERY_SIGNAL_EMPTY)
 
     df = recovery_df.copy()
@@ -379,17 +405,27 @@ def analyze_recovery_signal(
     if df.empty:
         return dict(RECOVERY_SIGNAL_EMPTY)
 
+    subjective_columns = ["sleep_hours", "sleep_quality", "fatigue", "soreness", "stress", "motivation"]
+    wearable_columns = ["hrv", "resting_hr"]
+    has_subjective_recovery = any(column in df.columns and _numeric_series(df, column).notna().any() for column in subjective_columns)
+    has_wearable_recovery = any(column in df.columns and _numeric_series(df, column).notna().any() for column in wearable_columns)
+    data_mode = "measured recovery" if has_subjective_recovery or has_wearable_recovery else "inferred recovery"
+
     training_df = training_df if training_df is not None else pd.DataFrame()
     nutrition_df = nutrition_df if nutrition_df is not None else pd.DataFrame()
     if not nutrition_df.empty and "calories" not in nutrition_df.columns and "total_calories" in nutrition_df.columns:
         nutrition_df = nutrition_df.copy()
         nutrition_df["calories"] = nutrition_df["total_calories"]
 
-    analytics = calculate_recovery_score(
-        recovery_df=df,
-        training_df=training_df,
-        nutrition_df=nutrition_df,
-        target_calories=target_calories,
+    analytics = (
+        calculate_recovery_score(
+            recovery_df=df,
+            training_df=training_df,
+            nutrition_df=nutrition_df,
+            target_calories=target_calories,
+        )
+        if has_subjective_recovery
+        else pd.DataFrame()
     )
 
     latest_score = None
@@ -466,8 +502,13 @@ def analyze_recovery_signal(
         status = "strained"
 
     data_points = int(len(df))
-    confidence = "high" if data_points >= 14 else "medium" if data_points >= 7 else "low"
-    if latest_score is None and not drivers:
+    if data_mode == "measured recovery" and latest_score is not None:
+        confidence = "high" if data_points >= 14 else "medium" if data_points >= 7 else "low"
+    elif data_mode == "measured recovery" and drivers:
+        confidence = "medium" if data_points >= 14 else "low"
+    elif drivers:
+        confidence = "low"
+    else:
         confidence = "low"
 
     if status == "good":
@@ -496,6 +537,7 @@ def analyze_recovery_signal(
     return {
         "status": status,
         "confidence": confidence,
+        "data_mode": data_mode if drivers or latest_score is not None else "insufficient data",
         "score": round(latest_score, 1) if latest_score is not None else None,
         "summary": summary,
         "nutrition_implication": implication,

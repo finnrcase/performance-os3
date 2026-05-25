@@ -136,6 +136,8 @@ type WeightFeedback = {
 type NutritionEntry = {
   food_log_id?: string;
   date: string;
+  logged_sequence?: number | null;
+  created_order?: number | null;
   meal_type: string;
   food_name: string;
   iconType?: FoodIconType | null;
@@ -330,6 +332,8 @@ type SleepEntry = {
 type WorkoutMarker = {
   marker_id: string;
   date: string;
+  marker_sequence?: number | null;
+  created_order?: number | null;
   workout_time: string;
   workout_type: string;
   notes: string;
@@ -379,6 +383,7 @@ type TrainingReadinessSignals = {
   fueling_recommendation?: { label?: string; reason?: string };
   hydration_recommendation?: { label?: string; reason?: string };
   signals?: string[];
+  diagnostics?: Record<string, unknown>;
 };
 
 type MuscleCoverageItem = {
@@ -1642,17 +1647,6 @@ function todayString() {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-function currentLocalTimeString() {
-  const parts = new Intl.DateTimeFormat("en-US", {
-    timeZone: APP_TIMEZONE,
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).formatToParts(new Date());
-  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
-  return `${values.hour ?? "12"}:${values.minute ?? "00"}`;
-}
-
 function headerDateString(date = new Date()) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: APP_TIMEZONE,
@@ -1727,7 +1721,7 @@ const initialForms: FormState = {
   },
   workoutMarker: {
     date: todayString(),
-    workout_time: currentLocalTimeString(),
+    workout_time: "",
     workout_type: "Strength",
     notes: "",
   },
@@ -4922,7 +4916,14 @@ function FoodPage({
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
   const selectedDateMarkers = workoutMarkers
     .filter((marker) => (marker.date || "").slice(0, 10) === forms.nutrition.date)
-    .sort((a, b) => `${b.date} ${b.workout_time}`.localeCompare(`${a.date} ${a.workout_time}`));
+    .sort((a, b) => {
+      const bOrder = finiteNumberOrNull(b.marker_sequence ?? b.created_order);
+      const aOrder = finiteNumberOrNull(a.marker_sequence ?? a.created_order);
+      if (bOrder !== null && aOrder !== null && bOrder !== aOrder) return bOrder - aOrder;
+      if (bOrder !== null && aOrder === null) return -1;
+      if (bOrder === null && aOrder !== null) return 1;
+      return `${b.date} ${b.created_at ?? ""} ${b.workout_time}`.localeCompare(`${a.date} ${a.created_at ?? ""} ${a.workout_time}`);
+    });
   const latestSelectedMarker = selectedDateMarkers[0] ?? null;
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
@@ -5147,7 +5148,7 @@ function FoodPage({
           />
           <form onSubmit={onWorkoutMarkerSubmit} className="grid gap-3 md:grid-cols-[minmax(130px,0.8fr)_minmax(110px,0.65fr)_minmax(150px,1fr)_minmax(0,1.4fr)_auto] md:items-end">
             <TextInput label="Date" type="date" value={forms.workoutMarker.date} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, date: value } }))} />
-            <TextInput label="Time" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
+            <TextInput label="Time optional" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
             <SelectInput label="Type" value={forms.workoutMarker.workout_type} options={["Strength", "Run", "Cardio", "Mobility", "Other"]} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_type: value } }))} />
             <TextInput label="Notes optional" value={forms.workoutMarker.notes} placeholder="Pull day, legs, gym, etc." onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, notes: value } }))} />
             <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
@@ -5155,11 +5156,11 @@ function FoodPage({
             </button>
           </form>
           <p className="mt-3 text-xs leading-5 text-zinc-500">
-            Foods with usable timestamps before this marker count as pre-workout; foods after it count as post-workout.
+            This marker splits the same-day food log sequence: foods logged before it count as pre-workout, foods logged after it count as post-workout.
           </p>
           {latestSelectedMarker ? (
             <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-sm text-zinc-300">
-              Latest marker: <span className="font-semibold text-white">{latestSelectedMarker.workout_type || "Workout"}</span> at {latestSelectedMarker.workout_time || "--"}{latestSelectedMarker.notes ? ` · ${latestSelectedMarker.notes}` : ""}
+              Latest marker: <span className="font-semibold text-white">{latestSelectedMarker.workout_type || "Workout"}</span>{latestSelectedMarker.workout_time ? ` at ${latestSelectedMarker.workout_time}` : ""}{latestSelectedMarker.notes ? ` · ${latestSelectedMarker.notes}` : ""}
             </div>
           ) : (
             <p className="mt-3 rounded-lg border border-dashed border-white/10 bg-white/[0.025] px-3 py-2 text-sm text-zinc-400">
@@ -6540,7 +6541,7 @@ function RecoveryPage({
                 ["Run", trainingReadiness.run_recommendation?.label, trainingReadiness.run_recommendation?.reason],
                 ["Lift", trainingReadiness.lift_recommendation?.label, trainingReadiness.lift_recommendation?.reason],
                 ["Fueling", trainingReadiness.fueling_recommendation?.label, trainingReadiness.fueling_recommendation?.reason],
-                ["Hydration", trainingReadiness.hydration_recommendation?.label, trainingReadiness.hydration_recommendation?.reason],
+                ["Hydration/electrolyte risk", trainingReadiness.hydration_recommendation?.label, trainingReadiness.hydration_recommendation?.reason],
               ].map(([label, value, reason]) => (
                 <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
                   <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
@@ -6553,6 +6554,34 @@ function RecoveryPage({
           ) : (
             <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
               {trainingReadiness?.message || "Need more wearable history."}
+            </p>
+          )}
+        </Card>
+
+        <Card>
+          <SectionHeader eyebrow="Fueling" title="Fueling & Deload Signals" />
+          {trainingReadiness?.status === "ok" ? (
+            <div className="space-y-3">
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Fueling</p>
+                <p className="mt-1 text-sm font-semibold text-white">{trainingReadiness.fueling_recommendation?.label || "Normal fueling"}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-500">{trainingReadiness.fueling_recommendation?.reason || "No low-carb or post-workout protein flag from current data."}</p>
+              </div>
+              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Deload</p>
+                <p className="mt-1 text-sm font-semibold text-white">{trainingReadiness.lift_recommendation?.label || "Push normal"}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-500">{trainingReadiness.lift_recommendation?.reason || "No major wearable readiness flags for lifting intensity."}</p>
+              </div>
+              {readinessMessages.length ? (
+                <div className="rounded-lg border border-white/10 bg-black/10 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Signal</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-400">{readinessMessages[0]}</p>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
+              {trainingReadiness?.message || "Need more wearable history before fueling and deload signals are available."}
             </p>
           )}
         </Card>
@@ -9721,7 +9750,7 @@ function DiagnosticStatusDashboard({ settings }: Readonly<{ settings: SettingsDa
     ["withings", "Withings", settings.withings],
   ];
   const other = Object.entries(settings.other_integrations ?? {}).map(([key, value]) => [key, key.replaceAll("_", " / "), value] as const);
-  const cards = [...primary, ...other].filter(([, , component]) => Boolean(component));
+  const cards = [...primary, ...other].filter(([id, , component]) => id !== "backend" && Boolean(component));
   const checkedAt = settings.checked_at ? relativeSyncTime(settings.checked_at) : "";
   return (
     <Card>
@@ -11664,7 +11693,7 @@ function HomeContent() {
       const marker = {
         ...forms.workoutMarker,
         date: forms.workoutMarker.date || todayString(),
-        workout_time: forms.workoutMarker.workout_time || currentLocalTimeString(),
+        workout_time: forms.workoutMarker.workout_time || "",
         workout_type: forms.workoutMarker.workout_type || "Strength",
       };
       const result = await apiSend<{ item?: WorkoutMarker; items?: WorkoutMarker[]; status?: string; message?: string }>("/api/workout-markers", "POST", marker);
@@ -11676,7 +11705,7 @@ function HomeContent() {
         ...state,
         workoutMarker: {
           date: todayString(),
-          workout_time: currentLocalTimeString(),
+          workout_time: "",
           workout_type: "Strength",
           notes: "",
         },

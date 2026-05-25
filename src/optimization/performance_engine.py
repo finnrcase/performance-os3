@@ -163,7 +163,7 @@ def generate_performance_recommendations(
     training_df: pd.DataFrame,
     nutrition_df: pd.DataFrame,
     body_metrics_df: pd.DataFrame,
-    target_calories=2850,
+    target_calories=0,
     target_protein=160,
     goal="lean bulk",
 ) -> dict:

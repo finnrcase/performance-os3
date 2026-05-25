@@ -185,7 +185,7 @@ def test_training_readiness_reduces_intensity_from_wearable_and_recovery_strain(
     assert readiness["run_recommendation"]["label"] == "Skip run / recovery day"
     assert readiness["lift_recommendation"]["label"] == "Deload suggested"
     assert readiness["fueling_recommendation"]["label"] == "Increase carbs"
-    assert readiness["hydration_recommendation"]["label"] == "Increase fluids/electrolytes"
+    assert readiness["hydration_recommendation"]["label"] == "Elevated hydration/electrolyte risk"
     assert any("Resting HR is elevated" in signal for signal in readiness["signals"])
 
 

@@ -13,12 +13,14 @@ def test_workout_marker_create_load_and_window_split(tmp_path, monkeypatch):
         workout_time="17:00",
         workout_type="Strength",
         notes="Push day",
+        marker_sequence=2,
     )
 
     markers_df = wn.load_workout_markers()
     assert len(markers_df) == 1
     assert markers_df.iloc[0]["marker_id"] == marker["marker_id"]
     assert markers_df.iloc[0]["workout_time"] == "17:00"
+    assert markers_df.iloc[0]["marker_sequence"] == 2
 
     nutrition_df = pd.DataFrame(
         [
@@ -29,6 +31,7 @@ def test_workout_marker_create_load_and_window_split(tmp_path, monkeypatch):
                 "carbs": 52,
                 "protein": 10,
                 "fat": 2,
+                "logged_sequence": 1,
                 "created_at": "2026-05-24T15:30:00",
             },
             {
@@ -38,6 +41,7 @@ def test_workout_marker_create_load_and_window_split(tmp_path, monkeypatch):
                 "carbs": 75,
                 "protein": 45,
                 "fat": 14,
+                "logged_sequence": 3,
                 "created_at": "2026-05-24T19:00:00",
             },
             {

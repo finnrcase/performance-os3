@@ -483,13 +483,28 @@ def _training_load_summary(training_df: pd.DataFrame | None) -> dict:
     }
 
 
-def _nutrition_summary(nutrition_df: pd.DataFrame | None) -> dict:
+def _carb_threshold_for_training(training: dict | None = None, bodyweight_lb: float | None = None) -> float:
+    try:
+        bodyweight = float(bodyweight_lb or 180)
+    except (TypeError, ValueError):
+        bodyweight = 180
+    training = training or {}
+    recent_duration = float(training.get("recent_duration_minutes") or 0)
+    recent_hard_sets = float(training.get("recent_hard_sets") or 0)
+    high_load = bool(training.get("high_training_load"))
+    grams_per_lb = 1.25 if high_load or recent_duration >= 240 or recent_hard_sets >= 35 else 1.05 if recent_duration >= 150 or recent_hard_sets >= 20 else 0.9
+    return round(max(120.0, min(320.0, bodyweight * grams_per_lb)), 0)
+
+
+def _nutrition_summary(nutrition_df: pd.DataFrame | None, training: dict | None = None) -> dict:
     nutrition = _dated_numeric_frame(nutrition_df, ["calories", "carbs", "protein", "fat"])
+    carb_threshold = _carb_threshold_for_training(training)
     if nutrition.empty:
         return {
             "recent_carbs_average": None,
             "recent_protein_average": None,
             "low_recent_carbs": False,
+            "carb_threshold": carb_threshold,
             "sample_size": 0,
         }
 
@@ -505,7 +520,8 @@ def _nutrition_summary(nutrition_df: pd.DataFrame | None) -> dict:
     return {
         "recent_carbs_average": recent_carbs,
         "recent_protein_average": recent_protein,
-        "low_recent_carbs": bool(recent_carbs is not None and recent_carbs < 180),
+        "low_recent_carbs": bool(recent_carbs is not None and recent_carbs < carb_threshold),
+        "carb_threshold": carb_threshold,
         "sample_size": int(len(recent)),
     }
 
@@ -564,7 +580,8 @@ def _post_workout_protein_signal(
         return {"available": False, "post_workout_protein": None, "low": False}
     if windows.empty or "post_workout_protein" not in windows.columns:
         return {"available": False, "post_workout_protein": None, "low": False}
-    latest = windows.sort_values(["date", "workout_time"], kind="stable").iloc[-1]
+    sort_columns = ["date", "marker_sequence"] if "marker_sequence" in windows.columns else ["date", "workout_time"]
+    latest = windows.sort_values(sort_columns, kind="stable").iloc[-1]
     protein = pd.to_numeric(latest.get("post_workout_protein"), errors="coerce")
     if pd.isna(protein):
         return {"available": False, "post_workout_protein": None, "low": False}
@@ -603,8 +620,8 @@ def calculate_training_readiness_signals(
                 "reason": "Not enough wearable context to adjust fueling guidance.",
             },
             "hydration_recommendation": {
-                "label": "Normal",
-                "reason": "Not enough wearable context to flag hydration stress.",
+                "label": "Normal hydration/electrolyte risk",
+                "reason": "Not enough wearable context to flag hydration/electrolyte risk.",
             },
             "signals": ["Need more wearable history."],
             "diagnostics": diagnostics,
@@ -651,7 +668,7 @@ def calculate_training_readiness_signals(
     )
 
     training = _training_load_summary(training_df)
-    nutrition = _nutrition_summary(nutrition_df)
+    nutrition = _nutrition_summary(nutrition_df, training)
     recovery = _recovery_decline_summary(recovery_df)
     post_workout = _post_workout_protein_signal(nutrition_df, training_df, markers_df)
     high_training_load = bool(training["high_training_load"])
@@ -670,7 +687,7 @@ def calculate_training_readiness_signals(
     if activity_high:
         signals.append("Recent steps/activity are unusually high; hidden fatigue is possible.")
     if low_carbs_high_training:
-        signals.append("Recent carbs are low while training load is high.")
+        signals.append(f"Recent carbs are below the current training-load threshold ({nutrition['carb_threshold']:.0f}g).")
     if recovery_training_decline:
         signals.append("Recovery score trend is declining during a high training-load window.")
     if post_workout["low"]:
@@ -727,7 +744,7 @@ def calculate_training_readiness_signals(
     if low_carbs_high_training:
         fueling_recommendation = {
             "label": "Increase carbs",
-            "reason": "Recent carb intake is low for the current training load.",
+            "reason": f"Recent carb intake is below the current training-load threshold ({nutrition['carb_threshold']:.0f}g/day).",
         }
     elif post_workout["low"]:
         fueling_recommendation = {
@@ -749,13 +766,13 @@ def calculate_training_readiness_signals(
     )
     if activity_high or (resting_hr_high and high_burn):
         hydration_recommendation = {
-            "label": "Increase fluids/electrolytes",
+            "label": "Elevated hydration/electrolyte risk",
             "reason": "Activity load or calorie burn is elevated relative to baseline.",
         }
     else:
         hydration_recommendation = {
-            "label": "Normal",
-            "reason": "No hydration stress signal from wearable trends.",
+            "label": "Normal hydration/electrolyte risk",
+            "reason": "No hydration/electrolyte risk signal from wearable trends.",
         }
 
     return {

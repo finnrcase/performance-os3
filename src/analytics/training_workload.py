@@ -99,6 +99,11 @@ def _prepare_training(training_df: pd.DataFrame) -> pd.DataFrame:
     df["_is_strength_row"] = (~df["_is_run_row"]) & (
         (source == "hevy") | notes.str.contains("hevy_workout_id=", regex=False) | (workout_type == "strength")
     )
+    weighted_working_set = (df["rpe"] <= 0) & (df["weight"] > 0) & (df["reps"] > 0) & (df["sets"] > 0)
+    df["hard_set_multiplier"] = 0.0
+    df.loc[df["rpe"] >= 7, "hard_set_multiplier"] = 1.0
+    df.loc[weighted_working_set, "hard_set_multiplier"] = 0.5
+    df["hard_sets_conservative"] = df["sets"] * df["hard_set_multiplier"]
     return df.sort_values("date")
 
 
@@ -113,19 +118,19 @@ def _hevy_window(df: pd.DataFrame, days: int) -> dict:
     scale = 7 / days
     workout_count = window[["date", "workout_id"]].drop_duplicates().shape[0] if "workout_id" in window.columns else window["date"].dt.date.nunique()
     total_sets = float(window["sets"].sum())
-    hard = window[(window["rpe"] >= 7) | (window["rpe"] == 0)].copy()
+    hard = window[window.get("hard_sets_conservative", 0) > 0].copy()
     hard_sets_by_group: dict[str, float] = {}
     for _, row in hard.iterrows():
         group = str(row.get("muscle_group") or "").split(",", 1)[0].strip()
         if not group:
             group = get_exercise_muscle_group(str(row.get("exercise") or ""))["primaryMuscleGroup"]
-        hard_sets_by_group[group] = hard_sets_by_group.get(group, 0) + float(row.get("sets") or 0)
+        hard_sets_by_group[group] = hard_sets_by_group.get(group, 0) + float(row.get("hard_sets_conservative") or 0)
     durations = window.groupby("workout_id")["duration_minutes"].sum() if "workout_id" in window.columns else window.groupby(window["date"].dt.date)["duration_minutes"].sum()
     durations = durations[durations > 0]
     return {
         "workouts_per_week": round(workout_count * scale, 2),
         "total_sets_per_week": round(total_sets * scale, 1),
-        "hard_sets_per_week": round(float(hard["sets"].sum()) * scale, 1),
+        "hard_sets_per_week": round(float(hard["hard_sets_conservative"].sum()) * scale, 1),
         "hard_sets_by_muscle_group": {group: round(value * scale, 1) for group, value in sorted(hard_sets_by_group.items())},
         "total_volume_per_week": round(float(window["volume"].sum()) * scale, 1),
         "average_session_duration_minutes": round(float(durations.mean()), 1) if not durations.empty else 0,

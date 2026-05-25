@@ -186,7 +186,10 @@ def generate_personal_response_learning(
     window_weeks: int = 8,
 ) -> dict:
     """Generate conservative, correlation-style personal response insights."""
-    target_calories = float((current_targets or {}).get("target_calories") or 2850)
+    target_calories = float((current_targets or {}).get("target_calories") or 0)
+    if target_calories <= 0 and nutrition_df is not None and not nutrition_df.empty and "target_calories" in nutrition_df.columns:
+        target_values = pd.to_numeric(nutrition_df["target_calories"], errors="coerce").dropna()
+        target_calories = float(target_values.tail(14).mean()) if not target_values.empty else 0
     weekly = _weekly_nutrition(nutrition_df)
     for frame in [
         _weekly_bodyweight(body_metrics_df),

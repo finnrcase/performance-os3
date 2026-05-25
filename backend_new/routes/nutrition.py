@@ -249,13 +249,57 @@ def _valid_json_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
 
 
-def _normalize_workout_marker(payload: dict[str, Any]) -> dict[str, Any]:
+def _order_number(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed == parsed else None
+
+
+def _next_log_sequence(selected_date: str) -> int:
+    """Return the next same-day divider sequence across foods and markers."""
+    max_sequence = 0.0
+    for table, fields in (
+        ("food_logs", ("logged_sequence", "created_order")),
+        ("workout_markers", ("marker_sequence", "created_order")),
+    ):
+        rows = _valid_json_rows(fetch_json_rows_for_value(table, "date", str(selected_date)[:10], limit=5000))
+        for row in rows:
+            for field in fields:
+                value = _order_number(row.get(field))
+                if value is not None:
+                    max_sequence = max(max_sequence, value)
+                    break
+    return int(max_sequence) + 1
+
+
+def _ensure_food_log_sequence(item: dict[str, Any]) -> dict[str, Any]:
+    if _order_number(item.get("logged_sequence")) is None and _order_number(item.get("created_order")) is None:
+        item["logged_sequence"] = _next_log_sequence(str(item.get("date") or _today_iso()))
+    elif _order_number(item.get("logged_sequence")) is None:
+        item["logged_sequence"] = item.get("created_order")
+    elif _order_number(item.get("created_order")) is None:
+        item["created_order"] = item.get("logged_sequence")
+    item["created_order"] = item.get("created_order", item.get("logged_sequence"))
+    return item
+
+
+def _normalize_workout_marker(payload: dict[str, Any], *, assign_sequence: bool = False) -> dict[str, Any]:
     now = utc_now_iso()
     item = dict(payload or {})
     item["marker_id"] = str(item.get("marker_id") or item.get("id") or uuid4())
     item["date"] = str(item.get("date") or _today_iso())[:10]
-    workout_time = str(item.get("workout_time") or item.get("time") or now[11:16]).strip()
-    item["workout_time"] = workout_time[:5] if workout_time else now[11:16]
+    if assign_sequence and _order_number(item.get("marker_sequence")) is None and _order_number(item.get("created_order")) is None:
+        item["marker_sequence"] = _next_log_sequence(item["date"])
+    elif _order_number(item.get("marker_sequence")) is None:
+        item["marker_sequence"] = item.get("created_order")
+    elif _order_number(item.get("created_order")) is None:
+        item["created_order"] = item.get("marker_sequence")
+    if "marker_sequence" in item or "created_order" in item:
+        item["created_order"] = item.get("created_order", item.get("marker_sequence"))
+    workout_time = str(item.get("workout_time") or item.get("time") or "").strip()
+    item["workout_time"] = workout_time[:5] if workout_time else ""
     item["workout_type"] = str(item.get("workout_type") or item.get("type") or "Strength").strip() or "Strength"
     item["notes"] = str(item.get("notes") or "")
     item.setdefault("created_at", now)
@@ -469,6 +513,7 @@ def _normalize_food_log(payload: dict[str, Any], *, food_log_id: str | None = No
         item["sodium"] = item.get("sodium_mg")
     item.setdefault("source", "manual")
     item.setdefault("created_at", now)
+    _ensure_food_log_sequence(item)
     item["updated_at"] = now
     return item
 
@@ -991,7 +1036,7 @@ def get_workout_markers(limit: int = 500) -> dict[str, Any]:
         return {"status": "error", "items": [], "message": "Workout markers are unavailable.", "diagnostics": rows[0]["_db_error"]}
     items = sorted(
         [_normalize_workout_marker(row) for row in _valid_json_rows(rows)],
-        key=lambda row: (str(row.get("date") or ""), str(row.get("workout_time") or ""), str(row.get("created_at") or "")),
+        key=lambda row: (str(row.get("date") or ""), _order_number(row.get("marker_sequence")) or _order_number(row.get("created_order")) or -1, str(row.get("created_at") or "")),
         reverse=True,
     )
     return {
@@ -1004,8 +1049,9 @@ def get_workout_markers(limit: int = 500) -> dict[str, Any]:
 
 @router.post("/api/workout-markers")
 def post_workout_marker(payload: dict[str, Any]) -> dict[str, Any]:
-    item = insert_json_row("workout_markers", _normalize_workout_marker(payload))
+    normalized = _normalize_workout_marker(payload, assign_sequence=True)
+    item = insert_json_row("workout_markers", normalized)
     if isinstance(item, dict) and "_db_error" in item:
-        return {"status": "error", "item": _normalize_workout_marker(payload), "items": [], "message": "Workout marker could not be saved.", "diagnostics": item["_db_error"]}
+        return {"status": "error", "item": normalized, "items": [], "message": "Workout marker could not be saved.", "diagnostics": item["_db_error"]}
     items = get_workout_markers()["items"]
     return {"status": "ok", "item": _normalize_workout_marker(item), "items": items, "message": "Workout marker saved."}

@@ -1,8 +1,8 @@
 """Workout nutrition marker helpers.
 
-Markers are intentionally lightweight: one timestamp on a workout day splits
-same-day food logs into pre-workout, post-workout, and unknown-timing buckets
-without changing the underlying nutrition log.
+Markers are intentionally lightweight dividers in the same-day food logging
+sequence. Foods logged before a marker are pre-workout, foods logged after are
+post-workout, and rows without stable ordering stay in unknown timing.
 """
 
 from __future__ import annotations
@@ -20,6 +20,8 @@ from src.paths import processed_data_path
 WORKOUT_MARKER_COLUMNS = [
     "marker_id",
     "date",
+    "marker_sequence",
+    "created_order",
     "workout_time",
     "workout_type",
     "notes",
@@ -31,6 +33,7 @@ MACRO_COLUMNS = ["calories", "carbs", "protein", "fat"]
 WINDOW_COLUMNS = [
     "marker_id",
     "date",
+    "marker_sequence",
     "workout_time",
     "workout_type",
     "notes",
@@ -101,6 +104,16 @@ def _normalize_time(value) -> str:
     return parsed.strftime("%H:%M")
 
 
+def _sequence_value(row: pd.Series | dict, *keys: str) -> float | None:
+    for key in keys:
+        value = row.get(key)
+        parsed = pd.to_numeric(value, errors="coerce")
+        if pd.isna(parsed):
+            continue
+        return float(parsed)
+    return None
+
+
 def _normalize_workout_markers(markers_df: pd.DataFrame | None) -> pd.DataFrame:
     df = markers_df.copy() if markers_df is not None else _empty_workout_markers()
     for column in WORKOUT_MARKER_COLUMNS:
@@ -112,11 +125,17 @@ def _normalize_workout_markers(markers_df: pd.DataFrame | None) -> pd.DataFrame:
     if missing_ids.any():
         df.loc[missing_ids, "marker_id"] = [str(uuid4()) for _ in range(int(missing_ids.sum()))]
     df["date"] = df["date"].apply(_normalize_date)
+    for column in ("marker_sequence", "created_order"):
+        df[column] = pd.to_numeric(df[column], errors="coerce")
+    missing_marker_sequence = df["marker_sequence"].isna() & df["created_order"].notna()
+    df.loc[missing_marker_sequence, "marker_sequence"] = df.loc[missing_marker_sequence, "created_order"]
+    missing_created_order = df["created_order"].isna() & df["marker_sequence"].notna()
+    df.loc[missing_created_order, "created_order"] = df.loc[missing_created_order, "marker_sequence"]
     df["workout_time"] = df["workout_time"].apply(_normalize_time)
     df["workout_type"] = df["workout_type"].fillna("Workout").astype(str).str.strip().replace("", "Workout")
     df["notes"] = df["notes"].fillna("").astype(str)
     df["created_at"] = df["created_at"].fillna("").astype(str)
-    return df.sort_values(["date", "workout_time", "created_at"], kind="stable").reset_index(drop=True)
+    return df.sort_values(["date", "marker_sequence", "created_at", "workout_time"], kind="stable").reset_index(drop=True)
 
 
 def load_workout_markers() -> pd.DataFrame:
@@ -141,17 +160,23 @@ def create_workout_marker(
     workout_time,
     workout_type: str = "Workout",
     notes: str = "",
+    marker_sequence: float | int | None = None,
 ) -> dict:
     """Persist one workout marker and return the created marker record."""
+    markers_df = load_workout_markers()
+    if marker_sequence is None and not markers_df.empty:
+        existing = pd.to_numeric(markers_df.get("marker_sequence"), errors="coerce").dropna()
+        marker_sequence = float(existing.max() + 1) if not existing.empty else np.nan
     marker = {
         "marker_id": str(uuid4()),
         "date": _normalize_date(date),
+        "marker_sequence": np.nan if marker_sequence is None else marker_sequence,
+        "created_order": np.nan if marker_sequence is None else marker_sequence,
         "workout_time": _normalize_time(workout_time),
         "workout_type": str(workout_type or "Workout").strip() or "Workout",
         "notes": str(notes or "").strip(),
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
-    markers_df = load_workout_markers()
     markers_df = pd.concat([markers_df, pd.DataFrame([marker])], ignore_index=True)
     save_workout_markers(markers_df)
     return marker
@@ -167,35 +192,6 @@ def _sum_macros(df: pd.DataFrame | None, prefix: str = "") -> dict[str, float]:
         values = pd.to_numeric(df[column], errors="coerce").fillna(0) if column in df.columns else pd.Series(dtype=float)
         totals[f"{prefix}{column}"] = round(float(values.sum()), 1)
     return totals
-
-
-def _marker_timestamp(marker: pd.Series | dict) -> pd.Timestamp | None:
-    marker_date = _normalize_date(marker.get("date"))
-    marker_time = _normalize_time(marker.get("workout_time"))
-    if not marker_date or not marker_time:
-        return None
-    parsed = pd.to_datetime(f"{marker_date} {marker_time}", errors="coerce")
-    return None if pd.isna(parsed) else parsed
-
-
-def _entry_timestamp(row: pd.Series | dict) -> pd.Timestamp | None:
-    row_date = _normalize_date(row.get("date"))
-    if not row_date:
-        return None
-    for column in ("logged_at", "created_at", "updated_at"):
-        text = _stable_text(row.get(column))
-        if not text:
-            continue
-        if len(text) in {4, 5, 7, 8} and ":" in text and "T" not in text and " " not in text:
-            parsed = pd.to_datetime(f"{row_date} {_normalize_time(text)}", errors="coerce")
-        else:
-            parsed = pd.to_datetime(text, errors="coerce")
-        if pd.isna(parsed):
-            continue
-        if parsed.date().isoformat() != row_date:
-            continue
-        return parsed
-    return None
 
 
 def _training_summary_for_date(training_df: pd.DataFrame | None, marker_date: str) -> dict:
@@ -256,35 +252,55 @@ def calculate_workout_nutrition_windows(
         return _empty_workout_windows()
 
     nutrition = nutrition_df.copy() if nutrition_df is not None else pd.DataFrame()
-    for column in ["date", *MACRO_COLUMNS, "logged_at", "created_at", "updated_at"]:
+    for column in ["date", *MACRO_COLUMNS, "logged_sequence", "created_order", "created_at", "updated_at"]:
         if column not in nutrition.columns:
             nutrition[column] = pd.NA
     nutrition["date"] = nutrition["date"].apply(_normalize_date)
+    for column in ("logged_sequence", "created_order"):
+        nutrition[column] = pd.to_numeric(nutrition[column], errors="coerce")
+    missing_logged_sequence = nutrition["logged_sequence"].isna() & nutrition["created_order"].notna()
+    nutrition.loc[missing_logged_sequence, "logged_sequence"] = nutrition.loc[missing_logged_sequence, "created_order"]
+    missing_created_order = nutrition["created_order"].isna() & nutrition["logged_sequence"].notna()
+    nutrition.loc[missing_created_order, "created_order"] = nutrition.loc[missing_created_order, "logged_sequence"]
 
     rows = []
+    markers_by_day = {
+        marker_date: day_markers.reset_index(drop=True)
+        for marker_date, day_markers in markers.groupby(markers["date"].astype(str), sort=False)
+    }
     for _, marker in markers.iterrows():
         marker_date = _normalize_date(marker.get("date"))
-        marker_dt = _marker_timestamp(marker)
+        marker_sequence = _sequence_value(marker, "marker_sequence", "created_order")
         daily_nutrition = nutrition[nutrition["date"].astype(str) == marker_date].copy()
+        day_markers = markers_by_day.get(marker_date, pd.DataFrame())
+        marker_sequences = [
+            value
+            for value in (_sequence_value(other, "marker_sequence", "created_order") for _, other in day_markers.iterrows())
+            if value is not None
+        ]
+        previous_marker_sequence = max([value for value in marker_sequences if marker_sequence is not None and value < marker_sequence], default=None)
+        next_marker_sequence = min([value for value in marker_sequences if marker_sequence is not None and value > marker_sequence], default=None)
         pre_rows = []
         post_rows = []
         unknown_rows = []
         pre_close_fat = 0.0
-        if marker_dt is None:
+        if marker_sequence is None:
             unknown_rows = daily_nutrition.to_dict(orient="records")
         else:
             for _, food in daily_nutrition.iterrows():
-                food_dt = _entry_timestamp(food)
-                if food_dt is None:
+                food_sequence = _sequence_value(food, "logged_sequence", "created_order")
+                if food_sequence is None:
                     unknown_rows.append(food.to_dict())
-                elif food_dt < marker_dt:
+                elif previous_marker_sequence is not None and food_sequence <= previous_marker_sequence:
+                    continue
+                elif next_marker_sequence is not None and food_sequence >= next_marker_sequence:
+                    continue
+                elif food_sequence < marker_sequence:
                     pre_rows.append(food.to_dict())
-                    hours_before = (marker_dt - food_dt).total_seconds() / 3600
-                    if 0 <= hours_before <= 3:
-                        fat_value = pd.to_numeric(food.get("fat"), errors="coerce")
-                        pre_close_fat += 0.0 if pd.isna(fat_value) else float(fat_value)
-                else:
+                elif food_sequence > marker_sequence:
                     post_rows.append(food.to_dict())
+                else:
+                    unknown_rows.append(food.to_dict())
 
         pre_df = pd.DataFrame(pre_rows)
         post_df = pd.DataFrame(post_rows)
@@ -295,6 +311,7 @@ def calculate_workout_nutrition_windows(
             {
                 "marker_id": marker.get("marker_id", ""),
                 "date": marker_date,
+                "marker_sequence": marker_sequence,
                 "workout_time": _normalize_time(marker.get("workout_time")),
                 "workout_type": marker.get("workout_type", "Workout"),
                 "notes": marker.get("notes", ""),
@@ -311,7 +328,7 @@ def calculate_workout_nutrition_windows(
     for column in WINDOW_COLUMNS:
         if column not in windows_df.columns:
             windows_df[column] = np.nan
-    return windows_df[WINDOW_COLUMNS].sort_values(["date", "workout_time"], kind="stable").reset_index(drop=True)
+    return windows_df[WINDOW_COLUMNS].sort_values(["date", "marker_sequence", "workout_time"], kind="stable").reset_index(drop=True)
 
 
 def _recovery_scores(recovery_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -372,7 +389,8 @@ def generate_workout_fueling_recommendations(
         if column not in windows.columns:
             windows[column] = 0
         windows[column] = pd.to_numeric(windows[column], errors="coerce").fillna(0)
-    windows = windows.sort_values(["date", "workout_time"], kind="stable").reset_index(drop=True)
+    sort_columns = ["date", "marker_sequence"] if "marker_sequence" in windows.columns else ["date", "workout_time"]
+    windows = windows.sort_values(sort_columns, kind="stable").reset_index(drop=True)
     latest = windows.iloc[-1]
     latest_high_stress = latest["training_volume"] >= 12000 or latest["avg_rpe"] >= 8
 
@@ -394,7 +412,7 @@ def generate_workout_fueling_recommendations(
 
     recent = windows.tail(5).copy()
     high_stress_count = int(((recent["training_volume"] >= 12000) | (recent["avg_rpe"] >= 8)).sum())
-    low_carb_count = int(((recent["pre_workout_carbs"] < 40) | (recent["total_same_day_carbs"] < 180)).sum())
+    low_carb_count = int((recent["pre_workout_carbs"] < 40).sum())
     recovery_scores = _recovery_scores(recovery_df)
     poor_recent_recovery = False
     recovery_declining = False

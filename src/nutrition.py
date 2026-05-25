@@ -20,6 +20,8 @@ from src.storage import load_dataframe, load_dataframe_recent, mark_dataframe_de
 NUTRITION_COLUMNS = [
     "food_log_id",
     "date",
+    "logged_sequence",
+    "created_order",
     "meal_type",
     "food_name",
     "iconType",
@@ -199,6 +201,8 @@ def create_food_entry(
     needs_review=False,
     reviewed_at=None,
     created_via="manual",
+    logged_sequence=None,
+    created_order=None,
 ) -> dict:
     """Create a normalized food log entry."""
     now = datetime.now(timezone.utc).isoformat()
@@ -206,6 +210,8 @@ def create_food_entry(
     return {
         "food_log_id": str(uuid4()),
         "date": str(date),
+        "logged_sequence": np.nan if logged_sequence in [None, ""] else float(logged_sequence),
+        "created_order": np.nan if created_order in [None, ""] else float(created_order),
         "meal_type": str(meal_type),
         "food_name": str(food_name).strip(),
         "iconType": normalize_food_icon(iconType) or suggest_food_icon(food_name),

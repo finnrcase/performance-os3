@@ -996,9 +996,16 @@ def _training_plateau_payload(training_rows: list[dict[str, Any]], body_rows: li
             weeks = max(1, round((recent["date_dt"].max() - previous["date_dt"].min()).days / 7))
             if weeks < 3:
                 continue
+            gap_days = int((recent["date_dt"].min() - previous["date_dt"].max()).days)
+            if gap_days > 14:
+                continue
+            if abs(float(recent["reps"].mean() - previous["reps"].mean())) > 3:
+                continue
             strength_change = _pct_change(float(recent["estimated_1rm"].mean()), float(previous["estimated_1rm"].mean()))
             volume_change = _pct_change(float(recent["volume"].mean()), float(previous["volume"].mean()))
             reps_delta = float(recent["reps"].mean() - previous["reps"].mean())
+            if volume_change is not None and volume_change <= -30:
+                continue
             if strength_change is not None and strength_change <= -3:
                 signal = "performance decline"
                 severity = "medium"
@@ -1382,11 +1389,16 @@ def _lift_performance_payload(
     }
 
 
-def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
+def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict[str, Any]], target_calories: float | int | None = None) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
     recovery_df = pd.DataFrame(recovery_rows)
     sleep_df = pd.DataFrame(sleep_rows)
+    measured_fields = ("sleep_hours", "sleep_quality", "fatigue", "soreness", "stress", "motivation", "hrv", "resting_hr")
+    has_measured_recovery = any(
+        any(row.get(field) not in {None, ""} for field in measured_fields)
+        for row in recovery_rows
+    )
     try:
-        analytics = calculate_recovery_score(recovery_df) if recovery_rows else pd.DataFrame()
+        analytics = calculate_recovery_score(recovery_df, target_calories=_number(target_calories, 0) or 0) if recovery_rows and has_measured_recovery else pd.DataFrame()
     except Exception:
         analytics = pd.DataFrame()
 
@@ -1407,7 +1419,7 @@ def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict
             "classification": str(latest.get("classification") or "unknown"),
             "explanation": str(latest.get("explanation") or latest.get("reason") or ""),
         }
-    elif recovery_rows:
+    elif recovery_rows and has_measured_recovery:
         latest_row = sorted(recovery_rows, key=lambda row: str(row.get("date") or ""))[-1]
         score = max(
             0,
@@ -1450,9 +1462,11 @@ def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict
     latest_score = latest_recovery.get("recovery_score") if latest_recovery else None
     classification = latest_recovery.get("classification") if latest_recovery else "unknown"
     message = "Recovery data loaded from saved check-ins." if connected else "No recovery or sleep entries yet."
+    data_mode = "measured recovery" if latest_score is not None else "insufficient data" if not connected else "inferred recovery"
     payload = {
         "connected": connected,
         "source": "manual" if recovery_rows else "sleep" if sleep_rows else "none",
+        "data_mode": data_mode,
         "latest_score": latest_score,
         "trend": trend,
         "sleep": sleep_trend,
@@ -1767,7 +1781,8 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         latest_workout = _latest_workout(training_rows)
     training_status = str(training_summary.get("status") or "ok")
     training_available = training_status in {"ok", "not_configured", "not_loaded"}
-    recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows)
+    target_calories = _number(targets.get("target_calories"), 0)
+    recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows, target_calories)
     counts = {
         **(bundle.get("counts") if isinstance(bundle.get("counts"), dict) else {}),
         "nutrition": len(food_rows),
@@ -1778,7 +1793,6 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "recovery": len(recovery_rows),
         "sleep": len(sleep_rows),
     }
-    target_calories = _number(targets.get("target_calories"), 0)
     sources = {
         "food": {
             "source": "/api/nutrition/today",

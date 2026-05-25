@@ -283,9 +283,16 @@ def plateau_detection(training_df: pd.DataFrame, today: str | None = None) -> di
         if len(previous) < 3 or len(recent) < 3:
             continue
         weeks = max(1, round((recent["date"].max() - previous["date"].min()).days / 7))
+        gap_days = int((recent["date"].min() - previous["date"].max()).days)
+        if gap_days > 14:
+            continue
+        if abs(float(recent["max_reps"].mean() - previous["max_reps"].mean())) > 3:
+            continue
         strength_change = _pct_change(recent["best_estimated_1rm"].mean(), previous["best_estimated_1rm"].mean())
         volume_change = _pct_change(recent["total_volume"].mean(), previous["total_volume"].mean())
         reps_delta = float(recent["max_reps"].mean() - previous["max_reps"].mean())
+        if volume_change <= -30:
+            continue
         if strength_change <= -3:
             signal = "regression"
             severity = "high"

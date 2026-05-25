@@ -57,6 +57,25 @@ def _canonical_coverage_group(value: object, exercise: object = "") -> str:
     return primary if primary in MUSCLE_COVERAGE_GROUPS else ""
 
 
+def _coverage_group_weights(row: pd.Series) -> dict[str, float]:
+    explicit = _canonical_coverage_group(row.get("muscle_group"), row.get("exercise"))
+    inferred = get_exercise_muscle_group(str(row.get("exercise") or ""), {"muscle_group": explicit} if explicit else None)
+    primary = explicit or str(inferred.get("primaryMuscleGroup") or "")
+    if primary.lower() in {"abs/core", "abs", "abdominals"}:
+        primary = "Core"
+    weights: dict[str, float] = {}
+    if primary in MUSCLE_COVERAGE_GROUPS:
+        weights[primary] = 1.0
+
+    local_mapping = get_exercise_muscle_group(str(row.get("exercise") or ""))
+    secondary_values = list(inferred.get("secondaryMuscleGroups") or []) + list(local_mapping.get("secondaryMuscleGroups") or [])
+    for value in secondary_values:
+        group = "Core" if str(value).lower() in {"abs/core", "abs", "abdominals", "core"} else str(value)
+        if group in MUSCLE_COVERAGE_GROUPS and group != primary:
+            weights[group] = max(weights.get(group, 0.0), 0.5)
+    return weights
+
+
 def _prepare_strength_rows(training_df: pd.DataFrame | None) -> pd.DataFrame:
     if training_df is None or training_df.empty:
         return pd.DataFrame(columns=["date", "muscle_group", "hard_sets", "sets", "volume"])
@@ -76,14 +95,29 @@ def _prepare_strength_rows(training_df: pd.DataFrame | None) -> pd.DataFrame:
     df = df[strength_mask].copy()
     if df.empty:
         return pd.DataFrame(columns=["date", "muscle_group", "hard_sets", "sets", "volume"])
-    df["muscle_group"] = df.apply(lambda row: _canonical_coverage_group(row.get("muscle_group"), row.get("exercise")), axis=1)
-    df = df[df["muscle_group"].isin(MUSCLE_COVERAGE_GROUPS)].copy()
-    if df.empty:
+    expanded_rows = []
+    for _, row in df.iterrows():
+        group_weights = _coverage_group_weights(row)
+        if not group_weights:
+            continue
+        rpe = float(row.get("rpe") or 0)
+        sets = float(row.get("sets") or 0)
+        working_set_multiplier = 1.0 if rpe >= 7 else 0.5 if rpe <= 0 and float(row.get("weight") or 0) > 0 and float(row.get("reps") or 0) > 0 else 0.0
+        base_hard_sets = sets * working_set_multiplier
+        volume = float(row.get("sets") or 0) * float(row.get("reps") or 0) * float(row.get("weight") or 0)
+        for group, weight in group_weights.items():
+            expanded_rows.append(
+                {
+                    "date": row["date"],
+                    "muscle_group": group,
+                    "hard_sets": base_hard_sets * weight,
+                    "sets": sets * weight,
+                    "volume": volume * weight,
+                }
+            )
+    if not expanded_rows:
         return pd.DataFrame(columns=["date", "muscle_group", "hard_sets", "sets", "volume"])
-    inferred_hard_mask = (df["rpe"] <= 0) & (df["weight"] > 0) & (df["reps"] > 0)
-    df["hard_sets"] = df["sets"].where((df["rpe"] >= 7) | inferred_hard_mask, 0)
-    df["volume"] = df["sets"] * df["reps"] * df["weight"]
-    return df[["date", "muscle_group", "hard_sets", "sets", "volume"]]
+    return pd.DataFrame(expanded_rows)
 
 
 def _status_for_ratio(hard_sets: float, ratio: float) -> dict:

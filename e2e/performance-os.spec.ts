@@ -47,6 +47,7 @@ test.describe("Performance OS startup and critical flows", () => {
     await loginWithPage(page);
     await page.getByTestId("nav-food").click();
     await expect(page.getByTestId("food-page")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Log Workout Marker" })).toBeVisible();
 
     const foodName = `Playwright Food ${Date.now()}`;
     const form = page.getByTestId("manual-food-form");
