@@ -2215,12 +2215,12 @@ function Card({ children, className }: Readonly<{ children: React.ReactNode; cla
 
 function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; title: string; action?: React.ReactNode }>) {
   return (
-    <div className="mb-4 flex items-start justify-between gap-4">
-      <div>
+    <div className="mb-4 flex flex-wrap items-start justify-between gap-3 sm:gap-4">
+      <div className="min-w-0">
         {eyebrow ? <p className="accent-text mb-1 text-xs font-semibold uppercase tracking-[0.18em]">{eyebrow}</p> : null}
         <h2 className="text-lg font-semibold text-white">{title}</h2>
       </div>
-      {action ? <div>{action}</div> : null}
+      {action ? <div className="shrink-0">{action}</div> : null}
     </div>
   );
 }
@@ -5153,12 +5153,23 @@ function FoodPage({
             eyebrow="Logged foods"
             title={`Food logged for ${selectedDateLabel}`}
             action={
-              <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-                {showFoodHistory ? "Hide details" : "View full history/details"}
-                <ChevronDown className={cx("h-4 w-4 transition", showFoodHistory ? "rotate-180" : "")} />
-              </button>
+              <div className="flex flex-wrap justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={(event) => onWorkoutMarkerSubmit(event as unknown as FormEvent)}
+                  title={markerStatusText}
+                  className="inline-flex h-9 items-center rounded-lg border border-emerald-300/25 bg-emerald-300/[0.08] px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/[0.14]"
+                >
+                  Gym Marker
+                </button>
+                <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                  {showFoodHistory ? "Hide details" : "View full history/details"}
+                  <ChevronDown className={cx("h-4 w-4 transition", showFoodHistory ? "rotate-180" : "")} />
+                </button>
+              </div>
             }
           />
+          {latestSelectedMarker ? <p className="mb-3 text-xs font-medium text-emerald-100/80">{markerStatusText}</p> : null}
           <FoodLogList
             entries={selectedDateEntries.slice().reverse()}
             emptyDescription="Entries for this date will appear here immediately after saving."
@@ -5283,30 +5294,6 @@ function FoodPage({
       <div className="order-first flex min-w-0 flex-col gap-4 xl:order-none">
       <Card className="order-3 min-w-0">
         <SectionHeader eyebrow="Food" title="Manual food entry" />
-        <div className="mb-4 rounded-lg border border-emerald-300/25 bg-emerald-300/[0.07] p-3">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div className="min-w-0">
-              <p className="text-sm font-semibold text-emerald-50">Gym Marker</p>
-              <p className="mt-1 text-xs leading-5 text-emerald-100/75">
-                Place this after logging pre-workout foods. Foods logged after it are post-workout for {selectedDateLabel}.
-              </p>
-              <p className="mt-2 text-xs font-medium text-emerald-100">{markerStatusText}</p>
-            </div>
-            {latestSelectedMarker ? (
-              <span className="w-fit shrink-0 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
-                {selectedDateMarkers.length} marker{selectedDateMarkers.length === 1 ? "" : "s"}
-              </span>
-            ) : null}
-          </div>
-          <form onSubmit={onWorkoutMarkerSubmit} className="mt-3 grid gap-3 md:grid-cols-[minmax(130px,0.8fr)_minmax(110px,0.65fr)_minmax(0,1fr)_auto] md:items-end">
-            <SelectInput label="Type" value={forms.workoutMarker.workout_type} options={["Strength", "Run", "Cardio", "Mobility", "Other"]} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_type: value } }))} />
-            <TextInput label="Time optional" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
-            <TextInput label="Notes optional" value={forms.workoutMarker.notes} placeholder="Pull day, legs, gym, etc." onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, notes: value } }))} />
-            <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
-              Log Workout Marker
-            </button>
-          </form>
-        </div>
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
             <button
