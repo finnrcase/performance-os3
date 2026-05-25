@@ -1215,18 +1215,6 @@ type ApiConnectionTestResponse = {
   withings: ApiConnectionTestItem;
 };
 
-type OpenAIDebugResponse = {
-  configured: boolean;
-  client_initialized: boolean;
-  test_status: "ok" | "error" | string;
-  error_type: string;
-  message: string;
-  model?: string;
-  api_key_source?: string;
-  response_ms?: number;
-  latency_ms?: number;
-};
-
 type FormState = {
   nutrition: NutritionEntry;
   body: BodyMetricEntry;
@@ -1579,6 +1567,20 @@ function recommendationConfidenceLabel(confidence?: AdaptiveNutritionRecommendat
 function finiteNumberOrNull(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+const DEFAULT_BASELINE_CALORIES = 2650;
+
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function arrayOrEmpty<T = unknown>(value: unknown): T[] {
+  return Array.isArray(value) ? value as T[] : [];
+}
+
+function stringOrFallback(value: unknown, fallback = "") {
+  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
 }
 
 function formatWholeNumber(value: unknown, fallback = "--") {
@@ -2013,6 +2015,43 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
       {action ? <div>{action}</div> : null}
     </div>
   );
+}
+
+class TargetSectionErrorBoundary extends Component<
+  Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string }>,
+  { hasError: boolean; message: string }
+> {
+  state = { hasError: false, message: "" };
+
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : "Insufficient data.",
+    };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+  }
+
+  componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string }>) {
+    if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, message: "" });
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <Card className="border-amber-300/25 bg-amber-300/[0.06]">
+          <p className="font-medium text-amber-100">{this.props.title}</p>
+          <p className="mt-2 text-sm leading-6 text-amber-100/75">{this.props.description ?? "Insufficient data to render this section."}</p>
+          {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
+        </Card>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 class GoalsPageErrorBoundary extends Component<
@@ -3195,20 +3234,18 @@ function SupplementsTile({
   date: string;
 }>) {
   const storageKey = `performance-os-supplements-taken-${date}`;
-  const [taken, setTaken] = useState(false);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    setTaken(window.localStorage.getItem(storageKey) === "true");
-  }, [storageKey]);
+  const [takenByKey, setTakenByKey] = useState<Record<string, boolean>>({});
+  const storedTaken = typeof window !== "undefined" && window.localStorage.getItem(storageKey) === "true";
+  const taken = takenByKey[storageKey] ?? storedTaken;
 
   const toggleTaken = () => {
-    setTaken((current) => {
+    setTakenByKey((currentByKey) => {
+      const current = currentByKey[storageKey] ?? storedTaken;
       const next = !current;
       if (typeof window !== "undefined") {
         window.localStorage.setItem(storageKey, String(next));
       }
-      return next;
+      return { ...currentByKey, [storageKey]: next };
     });
   };
 
@@ -3447,15 +3484,20 @@ function dashboardFoodProgressColor(percent: number) {
 
 function DashboardProgressLine({ label, value, target, left, over, percent, unit = "g" }: Readonly<{
   label: string;
-  value: number;
-  target: number | null;
-  left: number | null;
-  over: number | null;
-  percent: number;
+  value: unknown;
+  target: unknown;
+  left: unknown;
+  over: unknown;
+  percent: unknown;
   unit?: string;
 }>) {
   const moleculeKind = macroMoleculeKind(label);
-  const progressPercent = target ? percent : 0;
+  const safeValue = finiteNumberOrNull(value) ?? 0;
+  const safeTarget = finiteNumberOrNull(target);
+  const safeLeft = finiteNumberOrNull(left) ?? (safeTarget !== null ? Math.max(safeTarget - safeValue, 0) : null);
+  const safeOver = finiteNumberOrNull(over) ?? (safeTarget !== null ? Math.max(safeValue - safeTarget, 0) : null);
+  const rawPercent = finiteNumberOrNull(percent) ?? (safeTarget && safeTarget > 0 ? (safeValue / safeTarget) * 100 : 0);
+  const progressPercent = safeTarget && safeTarget > 0 ? Math.max(0, Math.min(100, rawPercent)) : 0;
   return (
     <div>
       <div className="flex items-center justify-between gap-3 text-sm">
@@ -3464,7 +3506,7 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
           {label}
         </span>
         <span className="font-medium text-zinc-100">
-          {Math.round(value)}{unit === "kcal" ? "" : unit} / {target ? `${Math.round(target)}${unit === "kcal" ? "" : unit}` : "No target"}
+          {Math.round(safeValue)}{unit === "kcal" ? "" : unit} / {safeTarget ? `${Math.round(safeTarget)}${unit === "kcal" ? "" : unit}` : "No target"}
         </span>
       </div>
       <div className="mt-2 h-2 rounded-full bg-white/10">
@@ -3478,10 +3520,26 @@ function DashboardProgressLine({ label, value, target, left, over, percent, unit
         />
       </div>
       <p className="mt-1 text-xs text-zinc-500">
-        {!target ? "Set macro targets." : over && over > 0 ? `+${Math.round(over)}${unit === "kcal" ? " kcal" : unit} over` : `${Math.round(left ?? 0)}${unit === "kcal" ? " kcal" : unit} left`}
+        {!safeTarget ? "Set macro targets." : safeOver && safeOver > 0 ? `+${Math.round(safeOver)}${unit === "kcal" ? " kcal" : unit} over` : `${Math.round(safeLeft ?? 0)}${unit === "kcal" ? " kcal" : unit} left`}
       </p>
     </div>
   );
+}
+
+function normalizeDashboardMacroProgress(raw: unknown, fallbackTarget?: unknown): DashboardData["food"]["calories"] {
+  const record = recordOrEmpty(raw);
+  const eaten = finiteNumberOrNull(record.eaten) ?? 0;
+  const target = finiteNumberOrNull(record.target) ?? finiteNumberOrNull(fallbackTarget);
+  const left = finiteNumberOrNull(record.left) ?? (target !== null ? Math.max(target - eaten, 0) : null);
+  const over = finiteNumberOrNull(record.over) ?? (target !== null ? Math.max(eaten - target, 0) : null);
+  const percent = finiteNumberOrNull(record.percent) ?? (target && target > 0 ? (eaten / target) * 100 : 0);
+  return {
+    eaten,
+    target,
+    left,
+    over,
+    percent: Math.max(0, Math.min(100, percent)),
+  };
 }
 
 function WearableMiniChart({
@@ -3541,30 +3599,39 @@ function workoutQualityStyles(color: string) {
   return { ring: "border-zinc-500/30 text-zinc-100", bar: "bg-zinc-400", badge: "border-zinc-300/20 bg-zinc-300/10 text-zinc-200" };
 }
 
-function workoutQualityScorePercent(score?: number | null) {
-  if (score === null || score === undefined || !Number.isFinite(score)) return 0;
-  return Math.min(100, Math.max(0, score <= 10 ? score * 10 : score));
+function workoutQualityScorePercent(score?: unknown) {
+  const parsed = finiteNumberOrNull(score);
+  if (parsed === null) return 0;
+  return Math.min(100, Math.max(0, parsed <= 10 ? parsed * 10 : parsed));
 }
 
-function workoutQualityScoreText(score?: number | null) {
-  if (score === null || score === undefined || !Number.isFinite(score)) return "--";
-  return score <= 10 ? score.toFixed(1) : `${Math.round(score)}`;
+function workoutQualityScoreText(score?: unknown) {
+  const parsed = finiteNumberOrNull(score);
+  if (parsed === null) return "--";
+  return parsed <= 10 ? parsed.toFixed(1) : `${Math.round(parsed)}`;
 }
 
-function formatWorkoutQualityPct(value?: number | null) {
-  if (value === null || value === undefined || !Number.isFinite(value)) return "";
-  return `${value >= 0 ? "+" : ""}${Math.round(value * 100)}%`;
+function formatWorkoutQualityPct(value?: unknown) {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return "";
+  return `${parsed >= 0 ? "+" : ""}${Math.round(parsed * 100)}%`;
 }
 
-function workoutQualityComparisonText(comparison?: DashboardData["workout_quality"]["comparison"]) {
+function workoutQualityComparisonText(comparison?: unknown) {
   if (!comparison) return "";
   if (typeof comparison === "string") return comparison;
-  if (comparison.summary) return comparison.summary;
+  const comparisonRecord = recordOrEmpty(comparison);
+  const summary = stringOrFallback(comparisonRecord.summary);
+  if (summary) return summary;
+  const avgSetChange = finiteNumberOrNull(comparisonRecord.avg_set_volume_pct_change);
+  const volumeChange = finiteNumberOrNull(comparisonRecord.volume_vs_average_pct);
+  const setsChange = finiteNumberOrNull(comparisonRecord.sets_vs_average_pct);
+  const sampleSize = finiteNumberOrNull(comparisonRecord.sample_size);
   const pieces = [
-    typeof comparison.avg_set_volume_pct_change === "number" ? `avg set ${formatWorkoutQualityPct(comparison.avg_set_volume_pct_change)}` : "",
-    typeof comparison.volume_vs_average_pct === "number" ? `volume ${comparison.volume_vs_average_pct > 0 ? "+" : ""}${comparison.volume_vs_average_pct}%` : "",
-    typeof comparison.sets_vs_average_pct === "number" ? `sets ${comparison.sets_vs_average_pct > 0 ? "+" : ""}${comparison.sets_vs_average_pct}%` : "",
-    typeof comparison.sample_size === "number" ? `${comparison.sample_size} similar` : "",
+    avgSetChange !== null ? `avg set ${formatWorkoutQualityPct(avgSetChange)}` : "",
+    volumeChange !== null ? `volume ${volumeChange > 0 ? "+" : ""}${volumeChange}%` : "",
+    setsChange !== null ? `sets ${setsChange > 0 ? "+" : ""}${setsChange}%` : "",
+    sampleSize !== null ? `${Math.round(sampleSize)} similar` : "",
   ].filter(Boolean);
   return pieces.join(" · ");
 }
@@ -3579,18 +3646,21 @@ function usefulTargetDecisionNotice(
   nutritionRecommendation?: OptimizationSignals["nutrition_recommendation"] | null,
   adaptiveRecommendation?: AdaptiveNutritionRecommendation | null,
 ): TargetDecisionNotice | null {
-  const confidence = nutritionRecommendation?.confidence ?? recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel);
+  const confidence = stringOrFallback(
+    nutritionRecommendation?.confidence,
+    recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel),
+  );
   const normalizedConfidence = confidence.toLowerCase();
   const normalizedDecision = String(nutritionRecommendation?.decision ?? adaptiveRecommendation?.recommendation_trace?.decision ?? "").toLowerCase();
   const normalizedStatus = String(nutritionRecommendation?.status ?? "").toLowerCase().replace(/[_-]/g, " ");
-  const macroChanges = adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment ?? null;
+  const macroChanges = recordOrEmpty(adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment);
   const calorieAdjustment = finiteNumberOrNull(nutritionRecommendation?.calorie_adjustment)
     ?? finiteNumberOrNull(adaptiveRecommendation?.calorieAdjustment)
-    ?? finiteNumberOrNull(macroChanges?.calories)
+    ?? finiteNumberOrNull(macroChanges.calories)
     ?? 0;
-  const reason = (nutritionRecommendation?.primary_reason ?? adaptiveRecommendation?.reasoning?.[0] ?? "").trim();
+  const reason = stringOrFallback(nutritionRecommendation?.primary_reason, stringList(adaptiveRecommendation?.reasoning)[0] ?? "").trim();
   const reasonSentence = reason ? ` ${reason}` : "";
-  const changedMacros = (["protein", "carbs", "fat"] as const).filter((key) => Math.abs(finiteNumberOrNull(macroChanges?.[key]) ?? 0) >= 1);
+  const changedMacros = (["protein", "carbs", "fat"] as const).filter((key) => Math.abs(finiteNumberOrNull(macroChanges[key]) ?? 0) >= 1);
 
   if (Math.abs(calorieAdjustment) >= 1) {
     return {
@@ -3730,19 +3800,33 @@ function Dashboard({
   const recovery = data?.recovery;
   const lift = data?.lift_performance;
   const workoutQuality = data?.workout_quality;
+  const targetRecord = recordOrEmpty(data?.targets);
+  const calorieTarget = finiteNumberOrNull(targetRecord.target_calories) ?? finiteNumberOrNull(food?.calories?.target) ?? DEFAULT_BASELINE_CALORIES;
+  const safeFood = {
+    calories: normalizeDashboardMacroProgress(food?.calories, calorieTarget),
+    protein: normalizeDashboardMacroProgress(food?.protein, finiteNumberOrNull(targetRecord.protein_grams)),
+    carbs: normalizeDashboardMacroProgress(food?.carbs, finiteNumberOrNull(targetRecord.carb_grams)),
+    fat: normalizeDashboardMacroProgress(food?.fat, finiteNumberOrNull(targetRecord.fat_grams)),
+  };
+  const hasFoodTargets = Boolean(food?.has_targets) || safeFood.calories.target !== null;
+  const hasFoodLogged = Boolean(food?.has_food_logged);
+  const todayWeight = finiteNumberOrNull(weight?.today_weight);
+  const sevenDayWeight = finiteNumberOrNull(weight?.seven_day_average);
+  const weightHistory = arrayOrEmpty<BodyMetricEntry>(weight?.history);
   const qualityStyles = workoutQualityStyles(workoutQuality?.color ?? "gray");
   const qualityScorePercent = workoutQualityScorePercent(workoutQuality?.score);
   const qualityComparison = workoutQualityComparisonText(workoutQuality?.comparison);
-  const workoutQualityTitle = workoutQuality?.title ?? workoutQuality?.workout_type ?? "";
+  const workoutQualityTitle = stringOrFallback(workoutQuality?.title, stringOrFallback(workoutQuality?.workout_type));
   const workoutQualityMeta = [
-    workoutQuality?.date,
-    workoutQuality?.classification_label ?? workoutQuality?.classification,
+    stringOrFallback(workoutQuality?.date),
+    stringOrFallback(workoutQuality?.classification_label, stringOrFallback(workoutQuality?.classification)),
   ].filter(Boolean).join(" · ");
-  const qualityExerciseChanges = (workoutQuality?.exercise_breakdown ?? [])
-    .filter((item) => typeof item.avg_set_volume_pct_change === "number")
+  const qualityExerciseChanges = arrayOrEmpty<NonNullable<DashboardData["workout_quality"]["exercise_breakdown"]>[number]>(workoutQuality?.exercise_breakdown)
+    .filter((item) => finiteNumberOrNull(item.avg_set_volume_pct_change) !== null)
     .slice(0, 3)
     .map((item) => `${item.exercise} ${formatWorkoutQualityPct(item.avg_set_volume_pct_change)}`)
     .join(", ");
+  const workoutMuscleGroups = stringList(workoutQuality?.muscle_groups).slice(0, 3);
   const personalLearning = data?.personal_learning;
   const weeklyReport = data?.weekly_report;
   const prs = data?.prs;
@@ -3753,14 +3837,39 @@ function Dashboard({
   const plateauWatch = optimizationSignals?.plateau_watch ?? optimization?.plateau_detection;
   const baselineSignal = optimizationSignals?.personal_baseline ?? optimization?.personal_baseline;
   const dashboardInsight = baselineSignal?.dashboard_insight;
-  const topPlateauAlerts = plateauWatch?.top_alerts ?? [];
+  const topPlateauAlerts = arrayOrEmpty<OptimizationData["plateau_detection"]["top_alerts"][number]>(plateauWatch?.top_alerts);
   const adaptiveRecommendation = data?.adaptive_recommendation;
   const targetDecisionNotice = usefulTargetDecisionNotice(nutritionRecommendation, adaptiveRecommendation);
-  const topAdaptiveWarning = optimizationSignals?.confidence?.missing_data?.[0] ?? adaptiveRecommendation?.warnings?.[0] ?? adaptiveRecommendation?.missingDataWarnings?.[0] ?? null;
-  const plannedWorkout = lift?.planned_workout ?? "Training";
-  const completedTraining = lift?.completed_summary || "";
-  const trainingSources = lift?.sources ?? [];
-  const failedDashboardBlocks = (data?.debug?.errors ?? data?.errors ?? []).filter((block) => block.status === "error" || block.error_type);
+  const topAdaptiveWarning = stringList(optimizationSignals?.confidence?.missing_data)[0] ?? stringList(adaptiveRecommendation?.warnings)[0] ?? stringList(adaptiveRecommendation?.missingDataWarnings)[0] ?? null;
+  const recommendationConfidence = stringOrFallback(nutritionRecommendation?.confidence, recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel));
+  const recommendationDataQualityScore = finiteNumberOrNull(nutritionRecommendation?.data_quality_score) ?? finiteNumberOrNull(adaptiveRecommendation?.dataQualityScore) ?? 0;
+  const recommendationTitle = stringOrFallback(
+    nutritionRecommendation?.title,
+    adaptiveRecommendation?.calorieAdjustment === 0 ? "Hold targets" : `${adaptiveRecommendation?.calorieAdjustment && adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}${adaptiveRecommendation?.calorieAdjustment ?? 0} kcal adjustment`,
+  );
+  const recommendationReason = stringOrFallback(nutritionRecommendation?.primary_reason, stringList(adaptiveRecommendation?.reasoning)[0] ?? "Insufficient data for a nutrition recommendation.");
+  const personalLearningInsights = arrayOrEmpty<PersonalLearning["insights"][number]>(personalLearning?.insights);
+  const baselineTitle = stringOrFallback(dashboardInsight?.title, stringOrFallback(personalLearningInsights[0]?.title, "Building baseline"));
+  const baselineSummary = stringOrFallback(dashboardInsight?.summary, stringOrFallback(personalLearningInsights[0]?.explanation, "Insufficient overlapping data for a stable personal baseline."));
+  const plannedWorkout = stringOrFallback(lift?.planned_workout, "Training");
+  const completedTraining = stringOrFallback(lift?.completed_summary);
+  const trainingSources = stringList(lift?.sources);
+  const runSummary = recordOrEmpty(lift?.run_summary);
+  const runDistanceMiles = finiteNumberOrNull(runSummary.distance_miles);
+  const runCount = finiteNumberOrNull(runSummary.run_count) ?? 0;
+  const runDurationMinutes = finiteNumberOrNull(runSummary.duration_minutes);
+  const runPace = finiteNumberOrNull(runSummary.average_pace_min_per_mile);
+  const runCalories = finiteNumberOrNull(runSummary.calories_burned);
+  const runHeartRate = finiteNumberOrNull(runSummary.average_heart_rate);
+  const todayVolume = finiteNumberOrNull(lift?.today_volume);
+  const recoveryTrend = arrayOrEmpty<Record<string, string | number>>(recovery?.trend);
+  const recoverySleep = arrayOrEmpty<Record<string, string | number>>(recovery?.sleep);
+  const recoveryHrv = arrayOrEmpty<Record<string, string | number>>(recovery?.hrv);
+  const recoveryRestingHr = arrayOrEmpty<Record<string, string | number>>(recovery?.resting_hr);
+  const recoveryScore = finiteNumberOrNull(recovery?.latest_score);
+  const extraRunReasoning = stringList(recovery?.extra_run_readiness?.reasoning);
+  const macroWeeklyScore = finiteNumberOrNull(macroAdherence?.weekly_score);
+  const failedDashboardBlocks = arrayOrEmpty<DashboardDebugBlock>(data?.debug?.errors ?? data?.errors).filter((block) => block.status === "error" || block.error_type);
   const dashboardDegraded = data?.debug?.dashboard_status === "degraded" && failedDashboardBlocks.length > 0;
 
   return (
@@ -3806,30 +3915,32 @@ function Dashboard({
           </div>
         </div>
       ) : null}
-      <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
-        {food?.has_targets ? (
-          <div className="space-y-4">
-            <DashboardProgressLine label="Calories" value={food.calories.eaten} target={food.calories.target} left={food.calories.left} over={food.calories.over} percent={food.calories.percent} unit="kcal" />
-            <DashboardProgressLine label="Protein" value={food.protein.eaten} target={food.protein.target} left={food.protein.left} over={food.protein.over} percent={food.protein.percent} />
-            <DashboardProgressLine label="Carbs" value={food.carbs.eaten} target={food.carbs.target} left={food.carbs.left} over={food.carbs.over} percent={food.carbs.percent} />
-            <DashboardProgressLine label="Fat" value={food.fat.eaten} target={food.fat.target} left={food.fat.left} over={food.fat.over} percent={food.fat.percent} />
-            {!food.has_food_logged ? <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm text-zinc-400">No food logged yet. Start at 0 progress.</p> : null}
-          </div>
-        ) : (
-          <EmptyState title="Set macro targets." description="Goals & Targets powers calorie and macro progress." action="Set targets" onAction={() => setActivePage("goals")} />
-        )}
-      </Card>
+      <TargetSectionErrorBoundary title="Food tile unavailable" description="Insufficient target data for today's food tile." resetKey={`${data?.date ?? ""}-${calorieTarget}`}>
+        <Card className="xl:col-span-2">
+          <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
+          {hasFoodTargets ? (
+            <div className="space-y-4">
+              <DashboardProgressLine label="Calories" value={safeFood.calories.eaten} target={safeFood.calories.target} left={safeFood.calories.left} over={safeFood.calories.over} percent={safeFood.calories.percent} unit="kcal" />
+              <DashboardProgressLine label="Protein" value={safeFood.protein.eaten} target={safeFood.protein.target} left={safeFood.protein.left} over={safeFood.protein.over} percent={safeFood.protein.percent} />
+              <DashboardProgressLine label="Carbs" value={safeFood.carbs.eaten} target={safeFood.carbs.target} left={safeFood.carbs.left} over={safeFood.carbs.over} percent={safeFood.carbs.percent} />
+              <DashboardProgressLine label="Fat" value={safeFood.fat.eaten} target={safeFood.fat.target} left={safeFood.fat.left} over={safeFood.fat.over} percent={safeFood.fat.percent} />
+              {!hasFoodLogged ? <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm text-zinc-400">No food logged yet. Start at 0 progress.</p> : null}
+            </div>
+          ) : (
+            <EmptyState title="Set macro targets." description="Goals & Targets powers calorie and macro progress." action="Set targets" onAction={() => setActivePage("goals")} />
+          )}
+        </Card>
+      </TargetSectionErrorBoundary>
 
       <Card>
         <SectionHeader eyebrow="Check-in" title="Weight" action={<button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Enter weight</button>} />
-        <p className="text-3xl font-semibold text-white">{weight?.today_weight ? `${weight.today_weight.toFixed(1)} lb` : "Enter today's weight"}</p>
-        <p className="mt-2 text-sm text-zinc-400">7-day avg: {weight?.seven_day_average ? `${weight.seven_day_average.toFixed(1)} lb` : "Need data"}</p>
+        <p className="text-3xl font-semibold text-white">{todayWeight !== null ? `${todayWeight.toFixed(1)} lb` : "Enter today's weight"}</p>
+        <p className="mt-2 text-sm text-zinc-400">7-day avg: {sevenDayWeight !== null ? `${sevenDayWeight.toFixed(1)} lb` : "Need data"}</p>
         <p className="mt-2 inline-flex rounded-full border border-blue-300/20 bg-blue-300/10 px-3 py-1 text-xs text-blue-100">{weight?.trend_label ?? "insufficient data"}</p>
-        {weight?.history?.length ? (
+        {weightHistory.length ? (
           <ChartFrame className="mt-4 h-28">
             <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={weight.history}>
+              <AreaChart data={weightHistory}>
                 <Area dataKey="bodyweight" stroke="#60a5fa" fill="#60a5fa" fillOpacity={0.2} strokeWidth={2} />
               </AreaChart>
             </ResponsiveContainer>
@@ -3849,28 +3960,28 @@ function Dashboard({
             <p className="mt-1 text-sm font-semibold text-zinc-100">{completedTraining ? `Completed: ${completedTraining}` : "Workout not logged yet"}</p>
             <div className="mt-3 flex flex-wrap gap-2">
               <span className={cx("rounded-full border px-2.5 py-1 text-xs font-medium", lift?.schedule_match === "matched" || lift?.schedule_match === "matched_plus_extra_run" ? "border-emerald-300/25 bg-emerald-300/10 text-emerald-100" : lift?.schedule_match === "different" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.04] text-zinc-400")}>
-                {lift?.match_label ?? "Workout not logged yet"}
+                {stringOrFallback(lift?.match_label, "Workout not logged yet")}
               </span>
-              {lift?.cardio_indicator ? <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">{lift.cardio_indicator}</span> : null}
+              {stringOrFallback(lift?.cardio_indicator) ? <span className="rounded-full border border-sky-300/25 bg-sky-300/10 px-2.5 py-1 text-xs font-medium text-sky-100">{stringOrFallback(lift?.cardio_indicator)}</span> : null}
               {trainingSources.map((source) => (
                 <span key={source} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{source}</span>
               ))}
             </div>
-            {lift?.recovery_status_relative_to_plan ? <p className="mt-2 text-xs text-zinc-500">Recovery context: {lift.recovery_status_relative_to_plan}</p> : null}
+            {stringOrFallback(lift?.recovery_status_relative_to_plan) ? <p className="mt-2 text-xs text-zinc-500">Recovery context: {stringOrFallback(lift?.recovery_status_relative_to_plan)}</p> : null}
           </div>
         </div>
         {lift?.extra_run_added ? <p className="accent-outline mt-3 rounded-lg border p-3 text-sm font-semibold">Recovery run added</p> : null}
-        {lift?.today_volume ? <p className="mt-4 text-sm text-amber-200">Lift volume: {Math.round(lift.today_volume).toLocaleString()}</p> : null}
-        {lift?.comparison ? <p className="mt-2 text-xs text-zinc-500">{lift.comparison}</p> : null}
-        {lift?.run_summary ? (
+        {todayVolume !== null ? <p className="mt-4 text-sm text-amber-200">Lift volume: {Math.round(todayVolume).toLocaleString()}</p> : null}
+        {stringOrFallback(lift?.comparison) ? <p className="mt-2 text-xs text-zinc-500">{stringOrFallback(lift?.comparison)}</p> : null}
+        {runDistanceMiles !== null ? (
           <div className="mt-4 border-t border-white/10 pt-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Run</p>
             <p className="accent-text-strong mt-1 text-sm font-semibold">
-              {lift.run_summary.distance_miles.toFixed(2)} mi{lift.run_summary.run_count > 1 ? " total" : ""} · {formatRunDuration(lift.run_summary.duration_minutes)} · {formatRunPace(lift.run_summary.average_pace_min_per_mile)}{lift.run_summary.run_count > 1 ? " avg" : ""}
+              {runDistanceMiles.toFixed(2)} mi{runCount > 1 ? " total" : ""} · {formatRunDuration(runDurationMinutes)} · {formatRunPace(runPace)}{runCount > 1 ? " avg" : ""}
             </p>
-            {(lift.run_summary.calories_burned || lift.run_summary.average_heart_rate) ? (
+            {(runCalories || runHeartRate) ? (
               <p className="mt-1 text-xs text-zinc-500">
-                {[lift.run_summary.calories_burned ? `${Math.round(lift.run_summary.calories_burned)} kcal` : "", lift.run_summary.average_heart_rate ? `${Math.round(lift.run_summary.average_heart_rate)} bpm avg` : ""].filter(Boolean).join(" · ")}
+                {[runCalories ? `${Math.round(runCalories)} kcal` : "", runHeartRate ? `${Math.round(runHeartRate)} bpm avg` : ""].filter(Boolean).join(" · ")}
               </p>
             ) : null}
           </div>
@@ -3884,21 +3995,21 @@ function Dashboard({
             <span className="text-xl font-semibold">{workoutQualityScoreText(workoutQuality?.score)}</span>
           </div>
           <div className="min-w-0">
-            <p className="text-xl font-semibold text-white">{workoutQuality?.rating ?? workoutQuality?.score_label ?? "No recent lift"}</p>
+            <p className="text-xl font-semibold text-white">{stringOrFallback(workoutQuality?.rating, stringOrFallback(workoutQuality?.score_label, "No recent lift"))}</p>
             <p className="mt-2 text-sm font-semibold text-zinc-100">{workoutQualityTitle || "Latest lift pending"}</p>
             <p className="mt-1 text-xs uppercase tracking-[0.12em] text-zinc-500">{workoutQualityMeta || "Lift summary"}</p>
           </div>
         </div>
-        <p className="mt-4 text-sm leading-6 text-zinc-400">{workoutQuality?.summary ?? workoutQuality?.explanation ?? "No recent lifting workout found."}</p>
+        <p className="mt-4 text-sm leading-6 text-zinc-400">{stringOrFallback(workoutQuality?.summary, stringOrFallback(workoutQuality?.explanation, "No recent lifting workout found."))}</p>
         {qualityExerciseChanges ? <p className="mt-2 text-xs leading-5 text-zinc-500">{qualityExerciseChanges}</p> : null}
         <div className="mt-4 h-2 rounded-full bg-white/10">
           <div className={`h-2 rounded-full ${qualityStyles.bar}`} style={{ width: `${qualityScorePercent}%` }} />
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${qualityStyles.badge}`}>
-            {workoutQuality?.confidence ?? "low"} confidence
+            {stringOrFallback(workoutQuality?.confidence, "low")} confidence
           </span>
-          {workoutQuality?.muscle_groups?.slice(0, 3).map((group) => (
+          {workoutMuscleGroups.map((group) => (
             <span key={group} className="rounded-full border border-white/10 bg-white/[0.04] px-2.5 py-1 text-xs text-zinc-300">{group}</span>
           ))}
           {qualityComparison ? <span className="text-xs text-zinc-500">{qualityComparison}</span> : null}
@@ -3911,18 +4022,18 @@ function Dashboard({
           <div className="space-y-3">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <p className="text-3xl font-semibold text-white">{recovery.latest_score !== null && recovery.latest_score !== undefined ? Math.round(recovery.latest_score) : "Sync pending"}</p>
-                <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{recovery.classification}</p>
+                <p className="text-3xl font-semibold text-white">{recoveryScore !== null ? Math.round(recoveryScore) : "Sync pending"}</p>
+                <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{stringOrFallback(recovery.classification, "sync pending")}</p>
               </div>
-              <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{recovery.source}</p>
+              <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{stringOrFallback(recovery.source, "wearable")}</p>
             </div>
-            <WearableMiniChart title="Recovery trend" data={recovery.trend} dataKey="recovery_score" stroke="#34d399" />
-            <WearableMiniChart title="Sleep trend" data={recovery.sleep} dataKey="sleep_hours" stroke="#60a5fa" />
+            <WearableMiniChart title="Recovery trend" data={recoveryTrend} dataKey="recovery_score" stroke="#34d399" />
+            <WearableMiniChart title="Sleep trend" data={recoverySleep} dataKey="sleep_hours" stroke="#60a5fa" />
             <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-              <WearableMiniChart title="HRV trend" data={recovery.hrv} dataKey="hrv" stroke="#a78bfa" />
-              <WearableMiniChart title="Resting HR trend" data={recovery.resting_hr} dataKey="resting_hr" stroke="#fb7185" />
+              <WearableMiniChart title="HRV trend" data={recoveryHrv} dataKey="hrv" stroke="#a78bfa" />
+              <WearableMiniChart title="Resting HR trend" data={recoveryRestingHr} dataKey="resting_hr" stroke="#fb7185" />
             </div>
-            <p className="text-sm text-zinc-500">{recovery.message}</p>
+            <p className="text-sm text-zinc-500">{stringOrFallback(recovery.message, "Recovery data sync pending.")}</p>
           </div>
         ) : (
           <EmptyState title="Connect Fitbit/Google Health to enable recovery tracking." description="Recovery will show wearable sleep, HRV, resting HR, and readiness trends once connected." action="Connect wearable" onAction={() => setActivePage("settings")} />
@@ -3930,20 +4041,21 @@ function Dashboard({
         <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-4">
           <div className="flex items-center justify-between gap-3">
             <p className="text-sm font-semibold text-white">Extra Run Today?</p>
-            <span className={`rounded-full border px-3 py-1 text-xs font-medium capitalize ${statusBadgeClass(recovery?.extra_run_readiness?.status ?? "insufficient_data")}`}>
-              {(recovery?.extra_run_readiness?.status ?? "insufficient data").replace("_", " ")}
+            <span className={`rounded-full border px-3 py-1 text-xs font-medium capitalize ${statusBadgeClass(String(recovery?.extra_run_readiness?.status ?? "insufficient_data"))}`}>
+              {String(recovery?.extra_run_readiness?.status ?? "insufficient data").replace("_", " ")}
             </span>
           </div>
-          <p className="mt-3 text-sm leading-6 text-zinc-300">{recovery?.extra_run_readiness?.message ?? "Connect wearable data for run readiness."}</p>
-          <p className="accent-text-strong mt-2 text-sm font-semibold">{recovery?.extra_run_readiness?.recommended_run ?? "Connect wearable data"}</p>
-          {recovery?.extra_run_readiness?.reasoning?.length ? (
-            <p className="mt-2 text-xs leading-5 text-zinc-500">{recovery.extra_run_readiness.reasoning[0]}</p>
+          <p className="mt-3 text-sm leading-6 text-zinc-300">{stringOrFallback(recovery?.extra_run_readiness?.message, "Connect wearable data for run readiness.")}</p>
+          <p className="accent-text-strong mt-2 text-sm font-semibold">{stringOrFallback(recovery?.extra_run_readiness?.recommended_run, "Connect wearable data")}</p>
+          {extraRunReasoning.length ? (
+            <p className="mt-2 text-xs leading-5 text-zinc-500">{extraRunReasoning[0]}</p>
           ) : null}
         </div>
       </Card>
 
-      <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Adaptive" title="Optimization Signals" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Details</button>} />
+      <TargetSectionErrorBoundary title="Optimization signals unavailable" description="Insufficient recommendation data for this dashboard tile." resetKey={`${data?.date ?? ""}-${recommendationConfidence}`}>
+        <Card className="xl:col-span-2">
+          <SectionHeader eyebrow="Adaptive" title="Optimization Signals" action={<button onClick={() => setActivePage("history")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Details</button>} />
         {nutritionRecommendation || adaptiveRecommendation ? (
           <button
             type="button"
@@ -3954,12 +4066,12 @@ function Dashboard({
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.14em] text-emerald-200/80">Nutrition recommendation</p>
                 <p className="mt-1 text-sm font-semibold text-white">
-                  {nutritionRecommendation?.title ?? (adaptiveRecommendation?.calorieAdjustment === 0 ? "Hold targets" : `${adaptiveRecommendation?.calorieAdjustment && adaptiveRecommendation.calorieAdjustment > 0 ? "+" : ""}${adaptiveRecommendation?.calorieAdjustment ?? 0} kcal adjustment`)}
+                  {recommendationTitle}
                 </p>
-                <p className="mt-1 text-xs leading-5 text-zinc-400">{nutritionRecommendation?.primary_reason ?? adaptiveRecommendation?.reasoning?.[0] ?? "Insufficient data for a nutrition recommendation."}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">{recommendationReason}</p>
               </div>
               <span className="w-fit rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs font-semibold capitalize text-emerald-100">
-                {nutritionRecommendation?.confidence ?? recommendationConfidenceLabel(adaptiveRecommendation?.confidence, adaptiveRecommendation?.confidenceLevel)} · {nutritionRecommendation?.data_quality_score ?? adaptiveRecommendation?.dataQualityScore ?? 0}/100
+                {recommendationConfidence} · {Math.round(recommendationDataQualityScore)}/100
               </span>
             </div>
             {topAdaptiveWarning ? <p className="mt-2 text-xs leading-5 text-amber-100">{topAdaptiveWarning}</p> : null}
@@ -3968,28 +4080,29 @@ function Dashboard({
         <div className="grid gap-3 xl:grid-cols-3">
           <div className="accent-outline rounded-lg border p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em]">Macro adherence</p>
-            <p className="mt-2 text-2xl font-semibold text-white">{macroAdherence?.weekly_score !== null && macroAdherence?.weekly_score !== undefined ? `${Math.round(macroAdherence.weekly_score)}%` : "--"}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{macroAdherence?.summary ?? "Insufficient finalized nutrition data."}</p>
+            <p className="mt-2 text-2xl font-semibold text-white">{macroWeeklyScore !== null ? `${Math.round(macroWeeklyScore)}%` : "--"}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{stringOrFallback(macroAdherence?.summary, "Insufficient finalized nutrition data.")}</p>
           </div>
           <div className="rounded-lg border border-amber-300/15 bg-amber-300/[0.06] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-200/80">Plateau watch</p>
             {topPlateauAlerts.length ? (
               <div className="mt-2 space-y-2">
                 {topPlateauAlerts.slice(0, 2).map((alert) => (
-                  <p key={`${alert.type}-${alert.name}-${alert.signal}`} className="text-sm leading-5 text-amber-50">{alert.message}</p>
+                  <p key={`${alert.type}-${alert.name}-${alert.signal}`} className="text-sm leading-5 text-amber-50">{stringOrFallback(alert.message, "Possible plateau signal needs more data.")}</p>
                 ))}
               </div>
             ) : (
-              <p className="mt-2 text-sm leading-5 text-zinc-400">{plateauWatch?.summary ?? "Insufficient data for plateau detection."}</p>
+              <p className="mt-2 text-sm leading-5 text-zinc-400">{stringOrFallback(plateauWatch?.summary, "Insufficient data for plateau detection.")}</p>
             )}
           </div>
           <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.06] p-3">
             <p className="text-xs font-semibold uppercase tracking-[0.14em] text-violet-200/80">Personal baseline</p>
-            <p className="mt-2 text-sm font-semibold text-white">{dashboardInsight?.title ?? personalLearning?.insights?.[0]?.title ?? "Building baseline"}</p>
-            <p className="mt-1 text-xs leading-5 text-zinc-400">{dashboardInsight?.summary ?? personalLearning?.insights?.[0]?.explanation ?? "Insufficient overlapping data for a stable personal baseline."}</p>
+            <p className="mt-2 text-sm font-semibold text-white">{baselineTitle}</p>
+            <p className="mt-1 text-xs leading-5 text-zinc-400">{baselineSummary}</p>
           </div>
         </div>
-      </Card>
+        </Card>
+      </TargetSectionErrorBoundary>
 
       <WeeklyPerformanceReportCard report={weeklyReport} onViewDetails={() => setActivePage("history")} />
 
@@ -4072,7 +4185,12 @@ function GoalsPage({
   adaptiveRecommendation: AdaptiveNutritionRecommendation | null;
   onApplySuggestedMacros: () => void;
 }>) {
-  const calorieDelta = targets ? (finiteNumberOrNull(targets.target_calories) ?? 0) - (finiteNumberOrNull(targets.maintenance_calories) ?? 0) : 0;
+  const targetCalories = finiteNumberOrNull(targets?.target_calories) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.calories) ?? DEFAULT_BASELINE_CALORIES;
+  const targetProtein = finiteNumberOrNull(targets?.protein_grams) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.protein);
+  const targetCarbs = finiteNumberOrNull(targets?.carb_grams) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.carbs);
+  const targetFat = finiteNumberOrNull(targets?.fat_grams) ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.fat);
+  const maintenanceCalories = finiteNumberOrNull(targets?.maintenance_calories);
+  const calorieDelta = targetCalories - (maintenanceCalories ?? targetCalories);
   const calorieDeltaLabel = calorieDelta === 0 ? "at maintenance" : `${calorieDelta > 0 ? "+" : ""}${calorieDelta} kcal ${calorieDelta > 0 ? "surplus" : "deficit"}`;
   const targetWeeklyChangeLow = finiteNumberOrNull(weightFeedback?.target_weekly_change_low);
   const targetWeeklyChangeHigh = finiteNumberOrNull(weightFeedback?.target_weekly_change_high);
@@ -4084,7 +4202,8 @@ function GoalsPage({
   const weeklyTrend = weeklyChangeLb !== null && weeklyChangePct !== null
     ? `${weeklyChangeLb > 0 ? "+" : ""}${weeklyChangeLb} lb/week (${weeklyChangePct > 0 ? "+" : ""}${weeklyChangePct}%)`
     : "Need bodyweight trend";
-  const lastUpdated = targets?.updated_at ? new Date(targets.updated_at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not applied yet";
+  const updatedAtTimestamp = targets?.updated_at ? new Date(targets.updated_at).getTime() : NaN;
+  const lastUpdated = Number.isFinite(updatedAtTimestamp) ? new Date(updatedAtTimestamp).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "Not applied yet";
   const leanBulkDetails = leanBulkDecision?.details ?? null;
   const performanceSignal = leanBulkDetails?.performance_signal ?? null;
   const performanceDrivers = Array.isArray(performanceSignal?.drivers) ? performanceSignal.drivers.slice(0, 3) : [];
@@ -4093,21 +4212,35 @@ function GoalsPage({
   const adaptiveReasons = stringList(adaptiveRecommendation?.reasoning).slice(0, 4);
   const adaptiveTrends = stringList(adaptiveRecommendation?.detectedTrends).slice(0, 4);
   const missingDataWarnings = stringList(adaptiveRecommendation?.missingDataWarnings).slice(0, 3);
-  const dayTypeAdjustment = adaptiveRecommendation?.dayTypeAdjustment;
-  const adaptiveSignals: Partial<AdaptiveNutritionRecommendation["signals"]> = adaptiveRecommendation?.signals ?? {};
-  const bodyComposition = adaptiveSignals.bodyComposition ?? null;
-  const currentTarget = adaptiveRecommendation?.currentTarget ?? null;
-  const macroChanges = adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment ?? null;
+  const dayTypeAdjustment = recordOrEmpty(adaptiveRecommendation?.dayTypeAdjustment);
+  const adaptiveSignalRecord = recordOrEmpty(adaptiveRecommendation?.signals);
+  const bodyComposition = recordOrEmpty(adaptiveSignalRecord.bodyComposition);
+  const currentTarget = recordOrEmpty(adaptiveRecommendation?.currentTarget);
+  const currentTargetCalories = finiteNumberOrNull(currentTarget.calories) ?? finiteNumberOrNull(currentTarget.target_calories) ?? targetCalories;
+  const currentTargetProtein = finiteNumberOrNull(currentTarget.protein) ?? finiteNumberOrNull(currentTarget.protein_grams) ?? targetProtein;
+  const currentTargetCarbs = finiteNumberOrNull(currentTarget.carbs) ?? finiteNumberOrNull(currentTarget.carb_grams) ?? targetCarbs;
+  const currentTargetFat = finiteNumberOrNull(currentTarget.fat) ?? finiteNumberOrNull(currentTarget.fat_grams) ?? targetFat;
+  const macroChanges = recordOrEmpty(adaptiveRecommendation?.macroChanges ?? adaptiveRecommendation?.macroAdjustment);
   const hasRecommendedTargets = ["caloriesTarget", "proteinTarget", "carbsTarget", "fatTarget"].every((key) => finiteNumberOrNull(adaptiveRecommendation?.[key as keyof AdaptiveNutritionRecommendation]) !== null);
-  const currentTargetSummary = currentTarget
-    ? `${formatWholeNumber(currentTarget.calories)} kcal · P ${formatWholeNumber(currentTarget.protein)} C ${formatWholeNumber(currentTarget.carbs)} F ${formatWholeNumber(currentTarget.fat)}`
-    : "No active target";
-  const macroChangeSummary = macroChanges
+  const currentTargetSummary = `${formatWholeNumber(currentTargetCalories)} kcal · P ${formatWholeNumber(currentTargetProtein)} C ${formatWholeNumber(currentTargetCarbs)} F ${formatWholeNumber(currentTargetFat)}`;
+  const hasMacroChanges = ["calories", "protein", "carbs", "fat"].some((key) => finiteNumberOrNull(macroChanges[key]) !== null);
+  const macroChangeSummary = hasMacroChanges
     ? `${formatSignedWholeNumber(macroChanges.calories, " kcal")} · P ${formatSignedWholeNumber(macroChanges.protein, "g")} · C ${formatSignedWholeNumber(macroChanges.carbs, "g")} · F ${formatSignedWholeNumber(macroChanges.fat, "g")}`
     : "Insufficient data";
+  const leanGainQuality = stringOrFallback(bodyComposition.lean_gain_quality, "unknown");
+  const latestLeanMass = finiteNumberOrNull(bodyComposition.latest_lean_mass);
+  const latestFatMass = finiteNumberOrNull(bodyComposition.latest_fat_mass);
+  const signalRows = [
+    ["Weight", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.weight).status, "insufficient data")],
+    ["Performance", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.performance).label, "insufficient data")],
+    ["Recovery", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.recovery).status, "insufficient data")],
+    ["Training Load", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.trainingLoad).status, "low")],
+    ["Running Load", stringOrFallback(recordOrEmpty(adaptiveSignalRecord.runningLoad).status, "low")],
+  ];
   return (
     <div className="space-y-6">
-      <Card>
+      <TargetSectionErrorBoundary title="Targets unavailable" description="Insufficient target data for this section." resetKey={`${targetCalories}-${lastUpdated}`}>
+        <Card>
         <SectionHeader
           eyebrow="Strategy"
           title="Nutrition Strategy"
@@ -4129,16 +4262,20 @@ function GoalsPage({
           </div>
           <div className="accent-outline rounded-lg border p-4">
             <p className="text-sm text-zinc-400">Current active targets</p>
-            <p className="mt-2 text-3xl font-semibold text-white">{targets ? `${targets.target_calories} kcal` : "No target"}</p>
+            <p className="mt-2 text-3xl font-semibold text-white">{formatWholeNumber(targetCalories)} kcal</p>
             <p className="mt-3 text-sm text-zinc-300">
-              {targets ? `${targets.protein_grams}g protein · ${targets.carb_grams}g carbs · ${targets.fat_grams}g fat` : "Apply the latest recommendation to set targets."}
+              {targetProtein !== null || targetCarbs !== null || targetFat !== null
+                ? `${formatWholeNumber(targetProtein)}g protein · ${formatWholeNumber(targetCarbs)}g carbs · ${formatWholeNumber(targetFat)}g fat`
+                : "Apply the latest recommendation to set targets."}
             </p>
             <p className="mt-4 text-xs text-zinc-500">Last updated: {lastUpdated}</p>
           </div>
         </div>
-      </Card>
+        </Card>
+      </TargetSectionErrorBoundary>
 
-      <Card>
+      <TargetSectionErrorBoundary title="Recommendation unavailable" description="Insufficient recommendation data for this section." resetKey={`${targetCalories}-${adaptiveRecommendation?.nextReviewDate ?? ""}`}>
+        <Card>
         <SectionHeader
           eyebrow="Adaptive Engine"
           title="Unified Nutrition Recommendation"
@@ -4183,8 +4320,8 @@ function GoalsPage({
             <div className="mt-3 grid gap-3 sm:grid-cols-3">
               <div className="accent-outline rounded-lg border p-3">
                 <p className="text-xs uppercase tracking-[0.12em]">Day type</p>
-                <p className="mt-2 text-sm font-semibold text-white">{adaptiveRecommendation?.dayType ?? "Learning"}</p>
-                <p className="mt-1 text-xs leading-5 text-zinc-400">{dayTypeAdjustment?.reason ?? "Workout and run context will tune daily carbs."}</p>
+                <p className="mt-2 text-sm font-semibold text-white">{stringOrFallback(adaptiveRecommendation?.dayType, "Learning")}</p>
+                <p className="mt-1 text-xs leading-5 text-zinc-400">{stringOrFallback(dayTypeAdjustment.reason, "Workout and run context will tune daily carbs.")}</p>
               </div>
               <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-emerald-200/70">Data quality</p>
@@ -4193,10 +4330,10 @@ function GoalsPage({
               </div>
               <div className="rounded-lg border border-violet-300/15 bg-violet-300/[0.045] p-3">
                 <p className="text-xs uppercase tracking-[0.12em] text-violet-200/70">Lean gain quality</p>
-                <p className="mt-2 text-sm font-semibold capitalize text-white">{bodyComposition?.lean_gain_quality ?? "unknown"}</p>
+                <p className="mt-2 text-sm font-semibold capitalize text-white">{leanGainQuality}</p>
                 <p className="mt-1 text-xs leading-5 text-zinc-400">
-                  {bodyComposition?.latest_lean_mass ? `Lean ${bodyComposition.latest_lean_mass} lb` : "Body fat data improves this read."}
-                  {bodyComposition?.latest_fat_mass ? ` · Fat ${bodyComposition.latest_fat_mass} lb` : ""}
+                  {latestLeanMass !== null ? `Lean ${latestLeanMass} lb` : "Body fat data improves this read."}
+                  {latestFatMass !== null ? ` · Fat ${latestFatMass} lb` : ""}
                 </p>
               </div>
             </div>
@@ -4225,13 +4362,7 @@ function GoalsPage({
             ) : null}
           </div>
           <div className="grid gap-2">
-            {[
-              ["Weight", adaptiveSignals.weight?.status ?? "insufficient data"],
-              ["Performance", adaptiveSignals.performance?.label ?? "insufficient data"],
-              ["Recovery", adaptiveSignals.recovery?.status ?? "insufficient data"],
-              ["Training Load", adaptiveSignals.trainingLoad?.status ?? "low"],
-              ["Running Load", adaptiveSignals.runningLoad?.status ?? "low"],
-            ].map(([label, value]) => (
+            {signalRows.map(([label, value]) => (
               <div key={label} className="flex items-center justify-between rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2">
                 <span className="text-sm text-zinc-400">{label}</span>
                 <span className="text-sm font-semibold capitalize text-white">{value}</span>
@@ -4239,20 +4370,22 @@ function GoalsPage({
             ))}
           </div>
         </div>
-      </Card>
+        </Card>
+      </TargetSectionErrorBoundary>
 
+      <TargetSectionErrorBoundary title="Macro targets unavailable" description="Insufficient target data for macro target cards." resetKey={`${targetCalories}-${targetProtein ?? ""}-${targetCarbs ?? ""}-${targetFat ?? ""}`}>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <TargetDetailCard
             title="Calories"
-            value={targets ? `${formatWholeNumber(targets.target_calories)} kcal` : "No target"}
-            subvalue={targets ? `Maintenance ${formatWholeNumber(targets.maintenance_calories)} - ${calorieDeltaLabel}` : "Save goals to calculate"}
-            note={targets ? `Dynamic adjustment: ${formatSignedWholeNumber(targets.calorie_adjustment, " kcal/day")}. Macro math: ${formatWholeNumber(targets.macro_calories ?? targets.target_calories)} kcal (${formatSignedWholeNumber(targets.calorie_macro_delta ?? 0, " delta")}).` : "Calories update from weight trend, training load, cardio, and recovery."}
+            value={`${formatWholeNumber(targetCalories)} kcal`}
+            subvalue={maintenanceCalories !== null ? `Maintenance ${formatWholeNumber(maintenanceCalories)} - ${calorieDeltaLabel}` : "Save goals to calculate"}
+            note={targets ? `Dynamic adjustment: ${formatSignedWholeNumber(targets.calorie_adjustment, " kcal/day")}. Macro math: ${formatWholeNumber(targets.macro_calories ?? targetCalories)} kcal (${formatSignedWholeNumber(targets.calorie_macro_delta ?? 0, " delta")}).` : "Calories update from weight trend, training load, cardio, and recovery."}
             icon={Apple}
             accent="accent-outline"
           />
         <TargetDetailCard
           title="Protein"
-          value={targets ? `${formatWholeNumber(targets.protein_grams)}g` : "No target"}
+          value={targetProtein !== null ? `${formatWholeNumber(targetProtein)}g` : "No target"}
           subvalue={targets?.protein_per_lb ? `${targets.protein_per_lb}g/lb bodyweight` : "Protein-first allocation"}
           note="Lean bulk targets a higher protein floor for muscle retention, growth, and consistency."
           icon={ProteinMoleculeIcon}
@@ -4260,7 +4393,7 @@ function GoalsPage({
         />
         <TargetDetailCard
           title="Carbs"
-          value={targets ? `${formatWholeNumber(targets.carb_grams)}g` : "No target"}
+          value={targetCarbs !== null ? `${formatWholeNumber(targetCarbs)}g` : "No target"}
           subvalue="Remaining calories after protein and fats"
           note={targets?.carb_emphasis ?? "Carbs scale with lifting frequency, cardio, surplus size, and recovery demand."}
           icon={CarbsMoleculeIcon}
@@ -4268,13 +4401,14 @@ function GoalsPage({
         />
         <TargetDetailCard
           title="Fat"
-          value={targets ? `${formatWholeNumber(targets.fat_grams)}g` : "No target"}
+          value={targetFat !== null ? `${formatWholeNumber(targetFat)}g` : "No target"}
           subvalue={targets?.fat_per_lb ? `${targets.fat_per_lb}g/lb - floor ${targets.fat_floor_grams ?? 0}g` : "Minimum recovery threshold"}
           note="Moderate fats are protected before carbs get the remaining calories."
           icon={FatMoleculeIcon}
           accent="border-amber-400/20 bg-amber-400/10 text-amber-300"
         />
       </div>
+      </TargetSectionErrorBoundary>
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
@@ -4535,13 +4669,14 @@ function FoodPage({
     }),
     { calories: 0, protein: 0, carbs: 0, fat: 0, fiber: 0 },
   );
-  const displayTargets = targets ? {
-    target_calories: dayTypeMacros?.adjusted_targets?.calories ?? targets.target_calories,
-    protein_grams: dayTypeMacros?.adjusted_targets?.protein ?? targets.protein_grams,
-    carb_grams: dayTypeMacros?.adjusted_targets?.carbs ?? targets.carb_grams,
-    fat_grams: dayTypeMacros?.adjusted_targets?.fat ?? targets.fat_grams,
-  } : null;
-  const hasMacroTargets = Boolean(displayTargets && displayTargets.target_calories > 0 && displayTargets.protein_grams > 0 && displayTargets.carb_grams > 0 && displayTargets.fat_grams > 0);
+  const adjustedTargets = recordOrEmpty(dayTypeMacros?.adjusted_targets);
+  const displayTargets = {
+    target_calories: finiteNumberOrNull(adjustedTargets.calories) ?? finiteNumberOrNull(targets?.target_calories) ?? DEFAULT_BASELINE_CALORIES,
+    protein_grams: finiteNumberOrNull(adjustedTargets.protein) ?? finiteNumberOrNull(targets?.protein_grams) ?? 0,
+    carb_grams: finiteNumberOrNull(adjustedTargets.carbs) ?? finiteNumberOrNull(targets?.carb_grams) ?? 0,
+    fat_grams: finiteNumberOrNull(adjustedTargets.fat) ?? finiteNumberOrNull(targets?.fat_grams) ?? 0,
+  };
+  const hasMacroTargets = displayTargets.target_calories > 0 && displayTargets.protein_grams > 0 && displayTargets.carb_grams > 0 && displayTargets.fat_grams > 0;
   const calorieProgress = buildMacroProgress("Calories", " kcal", selectedDateTotals.calories, displayTargets?.target_calories ?? 0, "accent-progress");
   const macroProgress = [
     buildMacroProgress("Protein", "g", selectedDateTotals.protein, displayTargets?.protein_grams ?? 0, "bg-teal-300"),
@@ -9273,8 +9408,8 @@ function StartupDebugPanel({
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }>) {
-  const [localOpen, setLocalOpen] = useState(initiallyOpen);
-  const isOpen = open ?? localOpen;
+  const [localOpen, setLocalOpen] = useState<boolean | null>(null);
+  const isOpen = open ?? localOpen ?? initiallyOpen;
   const setPanelOpen = (nextOpen: boolean) => {
     if (open === undefined) {
       setLocalOpen(nextOpen);
@@ -9282,9 +9417,6 @@ function StartupDebugPanel({
       onOpenChange?.(nextOpen);
     }
   };
-  useEffect(() => {
-    if (initiallyOpen && open === undefined) setLocalOpen(true);
-  }, [initiallyOpen, open]);
   const sortedEntries = entries.slice().sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   const copyReport = async () => {
     const report = JSON.stringify(sortedEntries, null, 2);
@@ -10557,7 +10689,10 @@ export default function Home() {
 
   useEffect(() => {
     if (activePage !== "training") return;
-    void refreshTrainingData(false);
+    const timeout = window.setTimeout(() => {
+      void refreshTrainingData(false);
+    }, 0);
+    return () => window.clearTimeout(timeout);
   }, [activePage, refreshTrainingData]);
 
   const loadMoreTrainingHistory = useCallback(() => {
@@ -10903,45 +11038,47 @@ export default function Home() {
 
   const pageContent = {
     dashboard: (
-      <Dashboard
-        data={dashboard}
-        setActivePage={setActivePage}
-        forms={forms}
-        setForms={setForms}
-        onEditBenchPr={editBenchPr}
-        onEditMilePr={editMilePr}
-        onSaveBenchPr={(event) =>
-          submitAndRefresh(event, async () => {
-            if (!forms.benchPr.weight || forms.benchPr.weight <= 0) throw new Error("Bench weight must be greater than 0.");
-            if (!forms.benchPr.reps || forms.benchPr.reps <= 0) throw new Error("Bench reps must be greater than 0.");
-            await apiSend("/api/personal-records/bench", "PUT", {
-              weight: Number(forms.benchPr.weight),
-              reps: Number(forms.benchPr.reps),
-              date: forms.benchPr.date,
-              notes: forms.benchPr.notes,
-            });
-            setForms((state) => ({ ...state, benchPr: { ...state.benchPr, editing: false } }));
-          }, "Bench PR saved.")
-        }
-        onSaveMilePr={(event) =>
-          submitAndRefresh(event, async () => {
-            const totalSeconds = stateSafeMileSeconds(forms.milePr);
-            if (totalSeconds <= 0) throw new Error("Mile time must be greater than 0.");
-            await apiSend("/api/personal-records/mile", "PUT", {
-              minutes: Number(forms.milePr.minutes) || 0,
-              seconds: Number(forms.milePr.seconds) || 0,
-              date: forms.milePr.date,
-              notes: forms.milePr.notes,
-            });
-            setForms((state) => ({ ...state, milePr: { ...state.milePr, editing: false } }));
-          }, "Mile PR saved.")
-        }
-        onRecalculatePrs={() =>
-          void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
-            await apiSend("/api/personal-records/recalculate", "POST", {});
-          }, "PRs recalculated from logs.")
-        }
-      />
+      <TargetSectionErrorBoundary title="Dashboard unavailable" description="Insufficient dashboard target or recommendation data." resetKey={`${dashboard?.date ?? ""}-${dashboard?.targets?.target_calories ?? ""}`}>
+        <Dashboard
+          data={dashboard}
+          setActivePage={setActivePage}
+          forms={forms}
+          setForms={setForms}
+          onEditBenchPr={editBenchPr}
+          onEditMilePr={editMilePr}
+          onSaveBenchPr={(event) =>
+            submitAndRefresh(event, async () => {
+              if (!forms.benchPr.weight || forms.benchPr.weight <= 0) throw new Error("Bench weight must be greater than 0.");
+              if (!forms.benchPr.reps || forms.benchPr.reps <= 0) throw new Error("Bench reps must be greater than 0.");
+              await apiSend("/api/personal-records/bench", "PUT", {
+                weight: Number(forms.benchPr.weight),
+                reps: Number(forms.benchPr.reps),
+                date: forms.benchPr.date,
+                notes: forms.benchPr.notes,
+              });
+              setForms((state) => ({ ...state, benchPr: { ...state.benchPr, editing: false } }));
+            }, "Bench PR saved.")
+          }
+          onSaveMilePr={(event) =>
+            submitAndRefresh(event, async () => {
+              const totalSeconds = stateSafeMileSeconds(forms.milePr);
+              if (totalSeconds <= 0) throw new Error("Mile time must be greater than 0.");
+              await apiSend("/api/personal-records/mile", "PUT", {
+                minutes: Number(forms.milePr.minutes) || 0,
+                seconds: Number(forms.milePr.seconds) || 0,
+                date: forms.milePr.date,
+                notes: forms.milePr.notes,
+              });
+              setForms((state) => ({ ...state, milePr: { ...state.milePr, editing: false } }));
+            }, "Mile PR saved.")
+          }
+          onRecalculatePrs={() =>
+            void submitAndRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
+              await apiSend("/api/personal-records/recalculate", "POST", {});
+            }, "PRs recalculated from logs.")
+          }
+        />
+      </TargetSectionErrorBoundary>
     ),
     food: (
       <FoodPage
