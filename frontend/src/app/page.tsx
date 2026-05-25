@@ -9324,19 +9324,55 @@ function AquariumEasterEgg() {
       {isOpen ? (
         <div
           id="settings-aquarium"
-          className="aquarium-tile accent-border relative h-44 w-full max-w-xl overflow-hidden rounded-lg border bg-[#05131f] shadow-2xl shadow-[var(--accent-glow)]"
+          className="aquarium-tile accent-border relative h-64 w-full max-w-2xl overflow-hidden rounded-lg border bg-[#04111f] shadow-2xl shadow-[var(--accent-glow)] sm:h-72"
         >
-          <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(34,211,238,0.20),rgba(14,116,144,0.12)_45%,rgba(2,6,23,0.84)),radial-gradient(circle_at_20%_20%,rgba(125,211,252,0.20),transparent_28%),radial-gradient(circle_at_80%_12%,rgba(45,212,191,0.12),transparent_25%)]" />
-          <div className="absolute inset-x-0 bottom-0 h-12 bg-[linear-gradient(180deg,transparent,rgba(8,47,73,0.50))]" />
+          <div className="aquarium-water aquarium-water-back" aria-hidden="true" />
+          <div className="aquarium-water aquarium-water-mid" aria-hidden="true" />
+          <div className="aquarium-light-rays" aria-hidden="true" />
+          <div className="aquarium-shimmer" aria-hidden="true" />
+          <div className="aquarium-particles particles-back" aria-hidden="true" />
+          <div className="aquarium-particles particles-front" aria-hidden="true" />
+          <span className="aquarium-shark" aria-hidden="true">
+            <svg viewBox="0 0 132 38" focusable="false">
+              <path d="M7 20C28 7 69 3 112 18C119 13 126 11 130 13C125 19 125 23 130 29C123 30 118 26 112 22C75 35 32 32 7 20Z" />
+              <path className="shark-fin" d="M60 11C66 1 75 1 80 12C72 10 66 10 60 11Z" />
+              <circle cx="105" cy="17" r="1.3" />
+            </svg>
+          </span>
+          <span className="aquarium-turtle" aria-hidden="true">
+            <svg viewBox="0 0 84 46" focusable="false">
+              <ellipse className="shell" cx="42" cy="24" rx="22" ry="13" />
+              <circle className="head" cx="67" cy="22" r="6" />
+              <path className="flipper front" d="M54 16C65 8 72 9 74 14C67 17 61 19 54 22Z" />
+              <path className="flipper back" d="M28 17C18 9 10 10 8 16C16 18 22 20 30 23Z" />
+              <path className="flipper lower-front" d="M53 29C63 36 69 35 72 30C65 29 59 27 53 24Z" />
+              <path className="flipper lower-back" d="M29 30C19 38 11 36 9 30C16 29 23 27 30 24Z" />
+              <path className="shell-line" d="M26 23C36 17 48 17 58 24M31 31C39 25 47 25 54 31" />
+              <circle className="eye" cx="70" cy="20" r="1.1" />
+            </svg>
+          </span>
           <span className="aquarium-bubble bubble-one" aria-hidden="true" />
           <span className="aquarium-bubble bubble-two" aria-hidden="true" />
           <span className="aquarium-bubble bubble-three" aria-hidden="true" />
           <span className="aquarium-bubble bubble-four" aria-hidden="true" />
           <span className="aquarium-bubble bubble-five" aria-hidden="true" />
           <span className="aquarium-bubble bubble-six" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-seven" aria-hidden="true" />
+          <span className="aquarium-bubble bubble-eight" aria-hidden="true" />
+          <span className="aquarium-pineapple" aria-hidden="true">
+            <span className="pineapple-crown" />
+            <span className="pineapple-body" />
+          </span>
+          <span className="aquarium-rock rock-one" aria-hidden="true" />
+          <span className="aquarium-rock rock-two" aria-hidden="true" />
+          <span className="aquarium-rock rock-three" aria-hidden="true" />
           <span className="aquarium-seaweed seaweed-one" aria-hidden="true" />
           <span className="aquarium-seaweed seaweed-two" aria-hidden="true" />
+          <span className="aquarium-seaweed seaweed-three" aria-hidden="true" />
+          <span className="aquarium-seaweed seaweed-four" aria-hidden="true" />
+          <span className="aquarium-seaweed seaweed-five" aria-hidden="true" />
           <span className="aquarium-coral" aria-hidden="true" />
+          <span className="aquarium-coral coral-two" aria-hidden="true" />
           <span className="aquarium-fish fish-orange" aria-hidden="true">
             <svg className="fish-svg" viewBox="0 0 72 34" focusable="false">
               <path className="tail" d="M8 17L1 7C0 5 2 3 4 4L18 12V22L4 30C2 31 0 29 1 27L8 17Z" />
@@ -9391,7 +9427,6 @@ function AquariumEasterEgg() {
             </span>
           </span>
           {yellowSchool ? <YellowFishSchool key={yellowSchool.id} instance={yellowSchool} /> : null}
-          {yellowSchool ? <YellowFishSchool key={yellowSchool.id} instance={yellowSchool} /> : null}
           {specialFish ? (
             <SpecialGirlfriendFish
               key={specialFish.id}
@@ -9402,6 +9437,93 @@ function AquariumEasterEgg() {
           ) : null}
           <div className="pointer-events-none absolute inset-0 rounded-lg ring-1 ring-inset ring-white/10" />
           <style>{`
+            .aquarium-tile {
+              isolation: isolate;
+              background:
+                linear-gradient(180deg, #08263a 0%, #073047 38%, #051827 68%, #020817 100%);
+            }
+            .aquarium-water {
+              position: absolute;
+              inset: 0;
+              pointer-events: none;
+            }
+            .aquarium-water-back {
+              z-index: 0;
+              background:
+                radial-gradient(circle at 18% 16%, rgba(125, 211, 252, 0.26), transparent 27%),
+                radial-gradient(circle at 78% 12%, rgba(45, 212, 191, 0.16), transparent 30%),
+                radial-gradient(circle at 54% 66%, rgba(14, 165, 233, 0.14), transparent 42%),
+                linear-gradient(180deg, rgba(34, 211, 238, 0.22), rgba(14, 116, 144, 0.08) 48%, rgba(2, 6, 23, 0.86));
+            }
+            .aquarium-water-mid {
+              z-index: 1;
+              opacity: 0.6;
+              background:
+                repeating-linear-gradient(176deg, rgba(255,255,255,0.045) 0 1px, transparent 1px 26px),
+                radial-gradient(ellipse at 50% 100%, rgba(14, 116, 144, 0.42), transparent 58%);
+              animation: aquarium-current 12s ease-in-out infinite alternate;
+            }
+            .aquarium-light-rays {
+              position: absolute;
+              inset: -18% -22% auto -18%;
+              z-index: 2;
+              height: 88%;
+              opacity: 0.28;
+              pointer-events: none;
+              background:
+                linear-gradient(112deg, transparent 2%, rgba(224, 242, 254, 0.18) 10%, transparent 18%),
+                linear-gradient(101deg, transparent 28%, rgba(186, 230, 253, 0.12) 40%, transparent 52%),
+                linear-gradient(124deg, transparent 58%, rgba(125, 211, 252, 0.14) 67%, transparent 78%);
+              filter: blur(0.8px);
+              transform-origin: top center;
+              animation: aquarium-rays 9s ease-in-out infinite alternate;
+            }
+            .aquarium-shimmer {
+              position: absolute;
+              inset: 0;
+              z-index: 8;
+              opacity: 0.2;
+              pointer-events: none;
+              background:
+                linear-gradient(90deg, transparent, rgba(240, 249, 255, 0.08), transparent),
+                repeating-linear-gradient(88deg, rgba(255,255,255,0.035) 0 1px, transparent 1px 18px);
+              mix-blend-mode: screen;
+              animation: aquarium-shimmer 7s linear infinite;
+            }
+            .aquarium-particles {
+              position: absolute;
+              inset: 0;
+              z-index: 3;
+              pointer-events: none;
+              background-image:
+                radial-gradient(circle, rgba(224, 242, 254, 0.22) 0 1px, transparent 1.5px),
+                radial-gradient(circle, rgba(125, 211, 252, 0.16) 0 1px, transparent 1.5px);
+              background-position: 8% 22%, 70% 40%;
+              background-size: 74px 58px, 112px 86px;
+              animation: aquarium-particles 18s linear infinite;
+            }
+            .particles-back {
+              opacity: 0.22;
+              filter: blur(1.4px);
+            }
+            .particles-front {
+              opacity: 0.28;
+              background-size: 92px 72px, 128px 96px;
+              animation-duration: 13s;
+              animation-direction: reverse;
+            }
+            .aquarium-tile::after {
+              position: absolute;
+              inset: auto 0 0;
+              z-index: 5;
+              height: 48px;
+              content: "";
+              background:
+                radial-gradient(ellipse at 18% 78%, rgba(251, 191, 36, 0.24), transparent 28%),
+                radial-gradient(ellipse at 75% 82%, rgba(217, 119, 6, 0.18), transparent 26%),
+                linear-gradient(180deg, transparent, rgba(120, 53, 15, 0.28) 46%, rgba(68, 36, 12, 0.58));
+              filter: blur(0.2px);
+            }
             .aquarium-fish {
               position: absolute;
               left: -26%;
@@ -9412,7 +9534,7 @@ function AquariumEasterEgg() {
               color: inherit;
               font: inherit;
               opacity: var(--fish-opacity, 0.92);
-              filter: drop-shadow(0 0 10px rgba(125, 211, 252, 0.12));
+              filter: blur(var(--fish-blur, 0)) drop-shadow(0 0 10px rgba(125, 211, 252, var(--fish-glow, 0.12)));
               animation: aquarium-swim-right var(--swim-speed, 20s) linear infinite;
               animation-delay: var(--swim-delay, 0s);
               will-change: transform;
@@ -9479,6 +9601,7 @@ function AquariumEasterEgg() {
               --bob-speed: 5.8s;
               --bob-delay: -3s;
               --fish-opacity: 0.55;
+              --fish-blur: 0.7px;
               --fish-depth: 1;
             }
             .fish-round {
@@ -9499,6 +9622,7 @@ function AquariumEasterEgg() {
               --swim-delay: -24s;
               --bob-speed: 6.4s;
               --fish-opacity: 0.48;
+              --fish-blur: 0.8px;
               --fish-depth: 1;
             }
             .school-cluster {
@@ -9539,12 +9663,13 @@ function AquariumEasterEgg() {
               opacity: 0.45;
             }
             .special_girlfriend_fish {
-              --fish-width: 58px;
+              --fish-width: 66px;
               --fish-body: #f9a8d4;
               --fish-fin: #f472b6;
               --fish-detail: #fdf2f8;
               --fish-opacity: 0.96;
               --fish-depth: 6;
+              --fish-glow: 0.2;
               cursor: pointer;
               overflow: visible;
               filter: drop-shadow(0 0 12px rgba(244, 114, 182, 0.20));
@@ -9647,6 +9772,7 @@ function AquariumEasterEgg() {
               border: 1px solid rgba(186, 230, 253, 0.6);
               background: rgba(186, 230, 253, 0.08);
               animation: aquarium-bubble-rise 8s ease-in infinite;
+              z-index: 7;
             }
             .bubble-one { left: 16%; animation-delay: -1s; animation-duration: 7s; }
             .bubble-two { left: 28%; width: 4px; height: 4px; animation-delay: -4s; animation-duration: 9s; }
@@ -9654,9 +9780,62 @@ function AquariumEasterEgg() {
             .bubble-four { left: 85%; width: 5px; height: 5px; animation-delay: -6s; animation-duration: 8s; }
             .bubble-five { left: 52%; width: 3px; height: 3px; animation-delay: -5s; animation-duration: 11s; opacity: 0.55; }
             .bubble-six { left: 63%; width: 9px; height: 9px; animation-delay: -8s; animation-duration: 12s; opacity: 0.42; }
+            .bubble-seven { left: 39%; width: 5px; height: 5px; animation-delay: -10s; animation-duration: 13s; opacity: 0.5; }
+            .bubble-eight { left: 92%; width: 3px; height: 3px; animation-delay: -3s; animation-duration: 10s; opacity: 0.44; }
+            .aquarium-pineapple {
+              position: absolute;
+              left: 19%;
+              bottom: 21px;
+              z-index: 4;
+              width: 28px;
+              height: 42px;
+              opacity: 0.42;
+              filter: blur(0.35px) saturate(0.86);
+              transform: rotate(-5deg) scale(0.92);
+            }
+            .pineapple-body {
+              position: absolute;
+              left: 5px;
+              bottom: 0;
+              width: 18px;
+              height: 25px;
+              border-radius: 45% 45% 36% 36%;
+              background:
+                repeating-linear-gradient(45deg, rgba(120, 53, 15, 0.32) 0 2px, transparent 2px 7px),
+                repeating-linear-gradient(-45deg, rgba(120, 53, 15, 0.26) 0 2px, transparent 2px 7px),
+                linear-gradient(180deg, #facc15, #d97706);
+              box-shadow: inset 0 0 10px rgba(120, 53, 15, 0.35);
+            }
+            .pineapple-crown,
+            .pineapple-crown::before,
+            .pineapple-crown::after {
+              position: absolute;
+              left: 11px;
+              bottom: 22px;
+              width: 6px;
+              height: 18px;
+              content: "";
+              border-radius: 999px 999px 0 0;
+              background: linear-gradient(180deg, rgba(74, 222, 128, 0.9), rgba(21, 128, 61, 0.45));
+              transform-origin: bottom center;
+            }
+            .pineapple-crown::before { left: -7px; bottom: 0; transform: rotate(-34deg); }
+            .pineapple-crown::after { left: 7px; bottom: 0; transform: rotate(33deg); }
+            .aquarium-rock {
+              position: absolute;
+              bottom: 17px;
+              z-index: 6;
+              border-radius: 999px 999px 12px 12px;
+              background: linear-gradient(180deg, rgba(148, 163, 184, 0.45), rgba(51, 65, 85, 0.75));
+              box-shadow: inset -6px -5px 12px rgba(2, 6, 23, 0.24);
+            }
+            .rock-one { left: 9%; width: 36px; height: 18px; }
+            .rock-two { right: 18%; width: 52px; height: 23px; opacity: 0.72; }
+            .rock-three { right: 7%; width: 28px; height: 14px; opacity: 0.55; filter: blur(0.4px); }
             .aquarium-seaweed {
               position: absolute;
-              bottom: 12px;
+              bottom: 22px;
+              z-index: 7;
               width: 9px;
               height: 52px;
               border-radius: 999px 999px 0 0;
@@ -9664,17 +9843,101 @@ function AquariumEasterEgg() {
               transform-origin: bottom center;
               animation: aquarium-sway 4s ease-in-out infinite alternate;
             }
-            .seaweed-one { left: 8%; }
-            .seaweed-two { right: 10%; height: 42px; animation-delay: -1.8s; }
+            .aquarium-seaweed::before,
+            .aquarium-seaweed::after {
+              position: absolute;
+              bottom: 8px;
+              width: 7px;
+              height: 35px;
+              content: "";
+              border-radius: 999px 999px 0 0;
+              background: linear-gradient(180deg, rgba(74, 222, 128, 0.72), rgba(20, 184, 166, 0.14));
+              transform-origin: bottom center;
+            }
+            .aquarium-seaweed::before { left: -8px; transform: rotate(-18deg); }
+            .aquarium-seaweed::after { right: -8px; transform: rotate(18deg); }
+            .seaweed-one { left: 7%; height: 64px; }
+            .seaweed-two { right: 10%; height: 50px; animation-delay: -1.8s; }
+            .seaweed-three { left: 31%; height: 42px; width: 7px; opacity: 0.54; filter: blur(0.5px); animation-delay: -2.6s; z-index: 4; }
+            .seaweed-four { right: 27%; height: 72px; width: 10px; animation-delay: -3.4s; }
+            .seaweed-five { left: 46%; height: 34px; width: 6px; opacity: 0.48; filter: blur(0.8px); animation-delay: -1.1s; z-index: 4; }
             .aquarium-coral {
               position: absolute;
               right: 20%;
-              bottom: 13px;
+              bottom: 23px;
+              z-index: 7;
               width: 28px;
               height: 24px;
               border-radius: 999px 999px 8px 8px;
               background: linear-gradient(180deg, rgba(244, 114, 182, 0.88), rgba(244, 114, 182, 0.22));
               opacity: 0.72;
+            }
+            .aquarium-coral::before,
+            .aquarium-coral::after,
+            .coral-two::before,
+            .coral-two::after {
+              position: absolute;
+              bottom: 9px;
+              width: 9px;
+              height: 21px;
+              content: "";
+              border-radius: 999px;
+              background: inherit;
+              transform-origin: bottom center;
+            }
+            .aquarium-coral::before { left: -6px; transform: rotate(-28deg); }
+            .aquarium-coral::after { right: -5px; transform: rotate(30deg); }
+            .coral-two {
+              left: 58%;
+              right: auto;
+              width: 22px;
+              height: 18px;
+              opacity: 0.5;
+              background: linear-gradient(180deg, rgba(251, 146, 60, 0.82), rgba(251, 146, 60, 0.18));
+              filter: blur(0.3px);
+              z-index: 5;
+            }
+            .aquarium-turtle {
+              position: absolute;
+              left: -22%;
+              top: 52%;
+              z-index: 3;
+              width: 82px;
+              opacity: 0;
+              filter: blur(0.35px) drop-shadow(0 0 12px rgba(45, 212, 191, 0.12));
+              animation: aquarium-turtle-cross 46s linear infinite;
+              animation-delay: 10s;
+              will-change: transform, opacity;
+            }
+            .aquarium-turtle svg { display: block; width: 100%; height: auto; }
+            .aquarium-turtle .shell { fill: rgba(20, 184, 166, 0.72); }
+            .aquarium-turtle .head,
+            .aquarium-turtle .flipper { fill: rgba(94, 234, 212, 0.58); }
+            .aquarium-turtle .shell-line {
+              fill: none;
+              stroke: rgba(15, 23, 42, 0.42);
+              stroke-width: 1.4;
+              stroke-linecap: round;
+            }
+            .aquarium-shark {
+              position: absolute;
+              right: -34%;
+              top: 15%;
+              z-index: 1;
+              width: 132px;
+              opacity: 0;
+              filter: blur(1.1px);
+              animation: aquarium-shark-pass 68s linear infinite;
+              animation-delay: 22s;
+              will-change: transform, opacity;
+            }
+            .aquarium-shark svg { display: block; width: 100%; height: auto; }
+            .aquarium-shark path,
+            .aquarium-shark circle {
+              fill: rgba(8, 20, 32, 0.68);
+            }
+            .aquarium-shark .shark-fin {
+              fill: rgba(10, 28, 44, 0.62);
             }
             @keyframes aquarium-swim-right {
               0% { transform: translate3d(-10%, 0, 0) scale(var(--depth-scale, 1)); }
@@ -9693,18 +9956,53 @@ function AquariumEasterEgg() {
             @keyframes aquarium-bubble-rise {
               0% { transform: translateY(0) scale(0.85); opacity: 0; }
               18% { opacity: 0.58; }
-              100% { transform: translateY(-170px) scale(1.2); opacity: 0; }
+              100% { transform: translateY(-260px) translateX(12px) scale(1.2); opacity: 0; }
             }
             @keyframes aquarium-sway {
               from { transform: rotate(-4deg); }
               to { transform: rotate(5deg); }
+            }
+            @keyframes aquarium-current {
+              from { transform: translate3d(-10px, 0, 0); opacity: 0.44; }
+              to { transform: translate3d(10px, 4px, 0); opacity: 0.68; }
+            }
+            @keyframes aquarium-rays {
+              from { transform: rotate(-2deg) translateX(-10px); opacity: 0.18; }
+              to { transform: rotate(2.5deg) translateX(10px); opacity: 0.34; }
+            }
+            @keyframes aquarium-shimmer {
+              from { transform: translateX(-22%); }
+              to { transform: translateX(22%); }
+            }
+            @keyframes aquarium-particles {
+              from { transform: translate3d(0, 0, 0); }
+              to { transform: translate3d(18px, -28px, 0); }
+            }
+            @keyframes aquarium-turtle-cross {
+              0%, 13% { opacity: 0; transform: translate3d(0, 4px, 0) rotate(-1deg); }
+              18% { opacity: 0.58; }
+              54% { opacity: 0.62; transform: translate3d(62vw, -8px, 0) rotate(2deg); }
+              76% { opacity: 0; transform: translate3d(104vw, 2px, 0) rotate(-1deg); }
+              100% { opacity: 0; transform: translate3d(104vw, 2px, 0) rotate(-1deg); }
+            }
+            @keyframes aquarium-shark-pass {
+              0%, 56% { opacity: 0; transform: translate3d(0, 0, 0) scaleX(-1); }
+              60% { opacity: 0.18; }
+              70% { opacity: 0.16; transform: translate3d(-52vw, 7px, 0) scaleX(-1); }
+              82%, 100% { opacity: 0; transform: translate3d(-106vw, -3px, 0) scaleX(-1); }
             }
             @media (prefers-reduced-motion: reduce) {
               .aquarium-fish,
               .fish-svg,
               .school-cluster,
               .aquarium-bubble,
-              .aquarium-seaweed {
+              .aquarium-seaweed,
+              .aquarium-water-mid,
+              .aquarium-light-rays,
+              .aquarium-shimmer,
+              .aquarium-particles,
+              .aquarium-turtle,
+              .aquarium-shark {
                 animation: none;
               }
               .special-fish-bubble {
@@ -9716,6 +10014,8 @@ function AquariumEasterEgg() {
               .fish-round { right: 40%; }
               .fish-school { left: 26%; }
               .aquarium-bubble { opacity: 0.35; bottom: 58%; }
+              .aquarium-turtle { left: 24%; opacity: 0.42; }
+              .aquarium-shark { right: 8%; opacity: 0.12; }
             }
           `}</style>
         </div>
