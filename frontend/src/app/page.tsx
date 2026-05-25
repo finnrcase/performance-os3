@@ -8319,8 +8319,8 @@ function HistoryPage({
   }, [backupFile, backupSkipDocuments, backupImportMode, postBackupImport, onBackupImported]);
 
   return (
-    <div className="space-y-4">
-      <Card>
+    <div className="flex flex-col gap-4">
+      <Card className="order-[40]">
         <SectionHeader
           eyebrow="Backup"
           title="CSV export"
@@ -8572,7 +8572,7 @@ function HistoryPage({
           {backupError ? <p className="mt-3 rounded-lg border border-red-400/20 bg-red-400/10 px-3 py-2 text-sm text-red-200">{backupError}</p> : null}
         </div>
       </Card>
-      <Card>
+      <Card className="order-[30]">
         <SectionHeader
           eyebrow="Training Data"
           title="Training Data Management"
@@ -8675,7 +8675,7 @@ function HistoryPage({
           </div>
         </div>
       </Card>
-      <Card>
+      <Card className="order-1">
         <SectionHeader
           eyebrow="Workouts"
           title="Weekly Muscle Coverage"
@@ -8727,7 +8727,7 @@ function HistoryPage({
         )}
       </Card>
       {adaptiveRecommendation ? (
-        <Card>
+        <Card className="order-[21]">
           <SectionHeader eyebrow="Adaptive Nutrition" title="Closed-loop analysis" />
           <div className="grid gap-3 lg:grid-cols-4">
             <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.055] p-4">
@@ -8777,7 +8777,7 @@ function HistoryPage({
         </Card>
       ) : null}
       {optimization ? (
-        <Card>
+        <Card className="order-20">
           <SectionHeader eyebrow="Optimization" title="Trend intelligence" />
           <div className="grid gap-3 lg:grid-cols-3">
             <div className="accent-outline rounded-lg border p-4">
@@ -8843,7 +8843,7 @@ function HistoryPage({
           ) : null}
         </Card>
       ) : null}
-      <div className="grid gap-4 lg:grid-cols-2">
+      <div className="order-2 grid gap-4 lg:grid-cols-2">
         <Card>
           <SectionHeader eyebrow="Nutrition" title="Calories vs Body Trend" />
           <div className="space-y-4">
@@ -9029,20 +9029,24 @@ function HistoryPage({
           )}
         </Card>
       </div>
-      <WorkoutHistory workouts={workoutHistory} onImportHevy={() => undefined} onMoveWorkout={onMoveWorkout} defaultExpanded metadata="Training history" />
-      <StrengthTrendsSection
-        strength={strength}
-        selectedExercise={selectedExercise}
-        setSelectedExercise={setSelectedExercise}
-        trendView={trendView}
-        setTrendView={setTrendView}
-        selectedMuscleGroup={selectedMuscleGroup}
-        setSelectedMuscleGroup={setSelectedMuscleGroup}
-        trendDateRange={trendDateRange}
-        setTrendDateRange={setTrendDateRange}
-        muscleTrendMetric={muscleTrendMetric}
-        setMuscleTrendMetric={setMuscleTrendMetric}
-      />
+      <div className="order-[50]">
+        <WorkoutHistory workouts={workoutHistory} onImportHevy={() => undefined} onMoveWorkout={onMoveWorkout} defaultExpanded metadata="Training history" />
+      </div>
+      <div className="order-3">
+        <StrengthTrendsSection
+          strength={strength}
+          selectedExercise={selectedExercise}
+          setSelectedExercise={setSelectedExercise}
+          trendView={trendView}
+          setTrendView={setTrendView}
+          selectedMuscleGroup={selectedMuscleGroup}
+          setSelectedMuscleGroup={setSelectedMuscleGroup}
+          trendDateRange={trendDateRange}
+          setTrendDateRange={setTrendDateRange}
+          muscleTrendMetric={muscleTrendMetric}
+          setMuscleTrendMetric={setMuscleTrendMetric}
+        />
+      </div>
     </div>
   );
 }
