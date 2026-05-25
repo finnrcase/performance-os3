@@ -13,6 +13,7 @@ from fastapi import APIRouter, File, HTTPException, UploadFile
 
 from backend_new.db import (
     delete_json_row,
+    ensure_jsonb_table,
     ensure_jsonb_performance_indexes,
     fetch_json_rows,
     fetch_json_rows_for_value,
@@ -242,6 +243,24 @@ def _food_ai_error_response(
 
 def _today_iso() -> str:
     return app_today_iso()
+
+
+def _valid_json_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+
+
+def _normalize_workout_marker(payload: dict[str, Any]) -> dict[str, Any]:
+    now = utc_now_iso()
+    item = dict(payload or {})
+    item["marker_id"] = str(item.get("marker_id") or item.get("id") or uuid4())
+    item["date"] = str(item.get("date") or _today_iso())[:10]
+    workout_time = str(item.get("workout_time") or item.get("time") or now[11:16]).strip()
+    item["workout_time"] = workout_time[:5] if workout_time else now[11:16]
+    item["workout_type"] = str(item.get("workout_type") or item.get("type") or "Strength").strip() or "Strength"
+    item["notes"] = str(item.get("notes") or "")
+    item.setdefault("created_at", now)
+    item["updated_at"] = now
+    return item
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -962,3 +981,31 @@ def log_food_bulk(payload: dict[str, Any]) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail={"message": "Some parsed food items could not be saved.", "code": "food_bulk_insert_failed", "errors": errors, "created": len(items)})
     _invalidate_nutrition_logs_cache()
     return {"status": "ok", "items": items, "created": len(items), "requested": len(raw_items)}
+
+
+@router.get("/api/workout-markers")
+def get_workout_markers(limit: int = 500) -> dict[str, Any]:
+    ensure_jsonb_table("workout_markers")
+    rows = fetch_json_rows("workout_markers", limit=limit, date_field="date")
+    if rows and "_db_error" in rows[0]:
+        return {"status": "error", "items": [], "message": "Workout markers are unavailable.", "diagnostics": rows[0]["_db_error"]}
+    items = sorted(
+        [_normalize_workout_marker(row) for row in _valid_json_rows(rows)],
+        key=lambda row: (str(row.get("date") or ""), str(row.get("workout_time") or ""), str(row.get("created_at") or "")),
+        reverse=True,
+    )
+    return {
+        "status": "ok",
+        "items": items,
+        "source": "workout_markers",
+        "diagnostics": {"rows": len(items), "storage": "jsonb"},
+    }
+
+
+@router.post("/api/workout-markers")
+def post_workout_marker(payload: dict[str, Any]) -> dict[str, Any]:
+    item = insert_json_row("workout_markers", _normalize_workout_marker(payload))
+    if isinstance(item, dict) and "_db_error" in item:
+        return {"status": "error", "item": _normalize_workout_marker(payload), "items": [], "message": "Workout marker could not be saved.", "diagnostics": item["_db_error"]}
+    items = get_workout_markers()["items"]
+    return {"status": "ok", "item": _normalize_workout_marker(item), "items": items, "message": "Workout marker saved."}

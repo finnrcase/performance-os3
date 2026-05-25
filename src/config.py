@@ -18,6 +18,8 @@ INTEGRATION_FIELDS = {
     "strava_redirect_uri": "",
     "fitbit_client_id": "",
     "fitbit_client_secret": "",
+    "google_health_client_id": "",
+    "google_health_client_secret": "",
     "withings_client_id": "",
     "withings_client_secret": "",
     "openai_api_key": "",
@@ -188,7 +190,14 @@ def integration_status(key: str, settings: dict) -> str:
         if integrations.get("withings_client_id") and integrations.get("withings_client_secret"):
             return "Ready to connect"
         return "Not configured"
-    if key in {"fitbit_client_id", "fitbit_client_secret", "withings_client_id", "withings_client_secret"}:
+    if key in {
+        "fitbit_client_id",
+        "fitbit_client_secret",
+        "google_health_client_id",
+        "google_health_client_secret",
+        "withings_client_id",
+        "withings_client_secret",
+    }:
         return "Configured" if value else "Not configured"
     if key in {"strava_client_id", "strava_client_secret"}:
         return "Needs OAuth setup" if value else "Not configured"
@@ -201,10 +210,23 @@ def fitbit_google_health_status(settings: dict) -> str:
     metadata = settings.get("metadata", {})
     if metadata.get("fitbit_connected") or metadata.get("google_health_connected"):
         return "Connected"
-    has_client_id = bool(integrations.get("fitbit_client_id"))
-    has_client_secret = bool(integrations.get("fitbit_client_secret"))
-    if has_client_id and has_client_secret:
+    fitbit_configured = bool(integrations.get("fitbit_client_id") and integrations.get("fitbit_client_secret"))
+    google_configured = bool(
+        integrations.get("google_health_client_id")
+        and integrations.get("google_health_client_secret")
+    )
+    if fitbit_configured and google_configured:
         return "Configured"
-    if has_client_id or has_client_secret:
+    if fitbit_configured or google_configured:
+        return "Configured"
+    if any(
+        integrations.get(key)
+        for key in [
+            "fitbit_client_id",
+            "fitbit_client_secret",
+            "google_health_client_id",
+            "google_health_client_secret",
+        ]
+    ):
         return "Sync pending"
     return "Not configured"

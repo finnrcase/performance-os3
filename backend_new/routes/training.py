@@ -1111,6 +1111,39 @@ def pr_history(exercise: str = "", limit: int = 200) -> dict[str, Any]:
     }
 
 
+@router.get("/api/training/muscle-coverage")
+def weekly_muscle_coverage() -> dict[str, Any]:
+    rows = _valid_rows(fetch_latest_json_rows("workout_logs", limit=5000))
+    try:
+        import pandas as pd
+
+        from src.analytics.muscle_coverage import calculate_weekly_muscle_coverage
+
+        coverage = calculate_weekly_muscle_coverage(pd.DataFrame(rows), app_today_iso())
+        items = coverage.to_dict(orient="records")
+    except Exception as exc:
+        logger.exception("Weekly muscle coverage failed.")
+        return {
+            "status": "error",
+            "items": [],
+            "source": "training_history",
+            "message": "Weekly muscle coverage is unavailable.",
+            "diagnostics": {"error_type": type(exc).__name__, "rows_read": len(rows)},
+        }
+    return json_safe(
+        {
+            "status": "ok" if items else "empty",
+            "items": items,
+            "source": "training_history",
+            "diagnostics": {
+                "rows_read": len(rows),
+                "window_days": 7,
+                "groups": len(items),
+            },
+        }
+    )
+
+
 @router.post("/api/training/consolidate-history")
 def consolidate_history() -> dict[str, Any]:
     result = rebuild_summaries()

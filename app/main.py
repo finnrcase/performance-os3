@@ -63,6 +63,12 @@ from src.training import (
     calculate_training_volume,
     load_training_log,
 )
+from src.wearables import (
+    add_wearable_metric_entry,
+    calculate_training_readiness_signals,
+    calculate_wearable_recovery_signals,
+    load_wearable_metrics,
+)
 from src.workout_nutrition import (
     calculate_workout_nutrition_windows,
     create_workout_marker,
@@ -1618,6 +1624,149 @@ def render_recovery_check_in() -> None:
     )
 
 
+def _format_wearable_metric(value, suffix: str = "", digits: int = 0) -> str:
+    number = pd.to_numeric(value, errors="coerce")
+    if pd.isna(number):
+        return "--"
+    if digits <= 0:
+        return f"{float(number):,.0f}{suffix}"
+    return f"{float(number):,.{digits}f}{suffix}"
+
+
+def _format_wearable_trend(trend: str) -> str:
+    labels = {
+        "improving": "Improving",
+        "declining": "Declining",
+        "stable": "Stable",
+        "insufficient_data": "Insufficient data",
+    }
+    return labels.get(str(trend or "").strip().lower(), "Insufficient data")
+
+
+def render_wearables_panel() -> None:
+    section_header(
+        "Wearables",
+        "Manual and mock wearable metrics until Fitbit / Google Health OAuth is connected.",
+        "Local Metrics",
+    )
+
+    wearable_df = load_wearable_metrics()
+    form_col, summary_col = st.columns((0.95, 1.05))
+
+    with form_col:
+        with st.form("wearable_metric_entry_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                metric_date = st.date_input("Date", value=date.today(), key="wearable_metric_date")
+                source = st.selectbox("Source", ["Manual", "Fitbit", "Google Health", "Mock"])
+                sleep_hours = st.number_input("Sleep hours", min_value=0.0, max_value=24.0, step=0.25)
+                sleep_score = st.number_input("Sleep score", min_value=0.0, max_value=100.0, step=1.0)
+                resting_hr = st.number_input("Resting HR", min_value=0.0, step=1.0)
+            with col2:
+                hrv = st.number_input("HRV", min_value=0.0, step=1.0)
+                steps = st.number_input("Steps", min_value=0, step=250)
+                active_minutes = st.number_input("Active minutes", min_value=0, step=5)
+                calories_burned = st.number_input("Calories burned", min_value=0, step=25)
+
+            submitted = st.form_submit_button("Save wearable metrics")
+
+        if submitted:
+            wearable_df = add_wearable_metric_entry(
+                date=metric_date.isoformat(),
+                source=source,
+                sleep_hours=None if sleep_hours == 0 else sleep_hours,
+                sleep_score=None if sleep_score == 0 else sleep_score,
+                resting_hr=None if resting_hr == 0 else resting_hr,
+                hrv=None if hrv == 0 else hrv,
+                steps=None if steps == 0 else steps,
+                active_minutes=None if active_minutes == 0 else active_minutes,
+                calories_burned=None if calories_burned == 0 else calories_burned,
+            )
+            st.success("Wearable metrics saved.")
+
+    with summary_col:
+        signals = calculate_wearable_recovery_signals(wearable_df)
+        if wearable_df.empty or signals.get("status") == "empty":
+            with styled_container():
+                st.info("No wearable data logged yet.")
+                st.caption("Add a manual or mock entry to start seeing wearable trends.")
+            return
+
+        latest = signals.get("latest", {})
+        metric_cols = st.columns(4)
+        with metric_cols[0]:
+            metric_card("Sleep", _format_wearable_metric(latest.get("sleep_hours"), "h", 1), "Latest logged sleep")
+        with metric_cols[1]:
+            metric_card("Resting HR", _format_wearable_metric(latest.get("resting_hr"), " bpm"), "Latest resting heart rate")
+        with metric_cols[2]:
+            metric_card("HRV", _format_wearable_metric(latest.get("hrv"), " ms"), "Latest HRV")
+        with metric_cols[3]:
+            metric_card("Steps", _format_wearable_metric(latest.get("steps")), "Latest daily steps")
+
+        st.write("")
+        with styled_container():
+            section_header("Wearable Trends", "Basic 7-day status from locally logged metrics.", "Signals")
+            trend_cols = st.columns(4)
+            with trend_cols[0]:
+                st.metric("Sleep trend", _format_wearable_trend(signals.get("sleep", {}).get("trend")))
+            with trend_cols[1]:
+                st.metric("Resting HR trend", _format_wearable_trend(signals.get("resting_hr", {}).get("trend")))
+            with trend_cols[2]:
+                st.metric("HRV trend", _format_wearable_trend(signals.get("hrv", {}).get("trend")))
+            with trend_cols[3]:
+                st.metric("Activity trend", _format_wearable_trend(signals.get("activity", {}).get("trend")))
+
+            flags = signals.get("flags", [])
+            if flags:
+                st.caption(" ".join(str(flag) for flag in flags if str(flag).strip()))
+
+
+def render_training_readiness_signals_panel() -> None:
+    wearable_df = load_wearable_metrics()
+    recovery_df = load_recovery_log()
+    training_df = load_training_log()
+    nutrition_df = load_nutrition_log()
+    markers_df = load_workout_markers()
+    readiness = calculate_training_readiness_signals(
+        wearable_df=wearable_df,
+        recovery_df=recovery_df,
+        training_df=training_df,
+        nutrition_df=nutrition_df,
+        markers_df=markers_df,
+    )
+
+    with styled_container():
+        section_header(
+            "Training Readiness Signals",
+            "Simple daily guidance from wearable, recovery, training, nutrition, and workout timing data.",
+            "Decision",
+        )
+        if readiness.get("status") == "insufficient_data":
+            st.info(readiness.get("message") or "Need more wearable history.")
+
+        run = readiness.get("run_recommendation", {})
+        lift = readiness.get("lift_recommendation", {})
+        fueling = readiness.get("fueling_recommendation", {})
+        hydration = readiness.get("hydration_recommendation", {})
+
+        rec_cols = st.columns(4)
+        with rec_cols[0]:
+            run_value = f"{run.get('color', 'Gray')}: {run.get('label', 'Need more history')}"
+            metric_card("Run", run_value, run.get("reason", "Need more wearable history."))
+        with rec_cols[1]:
+            metric_card("Lift", lift.get("label", "Need more history"), lift.get("reason", "Need more wearable history."))
+        with rec_cols[2]:
+            metric_card("Fueling", fueling.get("label", "Normal fueling"), fueling.get("reason", "No fueling flag."))
+        with rec_cols[3]:
+            metric_card("Hydration", hydration.get("label", "Normal"), hydration.get("reason", "No hydration flag."))
+
+        signals = [str(signal).strip() for signal in readiness.get("signals", []) if str(signal).strip()]
+        if signals:
+            st.write("")
+            st.caption("Signals: " + " ".join(signals))
+        st.caption("This panel is advisory only and does not change the existing recovery score.")
+
+
 def render_recommendations() -> None:
     section_header(
         "Recommendations",
@@ -1942,7 +2091,7 @@ def render_data_history() -> None:
 
 def render_weight_recovery() -> None:
     section_header("Weight & Recovery", "Log bodyweight, sleep, fatigue, soreness, stress, and motivation.", "Recovery")
-    weight_tab, recovery_tab, health_tab = st.tabs(["Bodyweight", "Recovery Check-In", "Fitbit / Google Health"])
+    weight_tab, recovery_tab, wearables_tab = st.tabs(["Bodyweight", "Recovery Check-In", "Wearables"])
     with weight_tab:
         col1, col2 = st.columns((0.9, 1.1))
         with col1:
@@ -1974,10 +2123,11 @@ def render_weight_recovery() -> None:
                 trend_df["date"] = pd.to_datetime(trend_df["date"], errors="coerce")
                 fig = px.line(trend_df, x="date", y="recovery_score", markers=True, title="Recovery Trend")
                 st.plotly_chart(style_plotly(fig), width="stretch")
-    with health_tab:
-        st.info("Fitbit and Google Health will import sleep, HRV, resting HR, and recovery metrics after OAuth setup is added.")
-        st.write("For now, use the Recovery Entry tab for manual logging.")
+    with wearables_tab:
+        render_wearables_panel()
 
+    st.write("")
+    render_training_readiness_signals_panel()
     st.write("")
     render_fueling_deload_signals_panel()
 
@@ -2002,7 +2152,8 @@ def render_integrations_settings() -> None:
         render_integration_status("Strava", integration_status("strava_client_id", settings), "Will import runs and cardio after OAuth setup.")
         render_integration_status("Apple Health", integration_status("apple_health_export_file", settings), "Local export upload first, API later.")
     with status_col3:
-        render_integration_status("Fitbit / Google Health", integration_status("fitbit_client_id", settings), "Will import sleep, HRV, resting HR, and recovery metrics.")
+        render_integration_status("Fitbit", integration_status("fitbit_client_id", settings), "OAuth scaffold only; no live API calls yet.")
+        render_integration_status("Google Health", integration_status("google_health_client_id", settings), "OAuth scaffold only; no live API calls yet.")
 
     st.write("")
     with st.form("integration_settings_form"):
@@ -2012,6 +2163,12 @@ def render_integrations_settings() -> None:
         strava_client_secret = st.text_input("Strava client secret", value=integrations["strava_client_secret"], type="password")
         fitbit_client_id = st.text_input("Fitbit client ID", value=integrations["fitbit_client_id"])
         fitbit_client_secret = st.text_input("Fitbit client secret", value=integrations["fitbit_client_secret"], type="password")
+        google_health_client_id = st.text_input("Google Health client ID", value=integrations["google_health_client_id"])
+        google_health_client_secret = st.text_input(
+            "Google Health client secret",
+            value=integrations["google_health_client_secret"],
+            type="password",
+        )
         openai_api_key = st.text_input("OpenAI API key", value=integrations["openai_api_key"], type="password")
         apple_health_export_file = st.text_input(
             "Apple Health export file path",
@@ -2028,6 +2185,8 @@ def render_integrations_settings() -> None:
                 "strava_client_secret": strava_client_secret,
                 "fitbit_client_id": fitbit_client_id,
                 "fitbit_client_secret": fitbit_client_secret,
+                "google_health_client_id": google_health_client_id,
+                "google_health_client_secret": google_health_client_secret,
                 "openai_api_key": openai_api_key,
                 "apple_health_export_file": apple_health_export_file,
             }
@@ -2045,6 +2204,8 @@ def render_integrations_settings() -> None:
                 {"Setting": "Strava client secret", "Value": mask_secret(integrations["strava_client_secret"]), "Status": integration_status("strava_client_secret", settings)},
                 {"Setting": "Fitbit client ID", "Value": mask_secret(integrations["fitbit_client_id"]), "Status": integration_status("fitbit_client_id", settings)},
                 {"Setting": "Fitbit client secret", "Value": mask_secret(integrations["fitbit_client_secret"]), "Status": integration_status("fitbit_client_secret", settings)},
+                {"Setting": "Google Health client ID", "Value": mask_secret(integrations["google_health_client_id"]), "Status": integration_status("google_health_client_id", settings)},
+                {"Setting": "Google Health client secret", "Value": mask_secret(integrations["google_health_client_secret"]), "Status": integration_status("google_health_client_secret", settings)},
                 {"Setting": "OpenAI API key", "Value": mask_secret(integrations["openai_api_key"]), "Status": integration_status("openai_api_key", settings)},
                 {"Setting": "Apple Health export", "Value": integrations["apple_health_export_file"] or "Not configured", "Status": integration_status("apple_health_export_file", settings)},
             ]

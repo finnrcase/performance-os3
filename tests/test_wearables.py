@@ -4,6 +4,7 @@ import src.wearables as wearables
 from src.wearables import (
     WEARABLE_METRIC_COLUMNS,
     add_wearable_metric_entry,
+    calculate_training_readiness_signals,
     calculate_wearable_recovery_signals,
     load_wearable_metrics,
     save_wearable_metrics,
@@ -97,3 +98,123 @@ def test_calculate_wearable_recovery_signals_trends():
     assert signals["hrv"]["trend"] == "improving"
     assert signals["activity"]["trend"] == "improving"
     assert signals["diagnostics"]["valid_days"] == 14
+
+
+def test_training_readiness_needs_more_wearable_history():
+    readiness = calculate_training_readiness_signals(pd.DataFrame())
+
+    assert readiness["status"] == "insufficient_data"
+    assert readiness["message"] == "Need more wearable history."
+    assert readiness["run_recommendation"]["label"] == "Need more history"
+
+
+def test_training_readiness_reduces_intensity_from_wearable_and_recovery_strain():
+    wearable_rows = []
+    for index in range(10):
+        day = pd.Timestamp("2026-05-15") + pd.Timedelta(days=index)
+        recent = index >= 7
+        wearable_rows.append(
+            {
+                "metric_id": f"strain-{index}",
+                "date": day.date().isoformat(),
+                "source": "mock",
+                "sleep_hours": 6.4 if recent else 7.4,
+                "resting_hr": 70 if recent else 60,
+                "hrv": 40 if recent else 60,
+                "steps": 13000 if recent else 7000,
+                "active_minutes": 95 if recent else 45,
+                "calories_burned": 3300 if recent else 2600,
+            }
+        )
+    training_rows = []
+    for index in range(7):
+        day = pd.Timestamp("2026-05-18") + pd.Timedelta(days=index)
+        training_rows.append(
+            {
+                "date": day.date().isoformat(),
+                "sets": 10,
+                "reps": 10,
+                "weight": 100,
+                "rpe": 8,
+                "duration_minutes": 55,
+            }
+        )
+    recovery_rows = [
+        {"date": "2026-05-19", "recovery_score": 86},
+        {"date": "2026-05-20", "recovery_score": 83},
+        {"date": "2026-05-21", "recovery_score": 80},
+        {"date": "2026-05-22", "recovery_score": 70},
+        {"date": "2026-05-23", "recovery_score": 66},
+        {"date": "2026-05-24", "recovery_score": 62},
+    ]
+    nutrition_rows = [
+        {"date": "2026-05-22", "carbs": 120, "protein": 170, "calories": 2300},
+        {"date": "2026-05-23", "carbs": 130, "protein": 160, "calories": 2350},
+        {"date": "2026-05-24", "carbs": 125, "protein": 165, "calories": 2400},
+        {
+            "date": "2026-05-24",
+            "carbs": 20,
+            "protein": 20,
+            "calories": 220,
+            "created_at": "2026-05-24T13:00:00",
+        },
+    ]
+    markers = pd.DataFrame(
+        [
+            {
+                "marker_id": "marker-1",
+                "date": "2026-05-24",
+                "workout_time": "12:00",
+                "workout_type": "Strength",
+                "notes": "",
+                "created_at": "2026-05-24T12:00:00",
+            }
+        ]
+    )
+
+    readiness = calculate_training_readiness_signals(
+        wearable_df=pd.DataFrame(wearable_rows),
+        recovery_df=pd.DataFrame(recovery_rows),
+        training_df=pd.DataFrame(training_rows),
+        nutrition_df=pd.DataFrame(nutrition_rows),
+        markers_df=markers,
+    )
+
+    assert readiness["status"] == "ok"
+    assert readiness["run_recommendation"]["color"] == "Red"
+    assert readiness["run_recommendation"]["label"] == "Skip run / recovery day"
+    assert readiness["lift_recommendation"]["label"] == "Deload suggested"
+    assert readiness["fueling_recommendation"]["label"] == "Increase carbs"
+    assert readiness["hydration_recommendation"]["label"] == "Increase fluids/electrolytes"
+    assert any("Resting HR is elevated" in signal for signal in readiness["signals"])
+
+
+def test_training_readiness_stays_green_with_stable_wearables():
+    wearable_rows = []
+    for index in range(10):
+        day = pd.Timestamp("2026-05-15") + pd.Timedelta(days=index)
+        wearable_rows.append(
+            {
+                "metric_id": f"stable-{index}",
+                "date": day.date().isoformat(),
+                "source": "mock",
+                "sleep_hours": 7.8,
+                "resting_hr": 58,
+                "hrv": 62,
+                "steps": 8500,
+                "active_minutes": 55,
+                "calories_burned": 2700,
+            }
+        )
+
+    readiness = calculate_training_readiness_signals(
+        wearable_df=pd.DataFrame(wearable_rows),
+        recovery_df=pd.DataFrame(),
+        training_df=pd.DataFrame(),
+        nutrition_df=pd.DataFrame(),
+        markers_df=pd.DataFrame(),
+    )
+
+    assert readiness["run_recommendation"]["color"] == "Green"
+    assert readiness["run_recommendation"]["label"] == "Run OK"
+    assert readiness["lift_recommendation"]["label"] == "Push normal"

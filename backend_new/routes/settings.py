@@ -18,6 +18,8 @@ INTEGRATION_FIELDS = [
     "strava_redirect_uri",
     "fitbit_client_id",
     "fitbit_client_secret",
+    "google_health_client_id",
+    "google_health_client_secret",
     "withings_client_id",
     "withings_client_secret",
     "openai_api_key",
@@ -31,6 +33,10 @@ ENV_BY_FIELD = {
     "strava_redirect_uri": "STRAVA_REDIRECT_URI",
     "withings_client_id": "WITHINGS_CLIENT_ID",
     "withings_client_secret": "WITHINGS_CLIENT_SECRET",
+    "fitbit_client_id": "FITBIT_CLIENT_ID",
+    "fitbit_client_secret": "FITBIT_CLIENT_SECRET",
+    "google_health_client_id": "GOOGLE_HEALTH_CLIENT_ID",
+    "google_health_client_secret": "GOOGLE_HEALTH_CLIENT_SECRET",
     "openai_api_key": "OPENAI_API_KEY",
 }
 
@@ -205,11 +211,18 @@ def settings_payload() -> dict[str, Any]:
     statuses["openai_api_key"] = openai_service["label"]
     withings_status = _withings_status(settings, integrations)
     strava_status, strava_service = _strava_connection(settings, integrations)
+    wearable_credentials_configured = all(
+        statuses.get(field) == "Configured"
+        for field in ["fitbit_client_id", "fitbit_client_secret"]
+    ) or all(
+        statuses.get(field) == "Configured"
+        for field in ["google_health_client_id", "google_health_client_secret"]
+    )
     statuses.update(
         {
             "strava": strava_status,
             "withings": withings_status,
-            "fitbit_google_health": "Prepared",
+            "fitbit_google_health": "Configured" if wearable_credentials_configured else "Prepared",
         }
     )
     withings_service = {
@@ -232,6 +245,11 @@ def settings_payload() -> dict[str, Any]:
             **strava_service,
         },
         "withings": withings_service,
+        "fitbit_google_health": {
+            "configured": wearable_credentials_configured,
+            "status": "configured" if wearable_credentials_configured else "placeholder",
+            "message": "Wearable storage and manual/mock metrics are ready. OAuth is intentionally not enabled yet.",
+        },
         "openai": {
             **openai_service,
         },

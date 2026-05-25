@@ -24,6 +24,8 @@ BACKUP_DATASETS = {
     "training_log": ("workout_logs", "external_id"),
     "recovery_log": ("recovery_logs", "recovery_log_id"),
     "sleep_entries": ("sleep_logs", "id"),
+    "workout_markers": ("workout_markers", "marker_id"),
+    "wearable_metrics": ("wearable_metrics", "metric_id"),
 }
 
 BACKUP_DOCUMENTS = {

@@ -327,6 +327,80 @@ type SleepEntry = {
   updatedAt: string;
 };
 
+type WorkoutMarker = {
+  marker_id: string;
+  date: string;
+  workout_time: string;
+  workout_type: string;
+  notes: string;
+  created_at?: string;
+};
+
+type WearableMetricEntry = {
+  metric_id: string;
+  date: string;
+  source: "manual" | "fitbit" | "google_health" | "mock" | string;
+  sleep_hours: number | null;
+  sleep_score: number | null;
+  resting_hr: number | null;
+  hrv: number | null;
+  steps: number | null;
+  active_minutes: number | null;
+  calories_burned: number | null;
+  workout_minutes?: number | null;
+  created_at?: string;
+  updated_at?: string;
+};
+
+type WearableTrendMetric = {
+  latest?: number | null;
+  rolling_7_day_average?: number | null;
+  recent_7_day_average?: number | null;
+  previous_7_day_average?: number | null;
+  trend?: string;
+};
+
+type WearableSignals = {
+  status: string;
+  message?: string;
+  latest?: Partial<WearableMetricEntry> & { date?: string };
+  sleep?: WearableTrendMetric;
+  resting_hr?: WearableTrendMetric;
+  hrv?: WearableTrendMetric;
+  activity?: Record<string, unknown>;
+  flags?: string[];
+};
+
+type TrainingReadinessSignals = {
+  status: string;
+  message?: string;
+  run_recommendation?: { color?: string; label?: string; reason?: string };
+  lift_recommendation?: { label?: string; reason?: string };
+  fueling_recommendation?: { label?: string; reason?: string };
+  hydration_recommendation?: { label?: string; reason?: string };
+  signals?: string[];
+};
+
+type MuscleCoverageItem = {
+  muscle_group: string;
+  hard_sets?: number;
+  sets?: number;
+  volume?: number;
+  target_sets?: number;
+  coverage_pct?: number;
+  status?: string;
+  color?: string;
+  color_hex?: string;
+};
+
+type MuscleCoverageResponse = {
+  status: string;
+  items: MuscleCoverageItem[];
+  source?: string;
+  diagnostics?: Record<string, unknown>;
+  message?: string;
+};
+
 type TrainingEntry = {
   workout_id: string;
   date: string;
@@ -1246,6 +1320,18 @@ type FormState = {
   body: BodyMetricEntry;
   recovery: RecoveryEntry;
   training: TrainingEntry;
+  workoutMarker: Pick<WorkoutMarker, "date" | "workout_time" | "workout_type" | "notes">;
+  wearable: {
+    date: string;
+    source: string;
+    sleep_hours: number | "";
+    sleep_score: number | "";
+    resting_hr: number | "";
+    hrv: number | "";
+    steps: number | "";
+    active_minutes: number | "";
+    calories_burned: number | "";
+  };
   goals: Goals;
   settings: Record<string, string>;
   benchPr: { weight: number; reps: number; date: string; notes: string; editing: boolean };
@@ -1537,6 +1623,8 @@ const integrationLabels: Record<string, string> = {
   strava_client_secret: "Strava client secret",
   fitbit_client_id: "Fitbit client ID",
   fitbit_client_secret: "Fitbit client secret",
+  google_health_client_id: "Google Health client ID",
+  google_health_client_secret: "Google Health client secret",
   withings_client_id: "Withings client ID",
   withings_client_secret: "Withings client secret",
   openai_api_key: "OpenAI API key",
@@ -1552,6 +1640,17 @@ function todayString() {
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function currentLocalTimeString() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.hour ?? "12"}:${values.minute ?? "00"}`;
 }
 
 function headerDateString(date = new Date()) {
@@ -1625,6 +1724,23 @@ const initialForms: FormState = {
     notes: "",
     source: "manual",
     external_id: "",
+  },
+  workoutMarker: {
+    date: todayString(),
+    workout_time: currentLocalTimeString(),
+    workout_type: "Strength",
+    notes: "",
+  },
+  wearable: {
+    date: todayString(),
+    source: "manual",
+    sleep_hours: "",
+    sleep_score: "",
+    resting_hr: "",
+    hrv: "",
+    steps: "",
+    active_minutes: "",
+    calories_burned: "",
   },
   goals: defaultGoals,
   settings: {},
@@ -4685,8 +4801,10 @@ function FoodPage({
   shortcuts,
   frequentFoods,
   mealTemplates,
+  workoutMarkers,
   forms,
   setForms,
+  onWorkoutMarkerSubmit,
   manualCaloriesOverridden,
   setManualCaloriesOverridden,
   manualFoodMode,
@@ -4741,8 +4859,10 @@ function FoodPage({
   shortcuts: FoodShortcut[];
   frequentFoods: NutritionShortcutData["frequent_foods"];
   mealTemplates: MealTemplate[];
+  workoutMarkers: WorkoutMarker[];
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
+  onWorkoutMarkerSubmit: (event: FormEvent) => void;
   manualCaloriesOverridden: boolean;
   setManualCaloriesOverridden: React.Dispatch<React.SetStateAction<boolean>>;
   manualFoodMode: "direct" | "serving";
@@ -4800,6 +4920,10 @@ function FoodPage({
   const [editingFoodLogIcon, setEditingFoodLogIcon] = useState<FoodIconType | null>(null);
   const [savingFoodLogId, setSavingFoodLogId] = useState<string | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
+  const selectedDateMarkers = workoutMarkers
+    .filter((marker) => (marker.date || "").slice(0, 10) === forms.nutrition.date)
+    .sort((a, b) => `${b.date} ${b.workout_time}`.localeCompare(`${a.date} ${a.workout_time}`));
+  const latestSelectedMarker = selectedDateMarkers[0] ?? null;
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
     (totals, entry) => ({
@@ -5011,6 +5135,38 @@ function FoodPage({
           dateLabel={selectedDateLabel}
           dayTypeMacros={dayTypeMacros}
         />
+        <Card className="min-w-0">
+          <SectionHeader
+            eyebrow="Workout Timing"
+            title="Add Workout Marker"
+            action={latestSelectedMarker ? (
+              <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+                {selectedDateMarkers.length} logged
+              </span>
+            ) : null}
+          />
+          <form onSubmit={onWorkoutMarkerSubmit} className="grid gap-3 md:grid-cols-[minmax(130px,0.8fr)_minmax(110px,0.65fr)_minmax(150px,1fr)_minmax(0,1.4fr)_auto] md:items-end">
+            <TextInput label="Date" type="date" value={forms.workoutMarker.date} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, date: value } }))} />
+            <TextInput label="Time" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
+            <SelectInput label="Type" value={forms.workoutMarker.workout_type} options={["Strength", "Run", "Cardio", "Mobility", "Other"]} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_type: value } }))} />
+            <TextInput label="Notes optional" value={forms.workoutMarker.notes} placeholder="Pull day, legs, gym, etc." onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, notes: value } }))} />
+            <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
+              Log Workout Marker
+            </button>
+          </form>
+          <p className="mt-3 text-xs leading-5 text-zinc-500">
+            Foods with usable timestamps before this marker count as pre-workout; foods after it count as post-workout.
+          </p>
+          {latestSelectedMarker ? (
+            <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-sm text-zinc-300">
+              Latest marker: <span className="font-semibold text-white">{latestSelectedMarker.workout_type || "Workout"}</span> at {latestSelectedMarker.workout_time || "--"}{latestSelectedMarker.notes ? ` · ${latestSelectedMarker.notes}` : ""}
+            </div>
+          ) : (
+            <p className="mt-3 rounded-lg border border-dashed border-white/10 bg-white/[0.025] px-3 py-2 text-sm text-zinc-400">
+              No workout marker logged for this date yet.
+            </p>
+          )}
+        </Card>
         <Card className="min-w-0">
           <SectionHeader
             eyebrow="Logged foods"
@@ -6072,24 +6228,32 @@ function RecoveryPage({
   bodyMetrics,
   recoveryLogs,
   sleepEntries,
+  wearableMetrics,
+  wearableSignals,
+  trainingReadiness,
   adaptiveRecommendation,
   withingsLastSyncedAt,
   forms,
   setForms,
   onBodySubmit,
   onRecoverySubmit,
+  onWearableSubmit,
   onSyncWeightNow,
   onSyncWithingsHistory,
 }: Readonly<{
   bodyMetrics: BodyMetricEntry[];
   recoveryLogs: RecoveryEntry[];
   sleepEntries: SleepEntry[];
+  wearableMetrics: WearableMetricEntry[];
+  wearableSignals: WearableSignals | null;
+  trainingReadiness: TrainingReadinessSignals | null;
   adaptiveRecommendation?: AdaptiveNutritionRecommendation | null;
   withingsLastSyncedAt?: string;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onBodySubmit: (event: FormEvent) => void;
   onRecoverySubmit: (event: FormEvent) => void;
+  onWearableSubmit: (event: FormEvent) => void;
   onSyncWeightNow: () => void;
   onSyncWithingsHistory: () => void;
 }>) {
@@ -6169,6 +6333,18 @@ function RecoveryPage({
       : sleepQualityScore >= 68
         ? "Neutral - sleep is adequate but still worth watching."
         : "Negative - sleep may be limiting readiness.";
+  const sortedWearableMetrics = [...wearableMetrics].sort((a, b) => `${a.date} ${a.created_at ?? ""}`.localeCompare(`${b.date} ${b.created_at ?? ""}`));
+  const latestWearable = sortedWearableMetrics.at(-1) ?? null;
+  const wearableFlags = Array.isArray(wearableSignals?.flags) ? wearableSignals.flags : [];
+  const readinessMessages = Array.isArray(trainingReadiness?.signals) ? trainingReadiness.signals : [];
+  const wearableNumber = (value: unknown, suffix = "") => {
+    const number = finiteNumberOrNull(value);
+    return number === null ? "--" : `${Number.isInteger(number) ? number.toLocaleString() : number.toFixed(1)}${suffix}`;
+  };
+  const trendText = (trend?: string) => {
+    if (!trend || trend === "insufficient_data") return "Need more data";
+    return trend.replaceAll("_", " ");
+  };
   return (
     <div className="space-y-4">
       <Card>
@@ -6241,6 +6417,76 @@ function RecoveryPage({
           <EmptyState title="No Withings body composition data yet" description="Connect and sync Withings to show body fat, lean mass, fat mass, and muscle mass." action="Open Settings" onAction={() => undefined} />
         )}
       </Card>
+
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
+        <Card>
+          <SectionHeader
+            eyebrow="Wearables"
+            title="Wearables"
+            action={latestWearable ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
+                Latest {latestWearable.date}
+              </span>
+            ) : null}
+          />
+          <div className="space-y-4">
+            {latestWearable ? (
+              <div className="grid gap-3 sm:grid-cols-4">
+                <MetricCard title="Sleep" value={wearableNumber(latestWearable.sleep_hours, "h")} detail={trendText(wearableSignals?.sleep?.trend)} icon={HeartPulse} accent="border-sky-300/20 bg-sky-300/10 text-sky-200" />
+                <MetricCard title="Resting HR" value={wearableNumber(latestWearable.resting_hr, " bpm")} detail={trendText(wearableSignals?.resting_hr?.trend)} icon={HeartPulse} accent="border-rose-300/20 bg-rose-300/10 text-rose-200" />
+                <MetricCard title="HRV" value={wearableNumber(latestWearable.hrv)} detail={trendText(wearableSignals?.hrv?.trend)} icon={Gauge} accent="border-violet-300/20 bg-violet-300/10 text-violet-200" />
+                <MetricCard title="Steps" value={wearableNumber(latestWearable.steps)} detail={trendText(String(recordOrEmpty(wearableSignals?.activity).trend || ""))} icon={BarChart3} accent="border-emerald-300/20 bg-emerald-300/10 text-emerald-200" />
+              </div>
+            ) : (
+              <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm text-zinc-400">
+                No wearable data logged yet.
+              </p>
+            )}
+            {wearableFlags.length ? (
+              <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm leading-6 text-zinc-300">{wearableFlags[0]}</p>
+            ) : null}
+            <form onSubmit={onWearableSubmit} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <TextInput label="Date" type="date" value={forms.wearable.date} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, date: value } }))} />
+              <SelectInput label="Source" value={forms.wearable.source} options={["manual", "fitbit", "google_health", "mock"]} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, source: value } }))} />
+              <TextInput label="Sleep hours" type="number" min={0} step="any" value={forms.wearable.sleep_hours} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, sleep_hours: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="Sleep score" type="number" min={0} step="any" value={forms.wearable.sleep_score} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, sleep_score: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="Resting HR" type="number" min={0} step="any" value={forms.wearable.resting_hr} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, resting_hr: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="HRV" type="number" min={0} step="any" value={forms.wearable.hrv} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, hrv: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="Steps" type="number" min={0} step="any" value={forms.wearable.steps} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, steps: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="Active minutes" type="number" min={0} step="any" value={forms.wearable.active_minutes} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, active_minutes: value === "" ? "" : Number(value) } }))} />
+              <TextInput label="Calories burned" type="number" min={0} step="any" value={forms.wearable.calories_burned} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, calories_burned: value === "" ? "" : Number(value) } }))} />
+              <button className="accent-bg h-11 rounded-lg text-sm font-semibold sm:self-end xl:col-span-3">
+                Save Wearable Metric
+              </button>
+            </form>
+          </div>
+        </Card>
+
+        <Card>
+          <SectionHeader eyebrow="Readiness" title="Training Readiness Signals" />
+          {trainingReadiness?.status === "ok" ? (
+            <div className="space-y-3">
+              {[
+                ["Run", trainingReadiness.run_recommendation?.label, trainingReadiness.run_recommendation?.reason],
+                ["Lift", trainingReadiness.lift_recommendation?.label, trainingReadiness.lift_recommendation?.reason],
+                ["Fueling", trainingReadiness.fueling_recommendation?.label, trainingReadiness.fueling_recommendation?.reason],
+                ["Hydration", trainingReadiness.hydration_recommendation?.label, trainingReadiness.hydration_recommendation?.reason],
+              ].map(([label, value, reason]) => (
+                <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{value || "Need more data"}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-500">{reason || "Need more wearable history."}</p>
+                </div>
+              ))}
+              {readinessMessages.length ? <p className="text-xs leading-5 text-zinc-500">{readinessMessages[0]}</p> : null}
+            </div>
+          ) : (
+            <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
+              {trainingReadiness?.message || "Need more wearable history."}
+            </p>
+          )}
+        </Card>
+      </div>
 
       <Card>
         <SectionHeader eyebrow="Past 7 Days" title="Weight Trend" />
@@ -7515,6 +7761,8 @@ const BACKUP_DATASET_LABELS: Record<string, string> = {
   training_log: "Workouts (Hevy + manual + Strava runs)",
   recovery_log: "Recovery check-ins",
   sleep_entries: "Sleep entries",
+  workout_markers: "Workout markers",
+  wearable_metrics: "Wearable metrics",
   daily_nutrition_summary: "Daily nutrition summaries",
 };
 
@@ -7594,6 +7842,7 @@ function HistoryPage({
   trainingVolume,
   trainingSummary,
   trainingSummaryStatus,
+  muscleCoverage,
   onSyncHevy,
   onExportRawHevy,
   onExportNormalizedTraining,
@@ -7626,6 +7875,7 @@ function HistoryPage({
   trainingVolume: DashboardData["training_volume"];
   trainingSummary: TrainingSummaryResponse | null;
   trainingSummaryStatus: TrainingSummaryStatusResponse | null;
+  muscleCoverage: MuscleCoverageResponse | null;
   onSyncHevy: () => void;
   onExportRawHevy: () => void;
   onExportNormalizedTraining: () => void;
@@ -7747,6 +7997,7 @@ function HistoryPage({
   const optimizationBaselineInsights = arrayOrEmpty<OptimizationData["personal_baseline"]["insights"][number]>(optimizationBaseline.insights);
   const optimizationMacroDaily = arrayOrEmpty<OptimizationData["macro_adherence"]["daily"][number]>(optimizationMacroAdherence.daily);
   const optimizationMacroCorrelations = arrayOrEmpty<OptimizationData["macro_adherence"]["correlations"][number]>(optimizationMacroAdherence.correlations);
+  const muscleCoverageItems = Array.isArray(muscleCoverage?.items) ? muscleCoverage.items : [];
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -8326,6 +8577,57 @@ function HistoryPage({
             <p>{trainingSummaryStatus?.coaching_contract?.long_term_context ?? "Long-term context uses weekly/monthly summaries and PR history."}</p>
           </div>
         </div>
+      </Card>
+      <Card>
+        <SectionHeader
+          eyebrow="Workouts"
+          title="Weekly Muscle Coverage"
+          action={<span className="text-xs text-zinc-500">Last 7 days vs target/baseline</span>}
+        />
+        {muscleCoverageItems.length ? (
+          <div className="space-y-4">
+            <div className="flex flex-wrap gap-2 text-xs">
+              {[
+                ["Purple", "Missed", "#7c3aed"],
+                ["Red", "Not hit enough", "#ef4444"],
+                ["Yellow", "Slightly lacking", "#facc15"],
+                ["Green", "Good", "#22c55e"],
+              ].map(([color, label, hex]) => (
+                <span key={color} className="inline-flex items-center gap-2 rounded-full border border-white/10 px-2.5 py-1 text-zinc-300">
+                  <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: hex }} />
+                  {label}
+                </span>
+              ))}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+              {muscleCoverageItems.map((item) => {
+                const pct = finiteNumberOrNull(item.coverage_pct) ?? 0;
+                const color = item.color_hex || "#71717a";
+                return (
+                  <div key={item.muscle_group} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-semibold text-white">{item.muscle_group}</p>
+                      <span className="h-3 w-3 rounded-full" style={{ backgroundColor: color }} />
+                    </div>
+                    <div className="mt-3 h-2 rounded-full bg-zinc-900">
+                      <div className="h-full rounded-full transition-[width,background-color] duration-300" style={{ width: `${Math.min(Math.max(pct, 0), 100)}%`, backgroundColor: color }} />
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-400">
+                      {formatWholeNumber(item.hard_sets)} hard sets / {formatWholeNumber(item.target_sets)} target
+                    </p>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {formatWholeNumber(item.volume)} volume · {item.status || "Learning"}
+                    </p>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ) : (
+          <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm text-zinc-400">
+            {muscleCoverage?.message || "Weekly muscle coverage will appear once lifting history is available."}
+          </p>
+        )}
       </Card>
       {adaptiveRecommendation ? (
         <Card>
@@ -10371,6 +10673,11 @@ function HomeContent() {
   const [bodyMetrics, setBodyMetrics] = useState<BodyMetricEntry[]>([]);
   const [recoveryLogs, setRecoveryLogs] = useState<RecoveryEntry[]>([]);
   const [sleepEntries, setSleepEntries] = useState<SleepEntry[]>([]);
+  const [workoutMarkers, setWorkoutMarkers] = useState<WorkoutMarker[]>([]);
+  const [wearableMetrics, setWearableMetrics] = useState<WearableMetricEntry[]>([]);
+  const [wearableSignals, setWearableSignals] = useState<WearableSignals | null>(null);
+  const [trainingReadiness, setTrainingReadiness] = useState<TrainingReadinessSignals | null>(null);
+  const [muscleCoverage, setMuscleCoverage] = useState<MuscleCoverageResponse | null>(null);
   const [workoutHistory, setWorkoutHistory] = useState<WorkoutGroup[]>([]);
   const [trainingHistoryMeta, setTrainingHistoryMeta] = useState({ rawWindowDays: 180, hasMoreRecent: false, limit: 50, message: "" });
   const [trainingSummary, setTrainingSummary] = useState<TrainingSummaryResponse | null>(null);
@@ -10642,6 +10949,36 @@ function HomeContent() {
         },
       },
       {
+        key: "workout_markers",
+        label: "Workout markers",
+        path: "/api/workout-markers",
+        run: async () => {
+          const data = await trackedApiGet<{ items: WorkoutMarker[] }>({ key: "workout_markers", label: "Workout markers", path: "/api/workout-markers", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
+          setWorkoutMarkers(Array.isArray(data.items) ? data.items : []);
+        },
+      },
+      {
+        key: "wearable_metrics",
+        label: "Wearable metrics",
+        path: "/api/wearables/metrics",
+        run: async () => {
+          const data = await trackedApiGet<{ items: WearableMetricEntry[] }>({ key: "wearable_metrics", label: "Wearable metrics", path: "/api/wearables/metrics", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug);
+          setWearableMetrics(Array.isArray(data.items) ? data.items : []);
+        },
+      },
+      {
+        key: "wearable_signals",
+        label: "Wearable signals",
+        path: "/api/wearables/signals",
+        run: async () => setWearableSignals(await trackedApiGet<WearableSignals>({ key: "wearable_signals", label: "Wearable signals", path: "/api/wearables/signals", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
+        key: "training_readiness",
+        label: "Training readiness",
+        path: "/api/wearables/training-readiness",
+        run: async () => setTrainingReadiness(await trackedApiGet<TrainingReadinessSignals>({ key: "training_readiness", label: "Training readiness", path: "/api/wearables/training-readiness", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
         key: "training_history",
         label: "Training history",
         path: "/api/training/history?limit=50&days=180",
@@ -10685,6 +11022,12 @@ function HomeContent() {
         label: "Hevy sync status",
         path: "/api/training/sync/hevy/status",
         run: async () => setHevySync(await trackedApiGet<HevySyncStatus>({ key: "hevy_sync_status", label: "Hevy sync status", path: "/api/training/sync/hevy/status", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
+        key: "muscle_coverage",
+        label: "Weekly muscle coverage",
+        path: "/api/training/muscle-coverage",
+        run: async () => setMuscleCoverage(await trackedApiGet<MuscleCoverageResponse>({ key: "muscle_coverage", label: "Weekly muscle coverage", path: "/api/training/muscle-coverage", required: false }, DEFAULT_API_TIMEOUT_MS, recordStartupDebug)),
       },
     ];
 
@@ -11194,6 +11537,92 @@ function HomeContent() {
     }
   }, []);
 
+  const refreshWorkoutMarkersOnly = useCallback(async () => {
+    const data = await apiGet<{ items: WorkoutMarker[] }>("/api/workout-markers", SETTINGS_API_TIMEOUT_MS);
+    setWorkoutMarkers(Array.isArray(data.items) ? data.items : []);
+    return data;
+  }, []);
+
+  const refreshWearablesOnly = useCallback(async () => {
+    const [metrics, signals, readiness] = await Promise.all([
+      apiGet<{ items: WearableMetricEntry[] }>("/api/wearables/metrics", SETTINGS_API_TIMEOUT_MS),
+      apiGet<WearableSignals>("/api/wearables/signals", SETTINGS_API_TIMEOUT_MS),
+      apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS),
+    ]);
+    setWearableMetrics(Array.isArray(metrics.items) ? metrics.items : []);
+    setWearableSignals(signals);
+    setTrainingReadiness(readiness);
+    return { metrics, signals, readiness };
+  }, []);
+
+  const refreshMuscleCoverageOnly = useCallback(async () => {
+    const data = await apiGet<MuscleCoverageResponse>("/api/training/muscle-coverage", SETTINGS_API_TIMEOUT_MS);
+    setMuscleCoverage({ ...data, items: Array.isArray(data.items) ? data.items : [] });
+    return data;
+  }, []);
+
+  const submitWorkoutMarker = useCallback((event: FormEvent) => {
+    void submitWithoutRefresh(event, async () => {
+      const marker = {
+        ...forms.workoutMarker,
+        date: forms.workoutMarker.date || todayString(),
+        workout_time: forms.workoutMarker.workout_time || currentLocalTimeString(),
+        workout_type: forms.workoutMarker.workout_type || "Strength",
+      };
+      const result = await apiSend<{ item?: WorkoutMarker; items?: WorkoutMarker[]; status?: string; message?: string }>("/api/workout-markers", "POST", marker);
+      if (result.status === "error") {
+        throw new Error(result.message || "Workout marker could not be saved.");
+      }
+      setWorkoutMarkers(Array.isArray(result.items) ? result.items : result.item ? [result.item, ...workoutMarkers] : workoutMarkers);
+      setForms((state) => ({
+        ...state,
+        workoutMarker: {
+          date: todayString(),
+          workout_time: currentLocalTimeString(),
+          workout_type: "Strength",
+          notes: "",
+        },
+      }));
+      await Promise.all([
+        refreshWorkoutMarkersOnly().catch(() => undefined),
+        apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS).then(setTrainingReadiness).catch(() => undefined),
+      ]);
+    }, "Workout marker saved.");
+  }, [forms.workoutMarker, refreshWorkoutMarkersOnly, submitWithoutRefresh, workoutMarkers]);
+
+  const submitWearableMetric = useCallback((event: FormEvent) => {
+    void submitWithoutRefresh(event, async () => {
+      const payload = Object.fromEntries(
+        Object.entries(forms.wearable).map(([key, value]) => [
+          key,
+          value === "" ? null : value,
+        ]),
+      );
+      const result = await apiSend<{ item?: WearableMetricEntry; items?: WearableMetricEntry[]; status?: string; message?: string }>("/api/wearables/metrics", "POST", payload);
+      if (result.status === "error") {
+        throw new Error(result.message || "Wearable metric could not be saved.");
+      }
+      if (Array.isArray(result.items)) {
+        setWearableMetrics(result.items);
+      }
+      setForms((state) => ({
+        ...state,
+        wearable: {
+          ...state.wearable,
+          date: todayString(),
+          sleep_hours: "",
+          sleep_score: "",
+          resting_hr: "",
+          hrv: "",
+          steps: "",
+          active_minutes: "",
+          calories_burned: "",
+        },
+      }));
+      await refreshWearablesOnly();
+    }, "Wearable metric saved.");
+  }, [forms.wearable, refreshWearablesOnly, submitWithoutRefresh]);
+
   const moveWorkoutDate = useCallback(async (workoutId: string, newDate: string) => {
     setMessage(null);
     setApiError(null);
@@ -11287,13 +11716,14 @@ function HomeContent() {
   const refreshTrainingData = useCallback(async (showErrors = false, nextLimit = 50) => {
     const failures: string[] = [];
     const historyPath = `/api/training/history?limit=${nextLimit}&days=${trainingHistoryMeta.rawWindowDays || 180}`;
-    const [history, status, trends, summary, summaryStatus] = await Promise.allSettled([
+    const [history, status, trends, summary, summaryStatus, coverage] = await Promise.allSettled([
       apiGet<TrainingHistoryResponse>(historyPath, DEFAULT_API_TIMEOUT_MS),
       apiGet<HevySyncStatus>("/api/training/sync/hevy/status", SETTINGS_API_TIMEOUT_MS),
       apiGet<StrengthTrendResponse>(strengthTrendPath(), DEFAULT_API_TIMEOUT_MS),
       apiGet<TrainingSummaryResponse>("/api/training/summary?window=weekly&period=all", DEFAULT_API_TIMEOUT_MS),
       apiGet<TrainingSummaryStatusResponse>("/api/training/summary/status", SETTINGS_API_TIMEOUT_MS),
-    ]) as [PromiseSettledResult<TrainingHistoryResponse>, PromiseSettledResult<HevySyncStatus>, PromiseSettledResult<StrengthTrendResponse>, PromiseSettledResult<TrainingSummaryResponse>, PromiseSettledResult<TrainingSummaryStatusResponse>];
+      refreshMuscleCoverageOnly(),
+    ]) as [PromiseSettledResult<TrainingHistoryResponse>, PromiseSettledResult<HevySyncStatus>, PromiseSettledResult<StrengthTrendResponse>, PromiseSettledResult<TrainingSummaryResponse>, PromiseSettledResult<TrainingSummaryStatusResponse>, PromiseSettledResult<MuscleCoverageResponse>];
     let historyDebug: TrainingHistoryResponse["debug"] | undefined;
     if (history.status === "fulfilled") {
       setWorkoutHistory(history.value.items);
@@ -11335,10 +11765,13 @@ function HomeContent() {
     } else {
       failures.push(summaryStatus.reason instanceof Error ? summaryStatus.reason.message : "Training summary status failed.");
     }
+    if (coverage.status === "rejected") {
+      failures.push(coverage.reason instanceof Error ? coverage.reason.message : "Weekly muscle coverage failed.");
+    }
     if (showErrors && failures.length) {
       setApiError(`Training refresh failed: ${failures.join(" ")}`);
     }
-  }, [strengthTrendPath, trainingHistoryMeta.rawWindowDays]);
+  }, [refreshMuscleCoverageOnly, strengthTrendPath, trainingHistoryMeta.rawWindowDays]);
 
   useEffect(() => {
     if (activePage !== "training") return;
@@ -11742,8 +12175,10 @@ function HomeContent() {
         shortcuts={shortcutData.items}
         frequentFoods={shortcutData.frequent_foods}
         mealTemplates={shortcutData.meal_templates}
+        workoutMarkers={workoutMarkers}
         forms={forms}
         setForms={setForms}
+        onWorkoutMarkerSubmit={submitWorkoutMarker}
         manualCaloriesOverridden={manualCaloriesOverridden}
         setManualCaloriesOverridden={setManualCaloriesOverridden}
         manualFoodMode={manualFoodMode}
@@ -12322,6 +12757,9 @@ function HomeContent() {
         bodyMetrics={bodyMetrics}
         recoveryLogs={recoveryLogs}
         sleepEntries={sleepEntries}
+        wearableMetrics={wearableMetrics}
+        wearableSignals={wearableSignals}
+        trainingReadiness={trainingReadiness}
         adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
         withingsLastSyncedAt={
           settings?.withings?.last_successful_sync
@@ -12343,6 +12781,7 @@ function HomeContent() {
             setForms((state) => ({ ...state, recovery: { ...initialForms.recovery, date: todayString() } }));
           }, "Recovery check-in saved.")
         }
+        onWearableSubmit={submitWearableMetric}
         onSyncWeightNow={syncWeightNow}
         onSyncWithingsHistory={async () => {
           setApiError(null);
@@ -12489,6 +12928,7 @@ function HomeContent() {
         trainingVolume={dashboard?.training_volume ?? []}
         trainingSummary={trainingSummary}
         trainingSummaryStatus={trainingSummaryStatus}
+        muscleCoverage={muscleCoverage}
         onSyncHevy={() => {
           void syncHevyNow(true);
         }}

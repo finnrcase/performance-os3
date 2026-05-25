@@ -43,6 +43,8 @@ SUPPORTED_JSONB_TABLES = {
     "body_metric_logs",
     "recovery_logs",
     "sleep_logs",
+    "wearable_metrics",
+    "workout_markers",
     "macro_targets",
     "user_goal_settings",
     "api_connections",
