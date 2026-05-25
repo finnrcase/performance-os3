@@ -4925,6 +4925,18 @@ function FoodPage({
       return `${b.date} ${b.created_at ?? ""} ${b.workout_time}`.localeCompare(`${a.date} ${a.created_at ?? ""} ${a.workout_time}`);
     });
   const latestSelectedMarker = selectedDateMarkers[0] ?? null;
+  const latestMarkerOrder = latestSelectedMarker ? finiteNumberOrNull(latestSelectedMarker.marker_sequence ?? latestSelectedMarker.created_order) : null;
+  const markerLoggedItemCount = latestMarkerOrder === null
+    ? null
+    : selectedDateEntries.filter((entry) => {
+      const entryOrder = finiteNumberOrNull(entry.logged_sequence ?? entry.created_order);
+      return entryOrder !== null && entryOrder < latestMarkerOrder;
+    }).length;
+  const markerStatusText = latestSelectedMarker
+    ? markerLoggedItemCount === null
+      ? "Workout marker placed. Food order is unavailable for at least one item, so timing may be unknown."
+      : `Workout marker placed after ${markerLoggedItemCount} logged item${markerLoggedItemCount === 1 ? "" : "s"}.`
+    : "No workout marker logged for this date yet.";
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
   const selectedDateTotals = selectedDateEntries.reduce(
     (totals, entry) => ({
@@ -5138,38 +5150,6 @@ function FoodPage({
         />
         <Card className="min-w-0">
           <SectionHeader
-            eyebrow="Workout Timing"
-            title="Add Workout Marker"
-            action={latestSelectedMarker ? (
-              <span className="rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
-                {selectedDateMarkers.length} logged
-              </span>
-            ) : null}
-          />
-          <form onSubmit={onWorkoutMarkerSubmit} className="grid gap-3 md:grid-cols-[minmax(130px,0.8fr)_minmax(110px,0.65fr)_minmax(150px,1fr)_minmax(0,1.4fr)_auto] md:items-end">
-            <TextInput label="Date" type="date" value={forms.workoutMarker.date} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, date: value } }))} />
-            <TextInput label="Time optional" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
-            <SelectInput label="Type" value={forms.workoutMarker.workout_type} options={["Strength", "Run", "Cardio", "Mobility", "Other"]} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_type: value } }))} />
-            <TextInput label="Notes optional" value={forms.workoutMarker.notes} placeholder="Pull day, legs, gym, etc." onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, notes: value } }))} />
-            <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
-              Log Workout Marker
-            </button>
-          </form>
-          <p className="mt-3 text-xs leading-5 text-zinc-500">
-            This marker splits the same-day food log sequence: foods logged before it count as pre-workout, foods logged after it count as post-workout.
-          </p>
-          {latestSelectedMarker ? (
-            <div className="mt-3 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-sm text-zinc-300">
-              Latest marker: <span className="font-semibold text-white">{latestSelectedMarker.workout_type || "Workout"}</span>{latestSelectedMarker.workout_time ? ` at ${latestSelectedMarker.workout_time}` : ""}{latestSelectedMarker.notes ? ` · ${latestSelectedMarker.notes}` : ""}
-            </div>
-          ) : (
-            <p className="mt-3 rounded-lg border border-dashed border-white/10 bg-white/[0.025] px-3 py-2 text-sm text-zinc-400">
-              No workout marker logged for this date yet.
-            </p>
-          )}
-        </Card>
-        <Card className="min-w-0">
-          <SectionHeader
             eyebrow="Logged foods"
             title={`Food logged for ${selectedDateLabel}`}
             action={
@@ -5300,9 +5280,33 @@ function FoodPage({
           </Card>
         ) : null}
       </div>
-      <div className="flex min-w-0 flex-col gap-4">
+      <div className="order-first flex min-w-0 flex-col gap-4 xl:order-none">
       <Card className="order-3 min-w-0">
         <SectionHeader eyebrow="Food" title="Manual food entry" />
+        <div className="mb-4 rounded-lg border border-emerald-300/25 bg-emerald-300/[0.07] p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-emerald-50">Gym Marker</p>
+              <p className="mt-1 text-xs leading-5 text-emerald-100/75">
+                Place this after logging pre-workout foods. Foods logged after it are post-workout for {selectedDateLabel}.
+              </p>
+              <p className="mt-2 text-xs font-medium text-emerald-100">{markerStatusText}</p>
+            </div>
+            {latestSelectedMarker ? (
+              <span className="w-fit shrink-0 rounded-full border border-emerald-300/25 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+                {selectedDateMarkers.length} marker{selectedDateMarkers.length === 1 ? "" : "s"}
+              </span>
+            ) : null}
+          </div>
+          <form onSubmit={onWorkoutMarkerSubmit} className="mt-3 grid gap-3 md:grid-cols-[minmax(130px,0.8fr)_minmax(110px,0.65fr)_minmax(0,1fr)_auto] md:items-end">
+            <SelectInput label="Type" value={forms.workoutMarker.workout_type} options={["Strength", "Run", "Cardio", "Mobility", "Other"]} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_type: value } }))} />
+            <TextInput label="Time optional" type="time" value={forms.workoutMarker.workout_time} onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, workout_time: value } }))} />
+            <TextInput label="Notes optional" value={forms.workoutMarker.notes} placeholder="Pull day, legs, gym, etc." onChange={(value) => setForms((state) => ({ ...state, workoutMarker: { ...state.workoutMarker, notes: value } }))} />
+            <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
+              Log Workout Marker
+            </button>
+          </form>
+        </div>
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
             <button
@@ -11692,7 +11696,7 @@ function HomeContent() {
     void submitWithoutRefresh(event, async () => {
       const marker = {
         ...forms.workoutMarker,
-        date: forms.workoutMarker.date || todayString(),
+        date: forms.nutrition.date || forms.workoutMarker.date || todayString(),
         workout_time: forms.workoutMarker.workout_time || "",
         workout_type: forms.workoutMarker.workout_type || "Strength",
       };
@@ -11715,7 +11719,7 @@ function HomeContent() {
         apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS).then(setTrainingReadiness).catch(() => undefined),
       ]);
     }, "Workout marker saved.");
-  }, [forms.workoutMarker, refreshWorkoutMarkersOnly, submitWithoutRefresh, workoutMarkers]);
+  }, [forms.nutrition.date, forms.workoutMarker, refreshWorkoutMarkersOnly, submitWithoutRefresh, workoutMarkers]);
 
   const submitWearableMetric = useCallback((event: FormEvent) => {
     void submitWithoutRefresh(event, async () => {
@@ -13325,7 +13329,6 @@ function HomeContent() {
           </nav>
           <div className="absolute bottom-5 left-5 right-5 border-t border-white/10 pt-4">
             <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">Diagnostics</p>
-            <p className="mt-2 px-1 text-[11px] text-zinc-600">Backend: {publicApiBaseLabel()}</p>
             <button
               onClick={() => setActivePage(debugNavigationItem.id)}
               data-testid={`nav-${debugNavigationItem.id}`}
