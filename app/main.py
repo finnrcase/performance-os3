@@ -12,6 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.analytics.recovery_engine import calculate_recovery_score as calculate_advanced_recovery_score
+from src.analytics.muscle_coverage import calculate_weekly_muscle_coverage
 from src.ai.food_parser import parse_food_text
 from src.body_metrics import add_body_metric_entry, load_body_metrics
 from src.config import integration_status, load_settings, mask_secret, save_settings
@@ -292,9 +293,14 @@ def style_plotly(fig: go.Figure, height: int = 320) -> go.Figure:
 
 
 def render_app_header() -> None:
+    current_date = date.today()
+    header_date = f"{current_date.month}/{current_date.day}/{current_date.year % 100:02d}"
     st.markdown(
-        """
-        <div class="hero-panel">
+        f"""
+        <div class="hero-panel" style="position:relative;">
+            <div style="position:absolute; top:1rem; right:1rem; color:#8fa0b3; font-size:0.875rem;">
+                {header_date}
+            </div>
             <div class="section-kicker">Performance Analytics</div>
             <h1 style="margin:0;">Performance OS</h1>
             <p style="color:#8fa0b3; margin:0.45rem 0 0;">
@@ -478,8 +484,39 @@ def render_nutrition_log() -> None:
     frequent_foods_df = load_frequent_foods()
     meal_templates_df = load_meal_templates()
 
+    with styled_container():
+        marker_col, action_col = st.columns((0.68, 0.32))
+        with marker_col:
+            section_header(
+                "Workout Timing",
+                "Add a gym marker now so today's foods can split into pre- and post-workout windows.",
+            )
+            quick_marker_type = st.selectbox(
+                "Workout type",
+                WORKOUT_TYPES,
+                key="quick_workout_marker_type",
+                label_visibility="collapsed",
+            )
+            quick_marker_notes = st.text_input(
+                "Marker notes",
+                placeholder="Optional notes",
+                key="quick_workout_marker_notes",
+                label_visibility="collapsed",
+            )
+        with action_col:
+            st.caption("Uses current local date/time.")
+            if st.button("Add Workout Marker", key="quick_add_workout_marker", width="stretch"):
+                now = datetime.now().replace(second=0, microsecond=0)
+                create_workout_marker(
+                    date=now.date().isoformat(),
+                    workout_time=now.time(),
+                    workout_type=quick_marker_type,
+                    notes=quick_marker_notes,
+                )
+                st.success("Workout marker added.")
+
     ai_tab, manual_tab, quick_tab, templates_tab, today_tab, workout_tab, analytics_tab = st.tabs(
-        ["AI Assist", "Log Food", "Recent & Favorites", "Meal Templates", "Today", "Workout", "Analytics"]
+        ["AI Assist", "Log Food", "Recent & Favorites", "Meal Templates", "Today", "Workout Timing", "Analytics"]
     )
 
     with ai_tab:
@@ -1227,6 +1264,69 @@ def render_fueling_deload_signals_panel() -> None:
             )
 
 
+def render_weekly_muscle_coverage(training_df: pd.DataFrame) -> None:
+    coverage_df = calculate_weekly_muscle_coverage(training_df)
+    with styled_container():
+        section_header("Weekly Muscle Coverage", "Last 7 days vs target/baseline", "Muscle Map")
+        legend = [
+            ("Purple", "0 hard sets", "#7c3aed"),
+            ("Red", "<50%", "#ef4444"),
+            ("Yellow", "50-85%", "#facc15"),
+            ("Green", ">=85%", "#22c55e"),
+        ]
+        st.markdown(
+            "<div style='display:flex; gap:0.75rem; flex-wrap:wrap; margin-bottom:0.8rem;'>"
+            + "".join(
+                f"<span style='color:#8fa0b3; font-size:0.82rem;'><span style='display:inline-block; width:0.65rem; height:0.65rem; border-radius:999px; background:{color}; margin-right:0.35rem;'></span>{label}: {detail}</span>"
+                for label, detail, color in legend
+            )
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+        if coverage_df.empty:
+            st.info("No strength training data available for muscle coverage yet.")
+            return
+        if float(pd.to_numeric(coverage_df["hard_sets"], errors="coerce").fillna(0).sum()) <= 0:
+            st.info("No hard strength sets logged in the last 7 days. Coverage will improve once workouts are logged.")
+
+        card_html = []
+        for _, row in coverage_df.iterrows():
+            color = str(row["color_hex"])
+            muscle = str(row["muscle_group"])
+            hard_sets = float(row["hard_sets"])
+            target_sets = float(row["target_sets"])
+            baseline = float(row["baseline_weekly_hard_sets"])
+            volume = float(row["volume"])
+            status = str(row["status"])
+            coverage = float(row["coverage_pct"])
+            card_html.append(
+                f"""
+                <div title="{muscle}: {hard_sets:g} hard sets, {volume:,.0f} volume" style="
+                    border:1px solid rgba(255,255,255,0.10);
+                    border-left:5px solid {color};
+                    background:linear-gradient(180deg, rgba(21,29,38,0.90), rgba(13,18,25,0.90));
+                    border-radius:8px;
+                    padding:0.85rem;
+                    min-height:112px;
+                ">
+                    <div style="display:flex; align-items:center; justify-content:space-between; gap:0.5rem;">
+                        <div style="color:#e8eef5; font-weight:700;">{muscle}</div>
+                        <div style="width:0.8rem; height:0.8rem; border-radius:999px; background:{color}; box-shadow:0 0 20px {color}55;"></div>
+                    </div>
+                    <div style="margin-top:0.55rem; color:#e8eef5; font-size:1.35rem; font-weight:750;">{hard_sets:g}</div>
+                    <div style="color:#8fa0b3; font-size:0.78rem;">hard sets / {target_sets:g} target</div>
+                    <div style="margin-top:0.45rem; color:#8fa0b3; font-size:0.78rem;">{status} · {coverage:.0f}% · {volume:,.0f} volume · baseline {baseline:g}</div>
+                </div>
+                """
+            )
+        st.markdown(
+            "<div style='display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:0.75rem;'>"
+            + "".join(card_html)
+            + "</div>",
+            unsafe_allow_html=True,
+        )
+
+
 def render_training_log() -> None:
     section_header("Training Log", "Log sessions and monitor strength volume.", "Load")
 
@@ -1813,6 +1913,8 @@ def render_data_history() -> None:
             st.dataframe(body_metrics_df.sort_values("date", ascending=False), width="stretch", hide_index=True)
 
     with workout_tab:
+        render_weekly_muscle_coverage(training_df)
+        st.write("")
         volume_df = calculate_training_volume(training_df)
         if training_df.empty:
             st.info("No workout history yet.")

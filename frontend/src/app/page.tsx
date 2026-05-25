@@ -58,7 +58,9 @@ const navigation = [
   { id: "debug", label: "Startup Debug", icon: AlertTriangle },
 ] as const;
 
-const mobileBottomNavigation = navigation.filter((item) => item.id !== "debug");
+const primaryNavigation = navigation.filter((item) => item.id !== "debug");
+const debugNavigationItem = navigation.find((item) => item.id === "debug") ?? navigation[navigation.length - 1];
+const mobileBottomNavigation = primaryNavigation;
 
 type PageId = (typeof navigation)[number]["id"];
 type MobileNavHighlight = { left: number; top: number; width: number; height: number; ready: boolean };
@@ -1550,6 +1552,15 @@ function todayString() {
   }).formatToParts(new Date());
   const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
   return `${values.year}-${values.month}-${values.day}`;
+}
+
+function headerDateString(date = new Date()) {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: APP_TIMEZONE,
+    month: "numeric",
+    day: "numeric",
+    year: "2-digit",
+  }).format(date);
 }
 
 function dashboardCorePath(date = todayString()) {
@@ -10349,6 +10360,7 @@ function initialIntegrationNotice(kind: "message" | "error") {
 
 function HomeContent() {
   const [activePage, setActivePage] = useState<PageId>("dashboard");
+  const [headerDateLabel, setHeaderDateLabel] = useState(headerDateString);
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [nutritionLogs, setNutritionLogs] = useState<NutritionEntry[]>([]);
   const [nutritionHistory, setNutritionHistory] = useState<DailyNutritionSummary[]>([]);
@@ -10428,6 +10440,13 @@ function HomeContent() {
   const bottomItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const [bottomHighlight, setBottomHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      setHeaderDateLabel(headerDateString());
+    }, 60_000);
+    return () => window.clearInterval(interval);
+  }, []);
+
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
   useEffect(() => subscribeRateLimit(setRateLimited), []);
 
@@ -10479,8 +10498,9 @@ function HomeContent() {
   }, [accentTheme]);
 
   const currentPage = navigation.find((item) => item.id === activePage) ?? navigation[0];
-  const activeNavIndex = Math.max(0, navigation.findIndex((item) => item.id === activePage));
-  const activeNavOffset = activeNavIndex * 48;
+  const activePrimaryNavIndex = primaryNavigation.findIndex((item) => item.id === activePage);
+  const primaryNavActive = activePrimaryNavIndex >= 0;
+  const activeNavOffset = Math.max(0, activePrimaryNavIndex) * 48;
   const [sidebarHighlightOffset, setSidebarHighlightOffset] = useState(0);
 
   useEffect(() => {
@@ -12713,11 +12733,14 @@ function HomeContent() {
           <nav className="relative">
             <span
               aria-hidden="true"
-              className="accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-transform duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none"
+              className={cx(
+                "accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-[transform,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none",
+                primaryNavActive ? "opacity-100" : "opacity-0",
+              )}
               style={{ transform: `translate3d(0, ${sidebarHighlightOffset}px, 0)` }}
             />
             <div className="space-y-2">
-              {navigation.map((item) => {
+              {primaryNavigation.map((item) => {
                 const Icon = item.icon;
                 return (
                   <button
@@ -12733,9 +12756,22 @@ function HomeContent() {
               })}
             </div>
           </nav>
-          <div className="absolute bottom-5 left-5 right-5 rounded-lg border border-white/10 bg-white/[0.04] p-4">
-            <p className="text-sm font-medium text-white">Backend</p>
-            <p className="mt-1 text-sm text-zinc-400">{publicApiBaseLabel()}</p>
+          <div className="absolute bottom-5 left-5 right-5 border-t border-white/10 pt-4">
+            <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">Diagnostics</p>
+            <p className="mt-2 px-1 text-[11px] text-zinc-600">Backend: {publicApiBaseLabel()}</p>
+            <button
+              onClick={() => setActivePage(debugNavigationItem.id)}
+              data-testid={`nav-${debugNavigationItem.id}`}
+              className={cx(
+                "mt-3 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-xs transition-colors",
+                activePage === debugNavigationItem.id
+                  ? "border border-amber-300/20 bg-amber-300/10 text-amber-100"
+                  : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300",
+              )}
+            >
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {debugNavigationItem.label}
+            </button>
           </div>
         </aside>
 
@@ -12746,10 +12782,13 @@ function HomeContent() {
                 <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
                 <h1 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">{currentPage.label}</h1>
               </div>
-              <button onClick={() => void refreshAll()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200">
-                <RefreshCw className="h-4 w-4" />
-                Refresh
-              </button>
+              <div className="flex items-center gap-3 self-start lg:self-auto">
+                <span className="text-sm text-zinc-500">{headerDateLabel}</span>
+                <button onClick={() => void refreshAll()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200">
+                  <RefreshCw className="h-4 w-4" />
+                  Refresh
+                </button>
+              </div>
             </div>
             <div ref={mobileNavRef} className="relative mt-4 hidden overflow-x-auto pb-1 sm:block lg:hidden">
               <span
@@ -12765,7 +12804,7 @@ function HomeContent() {
                 }}
               />
               <div className="flex gap-2">
-                {navigation.map((item) => (
+                {primaryNavigation.map((item) => (
                   <button
                     key={item.id}
                     ref={(node) => {
