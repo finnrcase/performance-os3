@@ -60,7 +60,8 @@ const navigation = [
 
 const primaryNavigation = navigation.filter((item) => item.id !== "debug");
 const debugNavigationItem = navigation.find((item) => item.id === "debug") ?? navigation[navigation.length - 1];
-const mobileBottomNavigation = primaryNavigation;
+const mobileNavigation = primaryNavigation.filter((item) => item.id !== "debug");
+const mobileBottomNavigation = mobileNavigation;
 
 type PageId = (typeof navigation)[number]["id"];
 type MobileNavHighlight = { left: number; top: number; width: number; height: number; ready: boolean };
@@ -13661,7 +13662,7 @@ function HomeContent() {
                 }}
               />
               <div className="flex gap-2">
-                {primaryNavigation.map((item) => (
+                {mobileNavigation.map((item) => (
                   <button
                     key={item.id}
                     ref={(node) => {
