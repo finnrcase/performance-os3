@@ -40,6 +40,7 @@ DATAFRAME_TABLES = {
     "muscle_group_volume_history": "muscle_group_volume_history",
     "raw_hevy_workouts": "raw_hevy_workouts",
     "raw_hevy_sets": "raw_hevy_sets",
+    "workout_markers": "workout_markers",
 }
 DATAFRAME_DATE_TABLES = {
     "nutrition_log",
@@ -50,6 +51,7 @@ DATAFRAME_DATE_TABLES = {
     "daily_nutrition_summary",
     "raw_hevy_workouts",
     "raw_hevy_sets",
+    "workout_markers",
 }
 
 DOCUMENT_TABLES = {
@@ -134,6 +136,8 @@ def dataframe_row_key(dataset: str, record: dict[str, Any], row_index: int | Non
         return _composite_key(dataset, record, ["hevy_workout_id"])
     if dataset == "raw_hevy_sets":
         return _composite_key(dataset, record, ["external_id"]) or _composite_key(dataset, record, ["hevy_workout_id", "exercise_id", "set_index"])
+    if dataset == "workout_markers":
+        return _composite_key(dataset, record, ["marker_id"])
     if dataset in {"ai_food_cache", "usda_food_cache", "verified_food_cache"}:
         for fields in (["cache_key"], ["query"], ["normalized_name"], ["food_name"], ["fdc_id"]):
             key = _composite_key(dataset, record, fields)

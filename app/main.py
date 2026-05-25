@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 import sys
 
@@ -61,6 +61,12 @@ from src.training import (
     add_training_entry,
     calculate_training_volume,
     load_training_log,
+)
+from src.workout_nutrition import (
+    calculate_workout_nutrition_windows,
+    create_workout_marker,
+    generate_workout_fueling_recommendations,
+    load_workout_markers,
 )
 
 
@@ -472,8 +478,8 @@ def render_nutrition_log() -> None:
     frequent_foods_df = load_frequent_foods()
     meal_templates_df = load_meal_templates()
 
-    ai_tab, manual_tab, quick_tab, templates_tab, today_tab, analytics_tab = st.tabs(
-        ["AI Assist", "Log Food", "Recent & Favorites", "Meal Templates", "Today", "Analytics"]
+    ai_tab, manual_tab, quick_tab, templates_tab, today_tab, workout_tab, analytics_tab = st.tabs(
+        ["AI Assist", "Log Food", "Recent & Favorites", "Meal Templates", "Today", "Workout", "Analytics"]
     )
 
     with ai_tab:
@@ -839,6 +845,90 @@ def render_nutrition_log() -> None:
                 hide_index=True,
             )
 
+    with workout_tab:
+        section_header(
+            "Workout Marker",
+            "Add one marker on a workout day to split same-day foods into pre- and post-workout windows.",
+        )
+        with st.form("workout_marker_form", clear_on_submit=True):
+            col1, col2 = st.columns(2)
+            with col1:
+                marker_date = st.date_input("Workout date", value=date.today(), key="workout_marker_date")
+                marker_time = st.time_input(
+                    "Workout time",
+                    value=datetime.now().replace(second=0, microsecond=0).time(),
+                    key="workout_marker_time",
+                )
+            with col2:
+                marker_workout_type = st.selectbox("Workout type", WORKOUT_TYPES, key="workout_marker_type")
+                marker_notes = st.text_area("Notes (optional)", key="workout_marker_notes")
+            marker_submitted = st.form_submit_button("Add Workout Marker")
+
+        if marker_submitted:
+            create_workout_marker(
+                date=marker_date.isoformat(),
+                workout_time=marker_time,
+                workout_type=marker_workout_type,
+                notes=marker_notes,
+            )
+            st.success("Workout marker added.")
+
+        markers_df = load_workout_markers()
+        training_df = load_training_log()
+        windows_df = calculate_workout_nutrition_windows(entries_df, training_df, markers_df)
+        recommendations = generate_workout_fueling_recommendations(windows_df, load_recovery_log())
+
+        if markers_df.empty:
+            st.info("No workout markers yet. Add a marker to split food into pre- and post-workout windows.")
+        else:
+            latest_window = windows_df.sort_values(["date", "workout_time"]).iloc[-1] if not windows_df.empty else None
+            if latest_window is not None:
+                metric_cols = st.columns(4)
+                with metric_cols[0]:
+                    metric_card("Pre Carbs", f"{latest_window['pre_workout_carbs']:.0f}g", "Before marker")
+                with metric_cols[1]:
+                    metric_card("Post Protein", f"{latest_window['post_workout_protein']:.0f}g", "After marker")
+                with metric_cols[2]:
+                    metric_card("Same-Day Calories", f"{latest_window['total_same_day_calories']:.0f}", "Daily total unchanged")
+                with metric_cols[3]:
+                    metric_card(
+                        "Training Link",
+                        latest_window["estimated_workout_quality"],
+                        latest_window["linked_training_session"] or "No same-day training row",
+                    )
+                if latest_window["unknown_timing_calories"] > 0:
+                    st.caption(
+                        f"{latest_window['unknown_timing_calories']:.0f} calories have unknown timing because those food rows do not have a same-day timestamp."
+                    )
+
+            st.write("")
+            st.dataframe(
+                windows_df[
+                    [
+                        "date",
+                        "workout_time",
+                        "workout_type",
+                        "pre_workout_carbs",
+                        "pre_workout_protein",
+                        "pre_workout_fat",
+                        "post_workout_carbs",
+                        "post_workout_protein",
+                        "post_workout_fat",
+                        "total_same_day_calories",
+                        "linked_training_session",
+                        "estimated_workout_quality",
+                    ]
+                ].sort_values(["date", "workout_time"], ascending=False),
+                width="stretch",
+                hide_index=True,
+            )
+
+        with styled_container():
+            section_header("Fueling Notes")
+            st.write(f"**Deload status:** {recommendations['deload_status']}")
+            st.write(recommendations["pre_workout_carb_suggestion"])
+            st.write(recommendations["post_workout_recovery_suggestion"])
+
     with analytics_tab:
         target_col1, target_col2 = st.columns(2)
         with target_col1:
@@ -1101,6 +1191,40 @@ def render_recovery_entry_panel() -> tuple[pd.DataFrame, pd.DataFrame]:
         nutrition_df=nutrition_df,
     )
     return recovery_df, analytics_df
+
+
+def render_fueling_deload_signals_panel() -> None:
+    markers_df = load_workout_markers()
+    nutrition_df = load_nutrition_log()
+    training_df = load_training_log()
+    recovery_df = load_recovery_log()
+    windows_df = calculate_workout_nutrition_windows(nutrition_df, training_df, markers_df)
+    recommendations = generate_workout_fueling_recommendations(windows_df, recovery_df)
+
+    with styled_container():
+        section_header(
+            "Fueling & Deload Signals",
+            "Uses Food workout markers to connect pre/post-workout nutrition with training and recovery.",
+        )
+        if markers_df.empty:
+            st.info("No workout marker data yet. Add a Workout marker in the Food tab to unlock fueling windows.")
+            return
+
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            metric_card("Deload Status", recommendations["deload_status"], recommendations["recovery_signal"])
+        with col2:
+            metric_card("Pre-Workout Carbs", "Review", recommendations["pre_workout_carb_suggestion"])
+        with col3:
+            metric_card("Post-Workout Recovery", "Review", recommendations["post_workout_recovery_suggestion"])
+
+        st.caption(recommendations["recent_improvement_signal"])
+        if not windows_df.empty:
+            latest = windows_df.sort_values(["date", "workout_time"]).iloc[-1]
+            st.caption(
+                f"Latest marker: {latest['date']} {latest['workout_time']} | "
+                f"{latest['workout_type']} | {latest['estimated_workout_quality']}"
+            )
 
 
 def render_training_log() -> None:
@@ -1751,6 +1875,9 @@ def render_weight_recovery() -> None:
     with health_tab:
         st.info("Fitbit and Google Health will import sleep, HRV, resting HR, and recovery metrics after OAuth setup is added.")
         st.write("For now, use the Recovery Entry tab for manual logging.")
+
+    st.write("")
+    render_fueling_deload_signals_panel()
 
 
 def render_integration_status(label: str, status: str, detail: str) -> None:
