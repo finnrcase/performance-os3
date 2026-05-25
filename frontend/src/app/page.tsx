@@ -5970,6 +5970,17 @@ type WeightChartPoint = {
   source: string;
 };
 
+type CaloriesBodyTrendPoint = {
+  date: string;
+  calories: number | null;
+  calories7DayAverage: number | null;
+  targetCalories: number | null;
+  bodyweight: number | null;
+  bodyweight7DayAverage: number | null;
+  bodyFatPercent: number | null;
+  bodyFat7PointAverage: number | null;
+};
+
 type BodyCompositionTab = "weight" | "body_fat" | "mass" | "muscle" | "hydration_bmi";
 
 const bodyCompositionTabs: Array<{ id: BodyCompositionTab; label: string }> = [
@@ -6085,6 +6096,65 @@ function cleanWeightHistory(entries: BodyMetricEntry[]): WeightChartPoint[] {
       const dailyChange = previous ? entry.bodyweight - previous.bodyweight : null;
       return { ...entry, movingAverage7: Number(movingAverage7.toFixed(2)), dailyChange: dailyChange === null ? null : Number(dailyChange.toFixed(2)) };
     });
+}
+
+function buildCaloriesBodyTrendData(
+  nutritionRows: DailyNutritionSummary[],
+  bodyMetricRows: BodyMetricEntry[],
+): CaloriesBodyTrendPoint[] {
+  const nutrition = nutritionRows
+    .map((entry) => {
+      const date = String(entry.date || "").slice(0, 10);
+      const calories = finiteNumberOrNull(entry.total_calories);
+      const targetCalories = finiteNumberOrNull(entry.target_calories);
+      return date && calories !== null ? { date, calories, targetCalories } : null;
+    })
+    .filter((entry): entry is { date: string; calories: number; targetCalories: number | null } => entry !== null)
+    .sort((a, b) => a.date.localeCompare(b.date));
+  const body = cleanWeightHistory(bodyMetricRows);
+  const nutritionByDate = new Map(nutrition.map((entry) => [entry.date, entry]));
+  const bodyByDate = new Map(body.map((entry) => [entry.date, entry]));
+  const dates = Array.from(new Set([...nutritionByDate.keys(), ...bodyByDate.keys()])).sort();
+  const bodyFatAverageByDate = new Map<string, number | null>();
+
+  body.forEach((entry, index, all) => {
+    const bodyFatWindow = all
+      .slice(0, index + 1)
+      .filter((item) => item.bodyFat !== null)
+      .slice(-7)
+      .map((item) => Number(item.bodyFat));
+    bodyFatAverageByDate.set(
+      entry.date,
+      bodyFatWindow.length ? Number((bodyFatWindow.reduce((sum, value) => sum + value, 0) / bodyFatWindow.length).toFixed(2)) : null,
+    );
+  });
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  const dateToTime = (date: string) => new Date(`${date}T00:00:00Z`).getTime();
+  return dates.map((date) => {
+    const nutritionEntry = nutritionByDate.get(date) ?? null;
+    const bodyEntry = bodyByDate.get(date) ?? null;
+    const timestamp = dateToTime(date);
+    const caloriesWindow = nutrition
+      .filter((entry) => {
+        const entryTime = dateToTime(entry.date);
+        return entryTime <= timestamp && entryTime >= timestamp - (6 * dayMs);
+      })
+      .map((entry) => entry.calories);
+    const calories7DayAverage = caloriesWindow.length
+      ? Math.round(caloriesWindow.reduce((sum, value) => sum + value, 0) / caloriesWindow.length)
+      : null;
+    return {
+      date,
+      calories: nutritionEntry?.calories ?? null,
+      calories7DayAverage,
+      targetCalories: nutritionEntry?.targetCalories ?? null,
+      bodyweight: bodyEntry?.bodyweight ?? null,
+      bodyweight7DayAverage: bodyEntry?.movingAverage7 ?? null,
+      bodyFatPercent: bodyEntry?.bodyFat ?? null,
+      bodyFat7PointAverage: bodyFatAverageByDate.get(date) ?? null,
+    };
+  });
 }
 
 function buildWeightTrend(history: WeightChartPoint[]) {
@@ -7921,7 +7991,7 @@ function HistoryPage({
     return window.localStorage.getItem(DAILY_NUTRITION_HISTORY_EXPANDED_KEY) === "true";
   });
   const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
-  const dailyNutritionTrend = nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
+  const dailyNutritionTrend = useMemo(() => nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
     date: entry.date,
     total_calories: entry.calories,
     total_protein: entry.protein,
@@ -7946,7 +8016,13 @@ function HistoryPage({
     fat_delta: null,
     adherence_score: null,
     notes: "",
-  }));
+  })), [nutritionHistory, nutritionTrend]);
+  const caloriesBodyTrend = useMemo(
+    () => buildCaloriesBodyTrendData(dailyNutritionTrend, bodyMetrics).slice(-120),
+    [bodyMetrics, dailyNutritionTrend],
+  );
+  const hasBodyweightTrend = caloriesBodyTrend.some((entry) => entry.bodyweight7DayAverage !== null || entry.bodyweight !== null);
+  const hasBodyFatTrend = caloriesBodyTrend.some((entry) => entry.bodyFat7PointAverage !== null || entry.bodyFatPercent !== null);
   const dailyNutritionHistorySummary = useMemo(() => {
     const calorieValues = nutritionHistory
       .map((entry) => Number(entry.total_calories))
@@ -8748,7 +8824,7 @@ function HistoryPage({
       ) : null}
       <div className="grid gap-4 lg:grid-cols-2">
         <Card>
-          <SectionHeader eyebrow="Nutrition" title="Nutrition trends" />
+          <SectionHeader eyebrow="Nutrition" title="Calories vs Body Trend" />
           <div className="space-y-4">
             {dailyNutritionTrend.length ? (
               <>
@@ -8765,17 +8841,39 @@ function HistoryPage({
               ) : null}
               <ChartFrame className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
-                  <RechartsLineChart data={dailyNutritionTrend}>
+                  <RechartsLineChart data={caloriesBodyTrend}>
                     <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                     <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
-                    <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="calories" stroke="#71717a" tickLine={false} axisLine={false} width={48} />
+                    <YAxis yAxisId="weight" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={44} domain={["dataMin - 2", "dataMax + 2"]} />
+                    {hasBodyFatTrend ? (
+                      <YAxis yAxisId="bodyFat" orientation="right" hide domain={["dataMin - 1", "dataMax + 1"]} />
+                    ) : null}
                     <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
-                    <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
-                    <Line dataKey="target_calories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
-                    <Line dataKey="total_protein" name="Protein" stroke="#2dd4bf" strokeWidth={3} dot={false} />
+                    <Line yAxisId="calories" dataKey="calories" name="Daily calories" stroke="rgba(96,165,250,0.35)" strokeWidth={1.5} dot={false} connectNulls />
+                    <Line yAxisId="calories" dataKey="calories7DayAverage" name="7-day avg calories" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls />
+                    <Line yAxisId="calories" dataKey="targetCalories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls />
+                    {hasBodyweightTrend ? (
+                      <Line yAxisId="weight" dataKey="bodyweight7DayAverage" name="7-day avg bodyweight" stroke="#f59e0b" strokeWidth={3} dot={false} connectNulls />
+                    ) : null}
+                    {hasBodyFatTrend ? (
+                      <Line yAxisId="bodyFat" dataKey="bodyFat7PointAverage" name="Body fat %" stroke="#f472b6" strokeWidth={2} dot={false} connectNulls />
+                    ) : null}
                   </RechartsLineChart>
                 </ResponsiveContainer>
               </ChartFrame>
+              <div className="flex flex-wrap gap-2 text-xs text-zinc-500">
+                <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1">Blue: calories</span>
+                <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1">Orange: bodyweight</span>
+                {hasBodyFatTrend ? (
+                  <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1">Pink: body fat %</span>
+                ) : (
+                  <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1">Body fat % not logged yet.</span>
+                )}
+                {!hasBodyweightTrend ? (
+                  <span className="rounded-full border border-white/10 bg-white/[0.03] px-2.5 py-1">Bodyweight needs logged measurements.</span>
+                ) : null}
+              </div>
               </>
             ) : (
               <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] px-4 py-3 text-sm text-zinc-400">
