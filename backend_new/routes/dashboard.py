@@ -169,11 +169,14 @@ def _volume(row: dict[str, Any]) -> float:
     return _number(row.get("sets"), 0) * _number(row.get("reps"), 0) * _number(row.get("weight"), 0)
 
 
-def _latest_workout(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _latest_workout(rows: list[dict[str, Any]], target_date: str | None = None) -> dict[str, Any] | None:
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    normalized_target_date = _date_text(target_date)
     for row in rows:
-        workout_date = str(row.get("date") or "")
+        workout_date = _date_text(row.get("date"))
         if not workout_date:
+            continue
+        if normalized_target_date and workout_date != normalized_target_date:
             continue
         workout_id = str(row.get("workout_id") or row.get("hevy_workout_id") or f"{workout_date}:unknown")
         grouped[(workout_date, workout_id)].append(row)
@@ -298,12 +301,19 @@ def _dashboard_cache_payload(bundle: dict[str, Any], sources: dict[str, Any]) ->
     }
 
 
-def _latest_from_training_history(history_items: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _latest_from_training_history(history_items: list[dict[str, Any]], target_date: str | None = None) -> dict[str, Any] | None:
     if not history_items:
         return None
-    latest = dict(history_items[0])
+    normalized_target_date = _date_text(target_date)
+    if normalized_target_date:
+        candidates = [dict(item) for item in history_items if _date_text(item.get("date")) == normalized_target_date]
+        if not candidates:
+            return None
+        latest = candidates[0]
+    else:
+        latest = dict(history_items[0])
     return {
-        "date": latest.get("date"),
+        "date": _date_text(latest.get("date")) or latest.get("date"),
         "workout_id": latest.get("workout_id"),
         "workout_type": latest.get("workout_type") or "Workout",
         "classification": latest.get("classification"),
@@ -671,32 +681,79 @@ def _poor_recovery(latest_recovery: dict[str, Any] | None) -> bool:
     return (score not in {None, ""} and _number(score, 100) < 50) or classification in {"poor", "red", "low"}
 
 
-def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recovery: dict[str, Any] | None = None) -> dict[str, Any]:
+def _workout_quality_empty_payload(
+    summary: str,
+    *,
+    active_date: str = "",
+    lifts_checked: int = 0,
+    matched_date_count: int = 0,
+    rating: str = "No recent lift",
+    score_label: str = "No recent lift",
+) -> dict[str, Any]:
+    return {
+        "status": "empty",
+        "date": active_date,
+        "rating": rating,
+        "score": None,
+        "score_label": score_label,
+        "color": "gray",
+        "confidence": "low",
+        "summary": summary,
+        "explanation": summary,
+        "comparison_basis": "last_7_similar_workouts",
+        "similar_workouts_used": 0,
+        "exercise_breakdown": [],
+        "comparison": {
+            "basis": "last_7_similar_workouts",
+            "avg_set_volume_pct_change": None,
+            "sample_size": 0,
+        },
+        "debug": {
+            "source": "/api/training/history",
+            "latest_lift_found": False,
+            "matched_by": "none",
+            "excluded_cardio": True,
+            "active_date": active_date,
+            "lift_items_checked": lifts_checked,
+            "matched_date_count": matched_date_count,
+        },
+        "source": "/api/training/history",
+    }
+
+
+def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recovery: dict[str, Any] | None = None, active_date: str | None = None) -> dict[str, Any]:
     lifts = [dict(item) for item in training_items if _is_lift_history_item(item)]
     if not lifts:
-        return {
-            "status": "empty",
-            "rating": "No recent lift",
-            "score": None,
-            "score_label": "No recent lift",
-            "color": "gray",
-            "confidence": "low",
-            "summary": "No recent lifting workout found.",
-            "explanation": "No recent lifting workout found.",
-            "comparison_basis": "last_7_similar_workouts",
-            "similar_workouts_used": 0,
-            "exercise_breakdown": [],
-            "comparison": {
-                "basis": "last_7_similar_workouts",
-                "avg_set_volume_pct_change": None,
-                "sample_size": 0,
-            },
-            "debug": {"source": "/api/training/history", "latest_lift_found": False, "matched_by": "none", "excluded_cardio": True},
-            "source": "/api/training/history",
-        }
+        target_date = _date_text(active_date)
+        if target_date:
+            return _workout_quality_empty_payload(
+                "No workout logged for this date.",
+                active_date=target_date,
+                lifts_checked=0,
+                matched_date_count=0,
+                rating="No workout logged",
+                score_label="No workout",
+            )
+        return _workout_quality_empty_payload("No recent lifting workout found.", lifts_checked=0)
 
-    latest = lifts[0]
-    latest_date = str(latest.get("date") or "")[:10]
+    target_date = _date_text(active_date)
+    if target_date:
+        target_lifts = [item for item in lifts if _date_text(item.get("date")) == target_date]
+        if not target_lifts:
+            return _workout_quality_empty_payload(
+                "No workout logged for this date.",
+                active_date=target_date,
+                lifts_checked=len(lifts),
+                matched_date_count=0,
+                rating="No workout logged",
+                score_label="No workout",
+            )
+        lifts_for_selection = target_lifts
+    else:
+        lifts_for_selection = lifts
+
+    latest = lifts_for_selection[0]
+    latest_date = _date_text(latest.get("date"))
     latest_id = str(latest.get("workout_id") or "")
     title = _workout_title_from_item(latest)
     split_payload = _workout_split_payload(latest)
@@ -710,10 +767,12 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
     muscle_groups = _workout_muscle_groups(latest)
     previous = [
         item
-        for item in lifts[1:]
-        if str(item.get("workout_id") or "") != latest_id and str(item.get("date") or "")[:10] < latest_date
+        for item in lifts
+        if str(item.get("workout_id") or "") != latest_id
+        and _date_text(item.get("date"))
+        and _date_text(item.get("date")) < latest_date
     ]
-    previous = sorted(previous, key=lambda item: (str(item.get("date") or "")[:10], str(item.get("workout_id") or "")), reverse=True)
+    previous = sorted(previous, key=lambda item: (_date_text(item.get("date")), str(item.get("workout_id") or "")), reverse=True)
     similar, matched_by, match_label = _similar_lift_workouts(latest, previous)
     sample_size = len(similar)
     today_sets = _workout_set_rows(latest)
@@ -778,6 +837,8 @@ def _workout_quality_payload(training_items: list[dict[str, Any]], latest_recove
             "latest_lift_found": True,
             "history_items_checked": len(training_items),
             "lift_items_checked": len(lifts),
+            "active_date": target_date,
+            "matched_date_count": len(lifts_for_selection),
             "matched_by": matched_by,
             "match_label": match_label,
             "split_type": split_type,
@@ -1839,7 +1900,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     }
     lean_bulk_decision = _lean_bulk_placeholder(targets)
     lift_performance = _lift_performance_payload(today=today, latest_workout=latest_workout, training_items=training_items, training_rows=training_rows)
-    workout_quality = _workout_quality_payload(training_items, latest_recovery=latest_recovery)
+    workout_quality = _workout_quality_payload(training_items, latest_recovery=latest_recovery, active_date=today)
     optimization_signals = _optimization_signals_payload(
         nutrition_history_items=nutrition_history_items,
         training_items=training_items,

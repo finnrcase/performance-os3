@@ -173,6 +173,58 @@ def test_workout_quality_uses_latest_lift_not_newer_run():
     assert payload["debug"]["source"] == "/api/training/history"
 
 
+def test_dashboard_workout_quality_does_not_use_previous_day_when_active_date_has_no_workout():
+    yesterday_pull = [
+        _detail("Lat Pulldown (Cable)", 110, 10, 1, "Back"),
+        _detail("Cable Row", 125, 8, 1, "Back"),
+    ]
+    prior_pull = [
+        _detail("Lat Pulldown (Cable)", 100, 10, 1, "Back"),
+        _detail("Cable Row", 115, 8, 1, "Back"),
+    ]
+    items = [
+        _lift_item("2026-05-21", "lift-yesterday", "Pull day", yesterday_pull),
+        _lift_item("2026-05-14", "lift-prior", "Pull day", prior_pull),
+    ]
+
+    payload = dashboard._workout_quality_payload(items, active_date="2026-05-22")
+
+    assert payload["status"] == "empty"
+    assert payload["date"] == "2026-05-22"
+    assert payload["score"] is None
+    assert payload["rating"] == "No workout logged"
+    assert payload["summary"] == "No workout logged for this date."
+    assert payload["debug"]["matched_date_count"] == 0
+
+
+def test_dashboard_workout_quality_uses_selected_date_workout():
+    selected_pull = [
+        _detail("Lat Pulldown (Cable)", 110, 10, 1, "Back"),
+        _detail("Cable Row", 125, 8, 1, "Back"),
+    ]
+    prior_pull = [
+        _detail("Lat Pulldown (Cable)", 100, 10, 1, "Back"),
+        _detail("Cable Row", 115, 8, 1, "Back"),
+    ]
+    newer_push = [
+        _detail("Bench Press", 225, 5, 1, "Chest"),
+        _detail("Incline Press", 185, 8, 1, "Chest"),
+    ]
+    items = [
+        _lift_item("2026-05-22", "lift-newer", "Push day", newer_push, total_volume=2600),
+        _lift_item("2026-05-21", "lift-selected", "Pull day", selected_pull),
+        _lift_item("2026-05-14", "lift-prior", "Pull day", prior_pull),
+    ]
+
+    payload = dashboard._workout_quality_payload(items, active_date="2026-05-21")
+
+    assert payload["status"] == "ok"
+    assert payload["date"] == "2026-05-21"
+    assert payload["workout_id"] == "lift-selected"
+    assert payload["title"] == "Pull day"
+    assert payload["debug"]["matched_date_count"] == 1
+
+
 def test_workout_quality_scores_set_progression_against_last_7_matching_split():
     latest = _lift_item(
         "2026-05-21",

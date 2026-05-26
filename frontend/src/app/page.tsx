@@ -2226,26 +2226,125 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
   );
 }
 
+type ErrorDebugStateSummary = Record<string, string | number | boolean | null | undefined>;
+
+type ErrorBoundaryState = {
+  hasError: boolean;
+  message: string;
+  stack: string;
+  componentStack: string;
+  timestamp: string;
+};
+
+const emptyErrorBoundaryState: ErrorBoundaryState = {
+  hasError: false,
+  message: "",
+  stack: "",
+  componentStack: "",
+  timestamp: "",
+};
+
+function routeForDebugReport() {
+  if (typeof window === "undefined") return "";
+  return `${window.location.pathname}${window.location.search}`;
+}
+
+function buildErrorDebugReport({
+  title,
+  message,
+  stack,
+  componentStack,
+  userAction,
+  stateSummary,
+}: {
+  title: string;
+  message: string;
+  stack?: string;
+  componentStack?: string;
+  userAction?: string;
+  stateSummary?: ErrorDebugStateSummary;
+}) {
+  return JSON.stringify({
+    title,
+    route: routeForDebugReport(),
+    timestamp: new Date().toISOString(),
+    user_action: userAction ?? "render",
+    error_message: message || "Unknown render error.",
+    stack_trace: stack || null,
+    component_stack: componentStack || null,
+    state_summary: stateSummary ?? {},
+  }, null, 2);
+}
+
+async function copyDebugReport(report: string) {
+  try {
+    await navigator.clipboard.writeText(report);
+  } catch {
+    window.prompt("Copy debug report", report);
+  }
+}
+
+function messageFromUnknownError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "Unknown error.";
+  }
+}
+
+function DebugReportButton({
+  title,
+  message,
+  stack,
+  componentStack,
+  userAction,
+  stateSummary,
+}: Readonly<{
+  title: string;
+  message: string;
+  stack?: string;
+  componentStack?: string;
+  userAction?: string;
+  stateSummary?: ErrorDebugStateSummary;
+}>) {
+  const report = buildErrorDebugReport({ title, message, stack, componentStack, userAction, stateSummary });
+  return (
+    <button
+      type="button"
+      onClick={() => void copyDebugReport(report)}
+      className="mt-4 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.04]"
+    >
+      Copy debug report
+    </button>
+  );
+}
+
 class TargetSectionErrorBoundary extends Component<
-  Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string }>,
-  { hasError: boolean; message: string }
+  Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string; userAction?: string; stateSummary?: ErrorDebugStateSummary }>,
+  ErrorBoundaryState
 > {
-  state = { hasError: false, message: "" };
+  state: ErrorBoundaryState = emptyErrorBoundaryState;
 
   static getDerivedStateFromError(error: unknown) {
     return {
       hasError: true,
       message: error instanceof Error ? error.message : "Insufficient data.",
+      stack: error instanceof Error ? error.stack ?? "" : "",
+      componentStack: "",
+      timestamp: new Date().toISOString(),
     };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+    this.setState({ componentStack: info.componentStack ?? "" });
   }
 
-  componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string }>) {
+  componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; title: string; description?: string; resetKey?: string; userAction?: string; stateSummary?: ErrorDebugStateSummary }>) {
     if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
-      this.setState({ hasError: false, message: "" });
+      this.setState(emptyErrorBoundaryState);
     }
   }
 
@@ -2256,6 +2355,14 @@ class TargetSectionErrorBoundary extends Component<
           <p className="font-medium text-amber-100">{this.props.title}</p>
           <p className="mt-2 text-sm leading-6 text-amber-100/75">{this.props.description ?? "Insufficient data to render this section."}</p>
           {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
+          <DebugReportButton
+            title={this.props.title}
+            message={this.state.message}
+            stack={this.state.stack}
+            componentStack={this.state.componentStack}
+            userAction={this.props.userAction}
+            stateSummary={this.props.stateSummary}
+          />
         </Card>
       );
     }
@@ -2265,19 +2372,23 @@ class TargetSectionErrorBoundary extends Component<
 
 class AppRootErrorBoundary extends Component<
   Readonly<{ children: React.ReactNode }>,
-  { hasError: boolean; message: string }
+  ErrorBoundaryState
 > {
-  state = { hasError: false, message: "" };
+  state: ErrorBoundaryState = emptyErrorBoundaryState;
 
   static getDerivedStateFromError(error: unknown) {
     return {
       hasError: true,
       message: error instanceof Error ? error.message : "Adaptive data temporarily unavailable.",
+      stack: error instanceof Error ? error.stack ?? "" : "",
+      componentStack: "",
+      timestamp: new Date().toISOString(),
     };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+    this.setState({ componentStack: info.componentStack ?? "" });
   }
 
   render() {
@@ -2288,6 +2399,13 @@ class AppRootErrorBoundary extends Component<
             <SectionHeader eyebrow="Performance OS" title="Adaptive data temporarily unavailable" />
             <p className="text-sm leading-6 text-amber-100/80">The app shell is still available, but one top-level dashboard payload could not render safely.</p>
             {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
+            <DebugReportButton
+              title="App root render failed"
+              message={this.state.message}
+              stack={this.state.stack}
+              componentStack={this.state.componentStack}
+              userAction="app-root-render"
+            />
           </Card>
         </main>
       );
@@ -2298,24 +2416,28 @@ class AppRootErrorBoundary extends Component<
 
 class GoalsPageErrorBoundary extends Component<
   Readonly<{ children: React.ReactNode; resetKey?: string }>,
-  { hasError: boolean; message: string }
+  ErrorBoundaryState
 > {
-  state = { hasError: false, message: "" };
+  state: ErrorBoundaryState = emptyErrorBoundaryState;
 
   static getDerivedStateFromError(error: unknown) {
     return {
       hasError: true,
       message: error instanceof Error ? error.message : "Goals & Targets could not render.",
+      stack: error instanceof Error ? error.stack ?? "" : "",
+      componentStack: "",
+      timestamp: new Date().toISOString(),
     };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+    this.setState({ componentStack: info.componentStack ?? "" });
   }
 
   componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; resetKey?: string }>) {
     if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
-      this.setState({ hasError: false, message: "" });
+      this.setState(emptyErrorBoundaryState);
     }
   }
 
@@ -2327,6 +2449,13 @@ class GoalsPageErrorBoundary extends Component<
             <SectionHeader eyebrow="Goals" title="Goals & Targets" />
             <p className="text-sm leading-6 text-zinc-300">Insufficient data to render one Goals & Targets tile.</p>
             <p className="mt-2 text-xs leading-5 text-zinc-500">{this.state.message || "Missing recommendation data."}</p>
+            <DebugReportButton
+              title="Goals page render failed"
+              message={this.state.message}
+              stack={this.state.stack}
+              componentStack={this.state.componentStack}
+              userAction="goals-render"
+            />
           </Card>
         </div>
       );
@@ -2337,24 +2466,28 @@ class GoalsPageErrorBoundary extends Component<
 
 class ExerciseViewErrorBoundary extends Component<
   Readonly<{ children: React.ReactNode; resetKey?: string }>,
-  { hasError: boolean; message: string }
+  ErrorBoundaryState
 > {
-  state = { hasError: false, message: "" };
+  state: ErrorBoundaryState = emptyErrorBoundaryState;
 
   static getDerivedStateFromError(error: unknown) {
     return {
       hasError: true,
       message: error instanceof Error ? error.message : "Exercise view could not render.",
+      stack: error instanceof Error ? error.stack ?? "" : "",
+      componentStack: "",
+      timestamp: new Date().toISOString(),
     };
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
     Sentry.captureException(error, { extra: { componentStack: info.componentStack } });
+    this.setState({ componentStack: info.componentStack ?? "" });
   }
 
   componentDidUpdate(previousProps: Readonly<{ children: React.ReactNode; resetKey?: string }>) {
     if (this.state.hasError && previousProps.resetKey !== this.props.resetKey) {
-      this.setState({ hasError: false, message: "" });
+      this.setState(emptyErrorBoundaryState);
     }
   }
 
@@ -2365,6 +2498,13 @@ class ExerciseViewErrorBoundary extends Component<
           <p className="font-medium text-white">Exercise view unavailable</p>
           <p className="mt-2 text-sm text-zinc-400">No exercise trend data available yet.</p>
           <p className="mt-2 text-xs text-zinc-500">{this.state.message || "Missing exercise trend data."}</p>
+          <DebugReportButton
+            title="Exercise view render failed"
+            message={this.state.message}
+            stack={this.state.stack}
+            componentStack={this.state.componentStack}
+            userAction="exercise-view-render"
+          />
         </div>
       );
     }
@@ -11181,6 +11321,27 @@ function HomeContent() {
   useEffect(() => subscribeRateLimit(setRateLimited), []);
 
   useEffect(() => {
+    const reportUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const message = messageFromUnknownError(event.reason);
+      const error = event.reason instanceof Error ? event.reason : new Error(message);
+      Sentry.captureException(error, { extra: { route: routeForDebugReport(), source: "unhandledrejection" } });
+      setApiError(`Unexpected app error: ${message}`);
+    };
+    const reportUnhandledError = (event: ErrorEvent) => {
+      if (!event.error) return;
+      const message = messageFromUnknownError(event.error);
+      Sentry.captureException(event.error, { extra: { route: routeForDebugReport(), source: "window.error" } });
+      setApiError(`Unexpected app error: ${message}`);
+    };
+    window.addEventListener("unhandledrejection", reportUnhandledRejection);
+    window.addEventListener("error", reportUnhandledError);
+    return () => {
+      window.removeEventListener("unhandledrejection", reportUnhandledRejection);
+      window.removeEventListener("error", reportUnhandledError);
+    };
+  }, []);
+
+  useEffect(() => {
     const timeout = window.setTimeout(() => {
       setActivePage(initialPageFromUrl());
       setMessage(initialIntegrationNotice("message"));
@@ -13707,6 +13868,20 @@ function HomeContent() {
                     <p className="font-medium text-red-100">Action needs attention</p>
                     <p className="mt-2 text-sm text-red-100/80">{apiError}</p>
                     <p className="mt-2 text-sm text-red-100/70">If this is a connection issue, start FastAPI with: uvicorn backend_new.main:app --reload</p>
+                    <DebugReportButton
+                      title="Client action error"
+                      message={apiError}
+                      userAction={`active-page:${activePage}`}
+                      stateSummary={{
+                        activePage,
+                        backend: publicApiBaseLabel(),
+                        hasDashboard: Boolean(dashboard),
+                        nutritionLogs: nutritionLogs.length,
+                        workoutHistory: workoutHistory.length,
+                        bodyMetrics: bodyMetrics.length,
+                        recoveryLogs: recoveryLogs.length,
+                      }}
+                    />
                   </div>
                   <button
                     onClick={() => {
@@ -13759,6 +13934,18 @@ function HomeContent() {
                 title={`${currentPage.label} temporarily unavailable`}
                 description="Adaptive data temporarily unavailable."
                 resetKey={`${activePage}-${dashboard?.date ?? ""}-${dashboard?.targets?.target_calories ?? ""}`}
+                userAction={`render:${activePage}`}
+                stateSummary={{
+                  activePage,
+                  backend: publicApiBaseLabel(),
+                  hasDashboard: Boolean(dashboard),
+                  dashboardDate: dashboard?.date ?? null,
+                  nutritionLogs: nutritionLogs.length,
+                  workoutHistory: workoutHistory.length,
+                  bodyMetrics: bodyMetrics.length,
+                  recoveryLogs: recoveryLogs.length,
+                  parsedFoods: parsedFoods.length,
+                }}
               >
                 {pageContent[activePage]}
               </TargetSectionErrorBoundary>
