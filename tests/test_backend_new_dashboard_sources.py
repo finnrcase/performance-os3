@@ -125,6 +125,68 @@ def test_dashboard_core_uses_tab_source_payloads(monkeypatch):
     assert payload["cache"]["source_versions"]["goals"] == "goals-live"
 
 
+def test_dashboard_core_does_not_use_yesterday_workout_as_today(monkeypatch):
+    today = "2026-05-22"
+    yesterday = "2026-05-21"
+
+    monkeypatch.setattr(dashboard, "_today_iso", lambda: today)
+    monkeypatch.setattr(
+        dashboard,
+        "fetch_dashboard_core_bundle",
+        lambda *args, **kwargs: {
+            "status": "ok",
+            "food_rows": [],
+            "body_rows": [],
+            "recovery_rows": [],
+            "sleep_rows": [],
+            "training_summary": {
+                "latest_workout": _lift_item(yesterday, "bundle-yesterday", "Pull day", [_detail("Cable Row", 120, 8, 1)]),
+                "items": [_lift_item(yesterday, "bundle-yesterday", "Pull day", [_detail("Cable Row", 120, 8, 1)])],
+            },
+            "targets": {"target_calories": 2500},
+            "goals": {},
+            "counts": {},
+            "blocks": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(nutrition, "get_nutrition_today", lambda date=None: {"status": "ok", "date": today, "items": [], "totals": {}})
+    monkeypatch.setattr(nutrition, "get_nutrition_history", lambda limit=30: {"status": "ok", "items": [], "adherence": {}})
+    monkeypatch.setattr(
+        goals,
+        "get_goals",
+        lambda: {
+            "status": "ok",
+            "goals": {"current_bodyweight": 180, "goal_type": "Lean Bulk"},
+            "targets": {"target_calories": 2500, "protein_grams": 180, "carb_grams": 300, "fat_grams": 70},
+        },
+    )
+    monkeypatch.setattr(body_metrics, "get_body_metrics", lambda limit=5000: {"status": "ok", "canonical_items": [], "raw_items": []})
+    monkeypatch.setattr(
+        training,
+        "training_history",
+        lambda limit=25, days=180: {
+            "status": "ok",
+            "items": [_lift_item(yesterday, "lift-yesterday", "Pull day", [_detail("Cable Row", 120, 8, 1)])],
+            "limit": limit,
+            "days": days,
+            "debug": {},
+        },
+    )
+    monkeypatch.setattr(recovery, "get_recovery_logs", lambda limit=500: {"status": "ok", "items": []})
+    monkeypatch.setattr(recovery, "get_sleep_entries", lambda limit=500: {"status": "ok", "items": []})
+    monkeypatch.setattr(dashboard, "fetch_latest_document", lambda *args, **kwargs: {})
+
+    payload = dashboard.dashboard_core(date=today)
+
+    assert payload["date"] == today
+    assert payload["latest_workout"] is None
+    assert payload["lift_performance"]["status"] == "Workout not logged yet"
+    assert payload["lift_performance"]["summary"] == "Workout not logged yet"
+    assert payload["workout_quality"]["status"] == "empty"
+    assert payload["workout_quality"]["summary"] == "No workout logged for this date."
+
+
 def test_workout_quality_uses_latest_lift_not_newer_run():
     latest_pull = [
         _detail("Lat Pulldown (Cable)", 110, 10, 1, "Back"),

@@ -1651,9 +1651,9 @@ function todayString() {
 function headerDateString(date = new Date()) {
   return new Intl.DateTimeFormat("en-US", {
     timeZone: APP_TIMEZONE,
-    month: "numeric",
+    weekday: "long",
+    month: "long",
     day: "numeric",
-    year: "2-digit",
   }).format(date);
 }
 

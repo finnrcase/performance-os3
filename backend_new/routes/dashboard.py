@@ -1819,7 +1819,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     targets = goals_payload.get("targets") if isinstance(goals_payload.get("targets"), dict) else _simple_targets(goals, bundle.get("targets") if isinstance(bundle.get("targets"), dict) else {})
     nutrition_today = food_payload.get("totals") if isinstance(food_payload.get("totals"), dict) else _totals(food_rows)
     latest_bodyweight, bodyweight_trend, weight = _weight_tile(body_rows, today)
-    latest_workout = _latest_from_training_history(training_items)
+    latest_workout = _latest_from_training_history(training_items, today)
     training_debug = training_payload.get("debug") if isinstance(training_payload.get("debug"), dict) else {}
     training_summary = {
         "status": training_payload.get("status") or "ok",
@@ -1837,9 +1837,11 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "message": training_payload.get("message", ""),
     }
     if latest_workout is None and isinstance(bundle_training_summary.get("latest_workout"), dict):
-        latest_workout = bundle_training_summary.get("latest_workout")
+        bundle_latest_workout = bundle_training_summary.get("latest_workout")
+        if _date_text(bundle_latest_workout.get("date")) == today:
+            latest_workout = bundle_latest_workout
     if latest_workout is None:
-        latest_workout = _latest_workout(training_rows)
+        latest_workout = _latest_workout(training_rows, today)
     training_status = str(training_summary.get("status") or "ok")
     training_available = training_status in {"ok", "not_configured", "not_loaded"}
     target_calories = _number(targets.get("target_calories"), 0)
