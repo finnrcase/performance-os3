@@ -1623,6 +1623,14 @@ type QuickFoodLogJob = {
 
 const DEFAULT_MEAL_TYPE = "Food";
 const APP_TIMEZONE = process.env.NEXT_PUBLIC_APP_TIMEZONE || "America/Los_Angeles";
+const STARTUP_LOADING_MIN_MS = 1500;
+const STARTUP_LOADING_MESSAGES = [
+  "Connecting to backend...",
+  "Syncing training data...",
+  "Initializing dashboard...",
+  "Loading performance systems...",
+] as const;
+const STARTUP_MORPH_MS = 1100;
 const integrationLabels: Record<string, string> = {
   hevy_api_key: "Hevy API key",
   strava_client_id: "Strava client ID",
@@ -2222,6 +2230,75 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
         <h2 className="text-lg font-semibold text-white">{title}</h2>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
+    </div>
+  );
+}
+
+function StartupLoadingScreen({ morphing }: Readonly<{ morphing: boolean }>) {
+  const [messageIndex, setMessageIndex] = useState(0);
+  const [messageVisible, setMessageVisible] = useState(true);
+
+  useEffect(() => {
+    let fadeTimer: number | null = null;
+    const interval = window.setInterval(() => {
+      setMessageVisible(false);
+      if (fadeTimer !== null) {
+        window.clearTimeout(fadeTimer);
+      }
+      fadeTimer = window.setTimeout(() => {
+        setMessageIndex((current) => (current + 1) % STARTUP_LOADING_MESSAGES.length);
+        setMessageVisible(true);
+      }, 220);
+    }, 2000);
+    return () => {
+      window.clearInterval(interval);
+      if (fadeTimer !== null) {
+        window.clearTimeout(fadeTimer);
+      }
+    };
+  }, []);
+
+  return (
+    <div className={cx("startup-screen fixed inset-0 z-50 overflow-hidden text-zinc-100", morphing && "is-morphing")}>
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/loading.png"
+        alt=""
+        aria-hidden="true"
+        className="startup-background-image absolute inset-0 h-full w-full object-cover object-center"
+      />
+      <div className="startup-overlay-layer absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,rgba(20,28,21,0.12),rgba(5,6,7,0.44)_42%,rgba(0,0,0,0.82)_100%)]" />
+      <div className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.38)_0%,rgba(0,0,0,0.18)_38%,rgba(0,0,0,0.72)_100%)]" />
+      <div className="relative flex min-h-dvh items-center justify-center px-6">
+        <div className="-translate-y-[7vh] text-center">
+          <div className="startup-logo-morph-origin mx-auto">
+            <div className="startup-logo-glow grid h-24 w-24 place-items-center rounded-[1.4rem] bg-black/18 p-2 backdrop-blur-[2px] sm:h-28 sm:w-28">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/POSLOGO.png"
+                alt="Performance OS"
+                width={112}
+                height={112}
+                className="h-full w-full object-contain"
+              />
+            </div>
+          </div>
+          <div className="startup-loading-details">
+            <div className="mt-9 flex justify-center">
+              <span className="startup-spinner h-8 w-8 rounded-full" aria-hidden="true" />
+            </div>
+            <p
+              aria-live="polite"
+              className={cx(
+                "mt-5 min-h-6 text-sm font-medium tracking-[0.02em] text-zinc-200 transition-opacity duration-300 sm:text-base",
+                messageVisible ? "opacity-100" : "opacity-0",
+              )}
+            >
+              {STARTUP_LOADING_MESSAGES[messageIndex]}
+            </p>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -11291,6 +11368,8 @@ function HomeContent() {
   const [hevySyncing, setHevySyncing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("Waking backend...");
+  const [initialBootComplete, setInitialBootComplete] = useState(false);
+  const [startupTransitioning, setStartupTransitioning] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
   const [loadFailures, setLoadFailures] = useState<string[]>([]);
@@ -11303,6 +11382,8 @@ function HomeContent() {
   const quickFoodProcessingRef = useRef(false);
   const quickFoodProcessRef = useRef<() => void>(() => undefined);
   const quickFoodLastClickRef = useRef<Record<string, number>>({});
+  const initialBootCompleteRef = useRef(false);
+  const startupTransitionTimerRef = useRef<number | null>(null);
   const materializedDefaultShortcutIdsRef = useRef<Record<string, string>>({});
   const mobileItemRefs = useRef<Partial<Record<PageId, HTMLButtonElement | null>>>({});
   const [mobileHighlight, setMobileHighlight] = useState<MobileNavHighlight>({ left: 0, top: 0, width: 0, height: 0, ready: false });
@@ -11315,6 +11396,12 @@ function HomeContent() {
       setHeaderDateLabel(headerDateString());
     }, 60_000);
     return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => () => {
+    if (startupTransitionTimerRef.current !== null) {
+      window.clearTimeout(startupTransitionTimerRef.current);
+    }
   }, []);
 
   // Surface server-side rate limiting (HTTP 429) while the fetch layer retries.
@@ -11633,6 +11720,29 @@ function HomeContent() {
   }, [applySettingsData, recordStartupDebug, strengthTrendPath]);
 
   const refreshAll = useCallback(async (options?: { allowColdStartRetry?: boolean }) => {
+    const startupStartedAt = performance.now();
+    const enforceStartupMinimum = !initialBootCompleteRef.current;
+    const finishLoading = async () => {
+      if (enforceStartupMinimum) {
+        const remaining = STARTUP_LOADING_MIN_MS - (performance.now() - startupStartedAt);
+        if (remaining > 0) {
+          await sleep(remaining);
+        }
+        initialBootCompleteRef.current = true;
+        setLoading(false);
+        setStartupTransitioning(true);
+        if (startupTransitionTimerRef.current !== null) {
+          window.clearTimeout(startupTransitionTimerRef.current);
+        }
+        startupTransitionTimerRef.current = window.setTimeout(() => {
+          setStartupTransitioning(false);
+          setInitialBootComplete(true);
+          startupTransitionTimerRef.current = null;
+        }, STARTUP_MORPH_MS);
+        return;
+      }
+      setLoading(false);
+    };
     const maxAttempts = options?.allowColdStartRetry === false ? 1 : 2;
     setApiError(null);
     setLoadFailures([]);
@@ -11799,10 +11909,10 @@ function HomeContent() {
           void loadDeferredData();
         }, 250);
       }
-      setLoading(false);
+      await finishLoading();
       return;
     }
-    setLoading(false);
+    await finishLoading();
   }, [applySettingsData, loadDeferredData, recordStartupDebug]);
 
   const refreshDashboardCoreOnly = useCallback(async (date = todayString()) => {
@@ -13738,7 +13848,8 @@ function HomeContent() {
   return (
     <main data-accent-theme={accentTheme} className="min-h-screen bg-[#07080b] text-zinc-100">
       <div className="accent-page-glow pointer-events-none fixed inset-0" />
-      <div className="relative flex min-h-screen">
+      {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen morphing={startupTransitioning} /> : null}
+      <div className={cx("startup-app-shell relative flex min-h-screen", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
         <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
           <div className="mb-8 flex items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -13747,7 +13858,7 @@ function HomeContent() {
               alt="Performance OS logo"
               width={40}
               height={40}
-              className="h-10 w-10 shrink-0 rounded-lg object-contain"
+              className={cx("h-10 w-10 shrink-0 rounded-lg object-contain transition-opacity duration-300", initialBootComplete ? "opacity-100" : "opacity-0")}
             />
             <div>
               <p className="font-semibold text-white">Performance OS</p>
@@ -13801,9 +13912,19 @@ function HomeContent() {
         <section className="flex min-w-0 flex-1 flex-col">
           <header className="mobile-safe-header sticky top-0 z-20 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
-              <div>
-                <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
-                <h1 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">{currentPage.label}</h1>
+              <div className="flex min-w-0 items-start gap-3">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/POSLOGO.png"
+                  alt="Performance OS logo"
+                  width={36}
+                  height={36}
+                  className={cx("mt-1 h-9 w-9 shrink-0 rounded-lg object-contain transition-opacity duration-300 lg:hidden", initialBootComplete ? "opacity-100" : "opacity-0")}
+                />
+                <div className="min-w-0">
+                  <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
+                  <h1 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">{currentPage.label}</h1>
+                </div>
               </div>
               <div className="flex items-center gap-3 self-start lg:self-auto">
                 <span className="text-sm text-zinc-500">{headerDateLabel}</span>
@@ -13914,7 +14035,7 @@ function HomeContent() {
               </Card>
             ) : null}
             {loading ? (
-              <Card>
+              <Card className={!initialBootComplete ? "hidden" : ""}>
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <p className="text-sm text-zinc-300">{loadingMessage}</p>
                   <button
