@@ -2272,16 +2272,14 @@ function StartupLoadingScreen({ morphing }: Readonly<{ morphing: boolean }>) {
       <div className="relative flex min-h-dvh items-center justify-center px-6">
         <div className="-translate-y-[7vh] text-center">
           <div className="startup-logo-morph-origin mx-auto">
-            <div className="startup-logo-glow grid h-24 w-24 place-items-center rounded-[1.4rem] bg-black/18 p-2 backdrop-blur-[2px] sm:h-28 sm:w-28">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src="/POSLOGO.png"
-                alt="Performance OS"
-                width={112}
-                height={112}
-                className="h-full w-full object-contain"
-              />
-            </div>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/heart-logo.png"
+              alt="Performance OS"
+              width={160}
+              height={160}
+              className="startup-logo-glow h-36 w-36 object-contain sm:h-40 sm:w-40"
+            />
           </div>
           <div className="startup-loading-details">
             <div className="mt-9 flex justify-center">
@@ -13846,19 +13844,19 @@ function HomeContent() {
   };
 
   return (
-    <main data-accent-theme={accentTheme} className="min-h-screen bg-[#07080b] text-zinc-100">
+    <main data-accent-theme={accentTheme} className="h-screen overflow-hidden bg-[#07080b] text-zinc-100">
       <div className="accent-page-glow pointer-events-none fixed inset-0" />
       {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen morphing={startupTransitioning} /> : null}
-      <div className={cx("startup-app-shell relative flex min-h-screen", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
+      <div className={cx("startup-app-shell relative flex h-screen overflow-hidden", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
         <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
           <div className="mb-8 flex items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/POSLOGO.png"
+              src="/heart-logo.png"
               alt="Performance OS logo"
               width={40}
               height={40}
-              className={cx("h-10 w-10 shrink-0 rounded-lg object-contain transition-opacity duration-300", initialBootComplete ? "opacity-100" : "opacity-0")}
+              className={cx("h-10 w-10 shrink-0 object-contain drop-shadow-[0_0_10px_rgba(190,242,100,0.18)] transition-opacity duration-300", initialBootComplete ? "opacity-100" : "opacity-0")}
             />
             <div>
               <p className="font-semibold text-white">Performance OS</p>
@@ -13909,17 +13907,17 @@ function HomeContent() {
           </div>
         </aside>
 
-        <section className="flex min-w-0 flex-1 flex-col">
-          <header className="mobile-safe-header sticky top-0 z-20 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <header className="mobile-safe-header z-20 shrink-0 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex min-w-0 items-start gap-3">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src="/POSLOGO.png"
+                  src="/heart-logo.png"
                   alt="Performance OS logo"
                   width={36}
                   height={36}
-                  className={cx("mt-1 h-9 w-9 shrink-0 rounded-lg object-contain transition-opacity duration-300 lg:hidden", initialBootComplete ? "opacity-100" : "opacity-0")}
+                  className={cx("mt-1 h-9 w-9 shrink-0 object-contain drop-shadow-[0_0_10px_rgba(190,242,100,0.18)] transition-opacity duration-300 lg:hidden", initialBootComplete ? "opacity-100" : "opacity-0")}
                 />
                 <div className="min-w-0">
                   <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
@@ -13965,7 +13963,7 @@ function HomeContent() {
             </div>
           </header>
 
-          <div className="p-4 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:p-6 lg:p-8">
+          <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-[calc(6rem+env(safe-area-inset-bottom))] sm:p-6 lg:p-8">
             {rateLimited ? (
               <Card className="mb-4 border-amber-400/30 bg-amber-400/10">
                 <p className="text-sm text-amber-100">Temporarily rate limited — retrying shortly. This is a server limit, not your account.</p>

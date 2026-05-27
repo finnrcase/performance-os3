@@ -189,11 +189,12 @@ button {
 .startup-app-shell-ready {
   opacity: 1;
   filter: blur(0);
-  transform: scale(1);
+  transform: none;
 }
 
 .startup-background-image {
   animation: startup-background-fade 1000ms ease-out both;
+  filter: blur(28px) brightness(0.42) saturate(0.85);
   transition:
     opacity 760ms ease,
     filter 900ms ease,
@@ -208,8 +209,8 @@ button {
 
 .startup-screen.is-morphing .startup-background-image {
   opacity: 0;
-  filter: blur(10px);
-  transform: scale(1.025);
+  filter: blur(34px) brightness(0.32) saturate(0.75);
+  transform: scale(1.04);
 }
 
 .startup-screen.is-morphing .startup-overlay-layer {
@@ -219,9 +220,7 @@ button {
 
 .startup-logo-glow {
   animation: startup-logo-pulse 2600ms ease-in-out infinite;
-  box-shadow:
-    0 0 32px -18px var(--accent-glow),
-    0 18px 80px rgba(0, 0, 0, 0.4);
+  filter: drop-shadow(0 0 18px rgba(190, 242, 100, 0.24));
 }
 
 .startup-logo-morph-origin {
@@ -304,7 +303,7 @@ button {
     transform: translate3d(0, 0, 0) scale(1.04);
   }
   100% {
-    transform: translate3d(calc(-50vw + 2.125rem), calc(-50vh + 7vh + 3.25rem), 0) scale(0.38);
+    transform: translate3d(calc(-50vw + 2.125rem), calc(-50vh + 7vh + 3.25rem), 0) scale(0.25);
   }
 }
 
@@ -316,7 +315,7 @@ button {
     transform: translate3d(0, 0, 0) scale(1.04);
   }
   100% {
-    transform: translate3d(calc(-50vw + 2.5rem), calc(-50vh + 7vh + 2.5rem), 0) scale(0.36);
+    transform: translate3d(calc(-50vw + 2.5rem), calc(-50vh + 7vh + 2.5rem), 0) scale(0.25);
   }
 }
 
