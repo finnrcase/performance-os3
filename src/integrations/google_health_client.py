@@ -84,10 +84,17 @@ def _config_value(settings: dict | None, env_name: str, field: str) -> str:
     return os.getenv(env_name, "").strip() or str(_settings_integrations(settings).get(field) or "").strip()
 
 
+def _normalize_oauth_config_value(value: str) -> str:
+    text = str(value or "").strip().strip('"').strip("'").strip()
+    if text.startswith("="):
+        text = text[1:].strip()
+    return text
+
+
 def client_credentials(settings: dict | None = None) -> tuple[str, str]:
     return (
-        _config_value(settings, "GOOGLE_HEALTH_CLIENT_ID", "google_health_client_id"),
-        _config_value(settings, "GOOGLE_HEALTH_CLIENT_SECRET", "google_health_client_secret"),
+        _normalize_oauth_config_value(_config_value(settings, "GOOGLE_HEALTH_CLIENT_ID", "google_health_client_id")),
+        _normalize_oauth_config_value(_config_value(settings, "GOOGLE_HEALTH_CLIENT_SECRET", "google_health_client_secret")),
     )
 
 

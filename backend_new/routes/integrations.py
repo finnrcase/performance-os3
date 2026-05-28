@@ -5,7 +5,7 @@ import os
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import APIRouter, Query, Request
@@ -23,6 +23,7 @@ WITHINGS_AUTH_URL = "https://account.withings.com/oauth2_user/authorize2"
 WITHINGS_SCOPES = "user.metrics"
 STRAVA_AUTH_URL = "https://www.strava.com/oauth/authorize"
 STRAVA_SCOPES = "read,activity:read_all"
+GOOGLE_HEALTH_EXPECTED_CALLBACK_URL = "https://performance-os-git-main-finnrcases-projects.vercel.app/api/google-health/callback"
 
 SECRET_MARKER = "••••"
 
@@ -112,6 +113,33 @@ def _env_or_saved(settings: dict[str, Any], env_name: str, integration_field: st
 
 def _mask_present(value: object) -> str:
     return SECRET_MARKER if str(value or "").strip() else ""
+
+
+def _secret_preview(value: object, *, head: int = 8, tail: int = 6) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) <= head + tail + 3:
+        return f"{text[:2]}...{text[-2:]}" if len(text) > 4 else "present"
+    return f"{text[:head]}...{text[-tail:]}"
+
+
+def _runtime_service() -> dict[str, Any]:
+    if os.getenv("VERCEL"):
+        service = "vercel"
+    elif os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME"):
+        service = "railway"
+    elif os.getenv("RENDER"):
+        service = "render"
+    else:
+        service = "local_or_unknown"
+    return {
+        "service": service,
+        "environment": os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("VERCEL_ENV") or os.getenv("RENDER_SERVICE_TYPE") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "local",
+        "vercel": bool(os.getenv("VERCEL")),
+        "railway": bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_NAME")),
+        "render": bool(os.getenv("RENDER")),
+    }
 
 
 def _save_settings_document(settings: dict[str, Any]) -> dict[str, Any]:
@@ -269,7 +297,27 @@ def _withings_credentials() -> tuple[str, str]:
 def _google_health_redirect_uri(request: Request) -> str:
     from src.integrations.google_health_client import redirect_uri
 
-    return redirect_uri(_settings_document(), fallback=str(request.url_for("google_health_callback")))
+    configured = redirect_uri(_settings_document())
+    if configured:
+        return configured
+    frontend_origin = (
+        os.getenv("NEXT_PUBLIC_APP_URL", "").strip().rstrip("/")
+        or os.getenv("FRONTEND_ORIGIN", "").strip().rstrip("/")
+    )
+    vercel_url = os.getenv("VERCEL_URL", "").strip().rstrip("/")
+    if not frontend_origin and vercel_url:
+        frontend_origin = f"https://{vercel_url}"
+    if frontend_origin:
+        return f"{frontend_origin}/api/google-health/callback"
+    if _production_like():
+        return GOOGLE_HEALTH_EXPECTED_CALLBACK_URL
+    return str(request.url_for("google_health_callback"))
+
+
+def _google_health_credentials(settings: dict[str, Any] | None = None) -> tuple[str, str]:
+    from src.integrations.google_health_client import client_credentials
+
+    return client_credentials(settings if isinstance(settings, dict) else _settings_document())
 
 
 def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -801,6 +849,128 @@ def _save_google_health_connection_record(status: str = "", metadata: dict[str, 
     if metadata.get("connected") and not payload.get("connected_at"):
         payload["connected_at"] = now
     return upsert_json_row("google_health_connections", "connection_id", "primary", payload)
+
+
+def _google_health_env_value(name: str) -> str:
+    return os.getenv(name, "")
+
+
+def _google_health_env_state(settings: dict[str, Any]) -> dict[str, Any]:
+    integrations = _integrations(settings)
+
+    def state(name: str, field: str = "") -> dict[str, Any]:
+        raw_env = _google_health_env_value(name)
+        saved = str(integrations.get(field) or "") if field else ""
+        raw = raw_env if raw_env else saved
+        stripped = raw.strip()
+        return {
+            "present": bool(stripped),
+            "source": "env" if raw_env.strip() else "saved_settings" if saved.strip() else "missing",
+            "length": len(stripped),
+            "has_surrounding_whitespace": bool(raw and raw != stripped),
+            "has_leading_equals": stripped.startswith("="),
+        }
+
+    return {
+        "GOOGLE_HEALTH_CLIENT_ID": state("GOOGLE_HEALTH_CLIENT_ID", "google_health_client_id"),
+        "GOOGLE_HEALTH_CLIENT_SECRET": state("GOOGLE_HEALTH_CLIENT_SECRET", "google_health_client_secret"),
+        "GOOGLE_HEALTH_REDIRECT_URI": state("GOOGLE_HEALTH_REDIRECT_URI", "google_health_redirect_uri"),
+        "GOOGLE_HEALTH_SCOPES": state("GOOGLE_HEALTH_SCOPES"),
+        "GOOGLE_HEALTH_API_BASE_URL": state("GOOGLE_HEALTH_API_BASE_URL"),
+    }
+
+
+def _google_health_sanitize_auth_url(auth_url: str) -> str:
+    if not auth_url:
+        return ""
+    parsed = urlparse(auth_url)
+    sanitized_query: list[tuple[str, str]] = []
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        if key == "client_id":
+            sanitized_query.append((key, _secret_preview(value)))
+        elif key == "scope":
+            sanitized_query.append((key, value))
+        elif key == "redirect_uri":
+            sanitized_query.append((key, value))
+        else:
+            sanitized_query.append((key, value))
+    return urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, urlencode(sanitized_query), parsed.fragment))
+
+
+def _google_health_debug_payload(request: Request) -> dict[str, Any]:
+    from src.integrations.google_health_client import get_auth_url, scopes
+
+    settings = _settings_document()
+    client_id, client_secret = _google_health_credentials(settings)
+    redirect_uri = _google_health_redirect_uri(request)
+    status, metadata = _google_health_status(settings)
+    env_state = _google_health_env_state(settings)
+    result = get_auth_url(settings, redirect_uri=redirect_uri, state="debug")
+    client_id_stripped = str(client_id or "").strip()
+    likely_issues: list[str] = []
+    if not client_id_stripped:
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_ID is missing in the runtime generating the OAuth URL.")
+    elif not client_id_stripped.endswith(".apps.googleusercontent.com"):
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_ID does not look like a Google OAuth web client ID.")
+    if not str(client_secret or "").strip():
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_SECRET is missing in the runtime exchanging the OAuth code.")
+    if redirect_uri != GOOGLE_HEALTH_EXPECTED_CALLBACK_URL:
+        likely_issues.append("Effective redirect URI does not match the requested Vercel callback URL.")
+    if env_state["GOOGLE_HEALTH_CLIENT_ID"]["has_surrounding_whitespace"]:
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_ID has surrounding whitespace/newlines in the runtime env.")
+    if env_state["GOOGLE_HEALTH_CLIENT_SECRET"]["has_surrounding_whitespace"]:
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_SECRET has surrounding whitespace/newlines in the runtime env.")
+    if env_state["GOOGLE_HEALTH_CLIENT_ID"]["has_leading_equals"]:
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_ID has a leading '=' in the runtime env. The backend normalizes it defensively, but the deployed env var should be fixed.")
+    if env_state["GOOGLE_HEALTH_CLIENT_SECRET"]["has_leading_equals"]:
+        likely_issues.append("GOOGLE_HEALTH_CLIENT_SECRET has a leading '=' in the runtime env. The backend normalizes it defensively, but the deployed env var should be fixed.")
+    return {
+        "status": "ok" if result.get("status") == "ok" and not likely_issues else "warning",
+        "provider": "google_health",
+        "checked_at": utc_now_iso(),
+        "runtime": _runtime_service(),
+        "request_host": request.url.hostname,
+        "backend_callback_url": str(request.url_for("google_health_callback")),
+        "expected_callback_url": GOOGLE_HEALTH_EXPECTED_CALLBACK_URL,
+        "effective_redirect_uri": redirect_uri,
+        "redirect_matches_expected": redirect_uri == GOOGLE_HEALTH_EXPECTED_CALLBACK_URL,
+        "env": env_state,
+        "client_id": {
+            "present": bool(client_id_stripped),
+            "preview": _secret_preview(client_id_stripped),
+            "length": len(client_id_stripped),
+            "looks_like_google_oauth_client": client_id_stripped.endswith(".apps.googleusercontent.com"),
+        },
+        "client_secret": {"present": bool(str(client_secret or "").strip())},
+        "oauth_provider": {
+            "authorize_endpoint": "https://accounts.google.com/o/oauth2/v2/auth",
+            "status": result.get("status"),
+            "message": result.get("message", ""),
+            "generated_authorize_url_preview": _google_health_sanitize_auth_url(str(result.get("auth_url") or "")),
+            "scope_count": len(scopes()),
+        },
+        "token_config": {
+            "connection_status": status,
+            "configured": bool(metadata.get("configured")),
+            "token_status": metadata.get("token_status", "missing"),
+            "access_token_present": bool(metadata.get("access_token_present")),
+            "refresh_token_present": bool(metadata.get("refresh_token_present")),
+            "last_error": metadata.get("last_error", ""),
+            "needs_reconnect": bool(metadata.get("needs_reconnect")),
+        },
+        "frontend_backend_wiring": {
+            "vercel_callback_route": "/api/google-health/callback redirects to BACKEND_API_URL /api/google-health/callback",
+            "backend_proxy_default": os.getenv("BACKEND_API_URL", "").strip() or os.getenv("NEXT_PUBLIC_API_URL", "").strip() or "",
+            "frontend_origin": os.getenv("NEXT_PUBLIC_APP_URL", "").strip() or os.getenv("FRONTEND_ORIGIN", "").strip() or "",
+        },
+        "likely_issues": likely_issues,
+        "checklist": [
+            "Google Cloud OAuth client type must be Web application.",
+            "Authorized redirect URI must exactly match effective_redirect_uri.",
+            "GOOGLE_HEALTH_CLIENT_ID and GOOGLE_HEALTH_CLIENT_SECRET must be set on the service that handles /api/google-health/connect and /api/google-health/callback.",
+            "Redeploy the backend after changing Railway/Render env vars, and redeploy Vercel if the callback/proxy env changed.",
+        ],
+    }
 
 
 def _withings_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -1573,13 +1743,32 @@ def connect_google_health(request: Request) -> dict[str, Any]:
     from src.integrations.google_health_client import get_auth_url
 
     redirect_uri = _google_health_redirect_uri(request)
+    client_id, client_secret = _google_health_credentials(_settings_document())
+    logger.info(
+        "[google_health] connect requested runtime=%s env=%s client_id_present=%s client_id_preview=%s client_secret_present=%s redirect_uri=%s expected_redirect_match=%s",
+        _runtime_service().get("service"),
+        _runtime_service().get("environment"),
+        bool(str(client_id or "").strip()),
+        _secret_preview(client_id),
+        bool(str(client_secret or "").strip()),
+        redirect_uri,
+        redirect_uri == GOOGLE_HEALTH_EXPECTED_CALLBACK_URL,
+    )
     redirect_error = _oauth_redirect_error("GOOGLE_HEALTH", redirect_uri)
     if redirect_error:
+        logger.warning("[google_health] connect blocked: %s", redirect_error)
         return {"status": "error", "message": redirect_error, "auth_url": "", "redirect_uri": redirect_uri}
     result = get_auth_url(_settings_document(), redirect_uri=redirect_uri, state="performance-os")
     if result.get("status") != "ok":
+        logger.warning("[google_health] authorize url generation failed status=%s message=%s", result.get("status"), str(result.get("message") or "")[:500])
         return result
+    logger.info("[google_health] authorize url generated redirect_uri=%s client_id_preview=%s", redirect_uri, _secret_preview(client_id))
     return result
+
+
+@router.get("/api/debug/google-health")
+def debug_google_health(request: Request) -> dict[str, Any]:
+    return _google_health_debug_payload(request)
 
 
 @router.get("/api/google-health/callback", name="google_health_callback")
@@ -1590,16 +1779,36 @@ def google_health_callback(
 ) -> Response:
     if not code and not error:
         return JSONResponse({"status": "ok", "provider": "google_health", "message": "callback reachable"})
+    redirect_uri = _google_health_redirect_uri(request)
+    client_id, client_secret = _google_health_credentials(_settings_document())
+    logger.info(
+        "[google_health] callback received code_present=%s error_present=%s runtime=%s client_id_present=%s client_id_preview=%s client_secret_present=%s redirect_uri=%s",
+        bool(code),
+        bool(error),
+        _runtime_service().get("service"),
+        bool(str(client_id or "").strip()),
+        _secret_preview(client_id),
+        bool(str(client_secret or "").strip()),
+        redirect_uri,
+    )
     if error:
+        logger.warning("[google_health] callback authorization error=%s", str(error)[:500])
         return RedirectResponse(_frontend_return_url(request, "google_health", "error", f"Google Health authorization failed: {error}"), status_code=303)
     try:
         from src.integrations.google_health_client import exchange_code_for_token
 
-        result = exchange_code_for_token(str(code or ""), _settings_document(), redirect_uri=_google_health_redirect_uri(request))
+        result = exchange_code_for_token(str(code or ""), _settings_document(), redirect_uri=redirect_uri)
         if result.get("status") != "ok" or not result.get("tokens", {}).get("refresh_token"):
             raise RuntimeError(str(result.get("message") or "Google Health did not return a refresh token."))
         _save_google_health_tokens(result["tokens"], connected_at=utc_now_iso())
+        logger.info("[google_health] callback token exchange succeeded refresh_present=%s", bool(result.get("tokens", {}).get("refresh_token")))
     except Exception as exc:
+        logger.warning(
+            "[google_health] callback token exchange failed client_id_preview=%s redirect_uri=%s error=%s",
+            _secret_preview(client_id),
+            redirect_uri,
+            str(exc)[:500],
+        )
         _save_google_health_sync_state({"needs_reconnect": True, "last_error": str(exc), "last_synced_at": utc_now_iso()})
         return RedirectResponse(_frontend_return_url(request, "google_health", "error", str(exc)), status_code=303)
     return RedirectResponse(_frontend_return_url(request, "google_health", "connected", "Google Health connected."), status_code=303)
