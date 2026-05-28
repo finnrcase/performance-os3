@@ -321,9 +321,13 @@ def build_google_health_dashboard_signals(
     readiness_score -= 12 if subjective["abnormal"] else 0
     readiness_score = max(0, min(100, readiness_score))
     readiness_status = "green" if readiness_score >= 80 else "yellow" if readiness_score >= 60 else "red"
+    heart_recovery_signal_available = bool(rhr.get("resting_hr") is not None or hrv.get("hrv") is not None)
+    recovery_confidence = "medium" if heart_recovery_signal_available else "low" if sleep["status"] != "insufficient_data" or activity["status"] != "insufficient_data" else "insufficient_data"
     recovery_readiness = {
         "score": _round(readiness_score, 0),
         "status": readiness_status,
+        "confidence": recovery_confidence,
+        "missing_heart_signals": not heart_recovery_signal_available,
         "label": "Ready" if readiness_status == "green" else "Reduce intensity" if readiness_status == "yellow" else "Recovery priority",
         "message": "Recovery signals support normal training." if readiness_status == "green" else "Consider reducing intensity today." if readiness_status == "yellow" else "Prioritize recovery before hard training.",
     }

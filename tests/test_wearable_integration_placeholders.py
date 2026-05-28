@@ -153,6 +153,9 @@ def test_fitbit_fetch_daily_metrics_parses_sleep_heart_and_activity(monkeypatch)
 
 
 def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
+    def fake_get_json(_url, _access_token, **_kwargs):
+        return {"dataSource": [{"dataType": {"name": "com.google.heart_rate.summary"}}]}
+
     def fake_post_json(_url, body, _access_token, **_kwargs):
         requested = {item["dataTypeName"] for item in body.get("aggregateBy", [])}
         points = []
@@ -182,6 +185,7 @@ def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
             ]
         }
 
+    monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
     monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
 
     fetched = google_health_client.fetch_daily_metrics("token", start_date="2024-05-16", end_date="2024-05-16")
@@ -196,6 +200,48 @@ def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
     assert int(normalized.iloc[0]["resting_hr"]) == 48
     assert fetched["records"]["sleep"][0]["rem_sleep_minutes"] == 60
     assert fetched["records"]["heart"][0]["max_hr"] == 151
+
+
+def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
+    requested_batches = []
+
+    def fake_get_json(_url, _access_token, **_kwargs):
+        return {"dataSource": [{"dataType": {"name": "com.google.step_count.delta"}}]}
+
+    def fake_post_json(_url, body, _access_token, **_kwargs):
+        requested = {item["dataTypeName"] for item in body.get("aggregateBy", [])}
+        requested_batches.append(requested)
+        assert "com.google.heart_rate.summary" not in requested
+        points = []
+        if "com.google.step_count.delta" in requested:
+            points.append({"dataTypeName": "com.google.step_count.delta", "value": [{"intVal": 8000}]})
+        if "com.google.calories.expended" in requested:
+            points.append({"dataTypeName": "com.google.calories.expended", "value": [{"fpVal": 2400}]})
+        if "com.google.active_minutes" in requested:
+            points.append({"dataTypeName": "com.google.active_minutes", "value": [{"intVal": 45}]})
+        if "com.google.sleep.segment" in requested:
+            points.append(
+                {
+                    "dataTypeName": "com.google.sleep.segment",
+                    "startTimeNanos": "0",
+                    "endTimeNanos": "28800000000000",
+                    "value": [{"intVal": 4}],
+                }
+            )
+        return {"bucket": [{"startTimeMillis": 1_715_817_600_000, "dataset": [{"point": points}]}]}
+
+    monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
+    monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
+
+    fetched = google_health_client.fetch_daily_metrics("token", start_date="2024-05-16", end_date="2024-05-16")
+    normalized = google_health_client.normalize_daily_metrics(fetched["items"])
+
+    assert fetched["status"] == "ok"
+    assert google_health_client.GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING in fetched["optional_metric_warnings"]
+    assert fetched["required_metric_failures"] == []
+    assert len(normalized) == 1
+    assert normalized.iloc[0]["resting_hr"] is None
+    assert requested_batches
 
 
 def test_google_health_records_include_rhr_baseline_and_activity_model():

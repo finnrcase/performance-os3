@@ -75,11 +75,18 @@ GOOGLE_HEALTH_TOKEN_FIELDS = {
 GOOGLE_HEALTH_SYNC_FIELDS = {
     "last_synced_at": "",
     "last_error": "",
+    "last_warning": "",
+    "last_status": "",
+    "last_message": "",
     "last_imported_count": 0,
     "last_fetched_count": 0,
+    "rows_saved": 0,
     "last_record_counts": {},
     "last_warning_count": 0,
     "last_storage_error_count": 0,
+    "optional_metric_warnings": [],
+    "required_metric_failures": [],
+    "data_sources": {},
     "latest_record": "",
     "needs_reconnect": False,
 }

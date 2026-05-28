@@ -129,3 +129,31 @@ def test_google_health_partial_malformed_values_do_not_produce_nan():
     assert result["resting_hr_vs_baseline"]["status"] == "insufficient_data"
     assert result["calories_burned_vs_intake"]["status"] == "insufficient_data"
     assert result["debug"]["partial_data"] is True
+
+
+def test_google_health_missing_heart_signals_lower_confidence_without_penalty():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "sleep_hours": 8,
+                "total_calories_burned": 2600,
+                "active_minutes": 35,
+                "steps": 8000,
+            }
+        ],
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "ok"
+    assert result["resting_hr_vs_baseline"]["status"] == "insufficient_data"
+    assert result["hrv"]["status"] == "insufficient_data"
+    assert result["recovery_readiness"]["score"] == 100
+    assert result["recovery_readiness"]["confidence"] == "low"
+    assert result["recovery_readiness"]["missing_heart_signals"] is True

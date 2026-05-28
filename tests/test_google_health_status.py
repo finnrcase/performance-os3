@@ -24,7 +24,10 @@ def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
                 },
                 "google_health_sync": {
                     "last_status": "ok",
-                    "last_warning": "Missing optional sleep metric.",
+                    "last_warning": "Optional heart rate summary unavailable from Google Health.",
+                    "rows_saved": 14,
+                    "optional_metric_warnings": ["Optional heart rate summary unavailable from Google Health."],
+                    "required_metric_failures": [],
                 },
             }
         }
@@ -33,7 +36,10 @@ def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
     assert status == "Connected"
     assert metadata["token_status"] == "valid"
     assert metadata["last_status"] == "ok"
-    assert metadata["last_warning"] == "Missing optional sleep metric."
+    assert metadata["last_warning"] == "Optional heart rate summary unavailable from Google Health."
+    assert metadata["rows_saved"] == 14
+    assert metadata["optional_metric_warnings"] == ["Optional heart rate summary unavailable from Google Health."]
+    assert metadata["required_metric_failures"] == []
 
 
 def test_google_health_status_reconnect_required_after_failed_sync(monkeypatch):

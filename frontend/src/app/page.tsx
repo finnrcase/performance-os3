@@ -1012,6 +1012,9 @@ type SettingsHealthCard = {
     last_message?: string;
     last_warning_count?: number;
     last_storage_error_count?: number;
+    rows_saved?: number;
+    optional_metric_warnings?: string[];
+    required_metric_failures?: string[];
   };
 };
 
@@ -1427,7 +1430,7 @@ type SettingsData = {
   appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
-  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string }>;
+  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; optional_metric_warnings?: string[]; required_metric_failures?: string[] }>;
 };
 
 type FitbitDebugStage = {
@@ -7062,6 +7065,7 @@ function RecoveryPage({
   const restingHrDeviation = finiteNumberOrNull(restingHrSignal?.deviation) ?? finiteNumberOrNull(latestWearable?.resting_hr_deviation);
   const hrvValue = finiteNumberOrNull(hrvSignal?.hrv) ?? finiteNumberOrNull(latestWearable?.hrv) ?? finiteNumberOrNull(latestSleep?.hrv);
   const hrvBaseline = finiteNumberOrNull(hrvSignal?.baseline);
+  const hasHeartRecoverySignal = restingHr !== null || hrvValue !== null;
   const activeMinutes = finiteNumberOrNull(activityLoadSignal?.active_minutes) ?? finiteNumberOrNull(latestWearable?.active_minutes);
   const activeZoneMinutes = finiteNumberOrNull(activityLoadSignal?.active_zone_minutes) ?? finiteNumberOrNull(latestWearable?.active_zone_minutes);
   const steps = finiteNumberOrNull(activityLoadSignal?.steps) ?? finiteNumberOrNull(latestWearable?.steps);
@@ -7091,12 +7095,19 @@ function RecoveryPage({
     ?? trainingReadiness?.sickness_warning?.label
     ?? (sicknessStatus === "warning" ? "Elevated Recovery Risk" : sicknessStatus === "watch" ? "Watch" : "Clear");
   const recoveryConfidence = googleHealthReady
-    ? (googleHealth?.debug?.partial_data ? "partial wearable" : "measured wearable")
+    ? (googleHealth?.debug?.partial_data || !hasHeartRecoverySignal ? "partial wearable" : "measured wearable")
     : latestWearable
       ? "partial wearable"
       : recoveryLogs.length || sleepEntries.length
         ? "manual/inferred"
         : "insufficient data";
+  const recoveryConfidenceDetail = hasHeartRecoverySignal
+    ? latestWearable?.date || googleHealth?.date
+      ? `Latest wearable date ${googleHealth?.date || latestWearable?.date}`
+      : "Wearable heart signals are available."
+    : googleHealthReady || latestWearable
+      ? "Heart-rate/HRV unavailable; using sleep, activity, calories, and training load."
+      : "Connect Google Health / Fitbit for passive scoring.";
   const wearableFlags = Array.isArray(wearableSignals?.flags) ? wearableSignals.flags : [];
   const sleepDurationData = useMemo(() => {
     const wearableSleep = sortedWearableMetrics
@@ -7175,11 +7186,11 @@ function RecoveryPage({
     { label: "Recovery Readiness", value: recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
     { label: "Sleep Quality", value: sleepScore !== null ? `${Math.round(sleepScore)}/100` : "--", detail: `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`, status: sleepQuality?.status, icon: HeartPulse },
     { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: HeartPulse },
-    { label: "Resting HR vs baseline", value: `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHrSignal?.status, icon: HeartPulse },
-    { label: "HRV vs baseline", value: `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvSignal?.status, icon: Gauge },
+    { label: "Resting HR vs baseline", value: restingHr === null ? "Resting HR unavailable" : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "Google Health did not provide resting HR; this is not penalized." : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
+    { label: "HRV vs baseline", value: hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvSignal?.status, icon: Gauge },
     { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status, icon: BarChart3 },
     { label: "Sickness warning", value: sicknessLabel, detail: sicknessWarning?.message || trainingReadiness?.sickness_warning?.message || "Conservative, non-diagnostic recovery stress signal.", status: sicknessStatus, icon: AlertTriangle },
-    { label: "Recovery confidence", value: recoveryConfidence, detail: latestWearable?.date || googleHealth?.date ? `Latest wearable date ${googleHealth?.date || latestWearable?.date}` : "Connect Google Health / Fitbit for passive scoring.", status: recoveryConfidence.includes("measured") ? "good" : recoveryConfidence.includes("partial") ? "watch" : "insufficient_data", icon: Sparkles },
+    { label: "Recovery confidence", value: recoveryConfidence, detail: recoveryConfidenceDetail, status: recoveryConfidence.includes("measured") ? "good" : recoveryConfidence.includes("partial") ? "watch" : "insufficient_data", icon: Sparkles },
   ];
 
   return (
@@ -8471,6 +8482,14 @@ function localDateDaysAgo(daysAgo: number) {
   return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 10);
 }
 
+function isoDateMinusDays(dateValue: string, days: number) {
+  const date = new Date(`${dateValue.slice(0, 10)}T00:00:00`);
+  if (!Number.isFinite(date.getTime())) return "";
+  date.setDate(date.getDate() - days);
+  const offset = date.getTimezoneOffset();
+  return new Date(date.getTime() - offset * 60_000).toISOString().slice(0, 10);
+}
+
 function csvFilenameFromDisposition(header: string | null) {
   if (!header) return `performance-os-backup-${todayString()}.csv`;
   const filenameStarMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
@@ -8479,6 +8498,267 @@ function csvFilenameFromDisposition(header: string | null) {
   }
   const filenameMatch = header.match(/filename="?([^";]+)"?/i);
   return filenameMatch?.[1] ?? `performance-os-backup-${todayString()}.csv`;
+}
+
+type ArchiveExportRow = Record<string, unknown>;
+
+function archiveValueToText(value: unknown) {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function archiveRowsToCsv(rows: ArchiveExportRow[]) {
+  const headers = Array.from(rows.reduce((keys, row) => {
+    Object.keys(row).forEach((key) => keys.add(key));
+    return keys;
+  }, new Set<string>()));
+  const escapeCell = (value: unknown) => {
+    const text = archiveValueToText(value);
+    return /[",\n\r]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
+  };
+  return [
+    headers.map(escapeCell).join(","),
+    ...rows.map((row) => headers.map((header) => escapeCell(row[header])).join(",")),
+  ].join("\n");
+}
+
+function downloadArchiveBlob(blob: Blob, filename: string) {
+  const objectUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.URL.revokeObjectURL(objectUrl);
+}
+
+function escapeXml(value: unknown) {
+  return archiveValueToText(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&apos;");
+}
+
+function excelColumnName(index: number) {
+  let name = "";
+  let value = index;
+  while (value >= 0) {
+    name = String.fromCharCode(65 + (value % 26)) + name;
+    value = Math.floor(value / 26) - 1;
+  }
+  return name;
+}
+
+function worksheetXmlFromRows(rows: ArchiveExportRow[]) {
+  const headers = Array.from(rows.reduce((keys, row) => {
+    Object.keys(row).forEach((key) => keys.add(key));
+    return keys;
+  }, new Set<string>()));
+  const cellXml = (value: unknown, rowIndex: number, columnIndex: number) => {
+    const ref = `${excelColumnName(columnIndex)}${rowIndex}`;
+    const numberValue = finiteNumberOrNull(value);
+    if (numberValue !== null && typeof value !== "string") {
+      return `<c r="${ref}"><v>${numberValue}</v></c>`;
+    }
+    return `<c r="${ref}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`;
+  };
+  const headerRow = `<row r="1">${headers.map((header, index) => cellXml(header, 1, index)).join("")}</row>`;
+  const bodyRows = rows.map((row, rowIndex) => {
+    const excelRow = rowIndex + 2;
+    return `<row r="${excelRow}">${headers.map((header, columnIndex) => cellXml(row[header], excelRow, columnIndex)).join("")}</row>`;
+  });
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>${headerRow}${bodyRows.join("")}</sheetData></worksheet>`;
+}
+
+const CRC32_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
+  }
+  return crc >>> 0;
+});
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function le16(value: number) {
+  return new Uint8Array([value & 0xff, (value >>> 8) & 0xff]);
+}
+
+function le32(value: number) {
+  return new Uint8Array([value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]);
+}
+
+function concatBytes(parts: Uint8Array[]) {
+  const length = parts.reduce((sum, part) => sum + part.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+  parts.forEach((part) => {
+    output.set(part, offset);
+    offset += part.length;
+  });
+  return output;
+}
+
+function buildZipFile(files: Array<{ name: string; content: string }>) {
+  const encoder = new TextEncoder();
+  const localParts: Uint8Array[] = [];
+  const centralParts: Uint8Array[] = [];
+  let offset = 0;
+
+  files.forEach((file) => {
+    const nameBytes = encoder.encode(file.name);
+    const data = encoder.encode(file.content);
+    const crc = crc32(data);
+    const localHeader = concatBytes([
+      le32(0x04034b50),
+      le16(20),
+      le16(0),
+      le16(0),
+      le16(0),
+      le16(0),
+      le32(crc),
+      le32(data.length),
+      le32(data.length),
+      le16(nameBytes.length),
+      le16(0),
+      nameBytes,
+    ]);
+    localParts.push(localHeader, data);
+    centralParts.push(concatBytes([
+      le32(0x02014b50),
+      le16(20),
+      le16(20),
+      le16(0),
+      le16(0),
+      le16(0),
+      le16(0),
+      le32(crc),
+      le32(data.length),
+      le32(data.length),
+      le16(nameBytes.length),
+      le16(0),
+      le16(0),
+      le16(0),
+      le16(0),
+      le32(0),
+      le32(offset),
+      nameBytes,
+    ]));
+    offset += localHeader.length + data.length;
+  });
+
+  const centralDirectory = concatBytes(centralParts);
+  const endRecord = concatBytes([
+    le32(0x06054b50),
+    le16(0),
+    le16(0),
+    le16(files.length),
+    le16(files.length),
+    le32(centralDirectory.length),
+    le32(offset),
+    le16(0),
+  ]);
+  return concatBytes([...localParts, centralDirectory, endRecord]);
+}
+
+function buildArchiveXlsx(rows: ArchiveExportRow[], sheetName: string) {
+  const safeSheetName = escapeXml(sheetName.slice(0, 31) || "Performance OS");
+  return buildZipFile([
+    {
+      name: "[Content_Types].xml",
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>`,
+    },
+    {
+      name: "_rels/.rels",
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>`,
+    },
+    {
+      name: "xl/workbook.xml",
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${safeSheetName}" sheetId="1" r:id="rId1"/></sheets></workbook>`,
+    },
+    {
+      name: "xl/_rels/workbook.xml.rels",
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>`,
+    },
+    {
+      name: "xl/worksheets/sheet1.xml",
+      content: worksheetXmlFromRows(rows),
+    },
+  ]);
+}
+
+function exportArchiveRows(rows: ArchiveExportRow[], filenameBase: string, format: "csv" | "xlsx") {
+  if (!rows.length) return;
+  if (format === "csv") {
+    downloadArchiveBlob(new Blob([archiveRowsToCsv(rows)], { type: "text/csv;charset=utf-8" }), `${filenameBase}.csv`);
+    return;
+  }
+  downloadArchiveBlob(
+    new Blob([buildArchiveXlsx(rows, filenameBase)], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" }),
+    `${filenameBase}.xlsx`,
+  );
+}
+
+function ArchiveExportButtons({
+  rows,
+  filenameBase,
+}: Readonly<{
+  rows: ArchiveExportRow[];
+  filenameBase: string;
+}>) {
+  const disabled = rows.length === 0;
+  return (
+    <div className="flex flex-wrap gap-2">
+      <button
+        type="button"
+        onClick={() => exportArchiveRows(rows, `${filenameBase}-${todayString()}`, "csv")}
+        disabled={disabled}
+        className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Download className="h-4 w-4" />
+        Export CSV
+      </button>
+      <button
+        type="button"
+        onClick={() => exportArchiveRows(rows, `${filenameBase}-${todayString()}`, "xlsx")}
+        disabled={disabled}
+        className="accent-outline inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Download className="h-4 w-4" />
+        Export XLSX
+      </button>
+    </div>
+  );
+}
+
+function noteMetricNumber(notes: string, key: string) {
+  const match = notes.match(new RegExp(`${key}=([^|\\s]+)`, "i"));
+  return match?.[1] ? finiteNumberOrNull(match[1]) : null;
+}
+
+function workoutRunMiles(workout: WorkoutGroup) {
+  return (workout.details || []).reduce((total, row) => {
+    const miles = noteMetricNumber(String(row.notes || ""), "distance_miles");
+    return total + (miles ?? 0);
+  }, 0);
+}
+
+function workoutRunPace(workout: WorkoutGroup) {
+  const paces = (workout.details || [])
+    .map((row) => noteMetricNumber(String(row.notes || ""), "pace_min_per_mile"))
+    .filter((value): value is number => value !== null);
+  return paces.length ? paces.reduce((sum, value) => sum + value, 0) / paces.length : null;
 }
 
 type BackupDatasetPreview = { name: string; label: string; count: number };
@@ -8602,6 +8882,8 @@ function HistoryPage({
   trainingSummary,
   trainingSummaryStatus,
   muscleCoverage,
+  sleepEntries,
+  wearableMetrics,
   onSyncHevy,
   onExportRawHevy,
   onExportNormalizedTraining,
@@ -8635,6 +8917,8 @@ function HistoryPage({
   trainingSummary: TrainingSummaryResponse | null;
   trainingSummaryStatus: TrainingSummaryStatusResponse | null;
   muscleCoverage: MuscleCoverageResponse | null;
+  sleepEntries: SleepEntry[];
+  wearableMetrics: WearableMetricEntry[];
   onSyncHevy: () => void;
   onExportRawHevy: () => void;
   onExportNormalizedTraining: () => void;
@@ -8678,6 +8962,13 @@ function HistoryPage({
   const [dailyNutritionHistoryExpanded, setDailyNutritionHistoryExpanded] = useState(() => {
     if (typeof window === "undefined") return false;
     return window.localStorage.getItem(DAILY_NUTRITION_HISTORY_EXPANDED_KEY) === "true";
+  });
+  const [recoveryArchiveMetrics, setRecoveryArchiveMetrics] = useState({
+    sleepHours: true,
+    sleepScore: true,
+    recoveryScore: true,
+    restingHr: true,
+    hrv: true,
   });
   const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
   const dailyNutritionTrend = useMemo(() => nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
@@ -8762,7 +9053,174 @@ function HistoryPage({
   const optimizationBaselineInsights = arrayOrEmpty<OptimizationData["personal_baseline"]["insights"][number]>(optimizationBaseline.insights);
   const optimizationMacroDaily = arrayOrEmpty<OptimizationData["macro_adherence"]["daily"][number]>(optimizationMacroAdherence.daily);
   const optimizationMacroCorrelations = arrayOrEmpty<OptimizationData["macro_adherence"]["correlations"][number]>(optimizationMacroAdherence.correlations);
-  const muscleCoverageItems = Array.isArray(muscleCoverage?.items) ? muscleCoverage.items : [];
+  const muscleCoverageItems = useMemo(() => (Array.isArray(muscleCoverage?.items) ? muscleCoverage.items : []), [muscleCoverage]);
+  const canonicalWeightHistory = useMemo(() => cleanWeightHistory(bodyMetrics), [bodyMetrics]);
+  const estimatedMaintenanceCalories = finiteNumberOrNull(adaptiveRecommendation?.recommendedTargets?.maintenance_calories)
+    ?? finiteNumberOrNull(adaptiveRecommendation?.baselineRecommendedTargets?.maintenance_calories)
+    ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.calories);
+  const wearableByDate = useMemo(() => {
+    const map = new Map<string, WearableMetricEntry>();
+    sortWearableMetrics(wearableMetrics).forEach((metric) => {
+      if (metric.date) map.set(metric.date.slice(0, 10), metric);
+    });
+    return map;
+  }, [wearableMetrics]);
+  const sleepByDate = useMemo(() => {
+    const map = new Map<string, SleepEntry>();
+    sleepEntries.forEach((entry) => {
+      if (entry.date) map.set(entry.date.slice(0, 10), entry);
+    });
+    return map;
+  }, [sleepEntries]);
+  const recoveryByDate = useMemo(() => new Map(recoveryTrend.map((entry) => [entry.date.slice(0, 10), entry])), [recoveryTrend]);
+  const recoverySleepArchiveData = useMemo(() => {
+    const dates = Array.from(new Set([
+      ...Array.from(wearableByDate.keys()),
+      ...Array.from(sleepByDate.keys()),
+      ...Array.from(recoveryByDate.keys()),
+    ])).sort();
+    const rows = dates.map((date) => {
+      const wearable = wearableByDate.get(date);
+      const sleep = sleepByDate.get(date);
+      const recovery = recoveryByDate.get(date);
+      const sleepHours = wearableSleepHours(wearable) ?? (finiteNumberOrNull(sleep?.durationMinutes) !== null ? Number(sleep?.durationMinutes) / 60 : null);
+      const sleepScore = finiteNumberOrNull(wearable?.sleep_score);
+      const restingHr = finiteNumberOrNull(wearable?.resting_hr) ?? finiteNumberOrNull(sleep?.restingHeartRate);
+      const hrv = finiteNumberOrNull(wearable?.hrv) ?? finiteNumberOrNull(sleep?.hrv);
+      const breathingRate = finiteNumberOrNull(wearable?.breathing_rate);
+      const spo2 = finiteNumberOrNull(wearable?.spo2);
+      const recoveryScore = finiteNumberOrNull(recovery?.recovery_score);
+      const sicknessSignals = [
+        finiteNumberOrNull(wearable?.resting_hr_deviation) !== null && Number(wearable?.resting_hr_deviation) >= 5,
+        sleepHours !== null && sleepHours < 6.5,
+        sleepScore !== null && sleepScore < 68,
+        breathingRate !== null && breathingRate >= 22,
+        spo2 !== null && spo2 < 94,
+      ].filter(Boolean).length;
+      return {
+        date,
+        sleepHours: sleepHours !== null ? Number(sleepHours.toFixed(2)) : null,
+        sleepScore,
+        recoveryScore,
+        restingHr,
+        hrv,
+        remMinutes: finiteNumberOrNull(wearable?.rem_sleep_minutes) ?? finiteNumberOrNull(sleep?.remSleepMinutes),
+        deepMinutes: finiteNumberOrNull(wearable?.deep_sleep_minutes) ?? finiteNumberOrNull(sleep?.deepSleepMinutes),
+        lightMinutes: finiteNumberOrNull(wearable?.light_sleep_minutes) ?? finiteNumberOrNull(sleep?.lightSleepMinutes),
+        awakeMinutes: finiteNumberOrNull(wearable?.awake_minutes) ?? finiteNumberOrNull(sleep?.awakeMinutes),
+        sleepEfficiency: finiteNumberOrNull(wearable?.sleep_efficiency) ?? finiteNumberOrNull(sleep?.efficiencyPercent),
+        sicknessWarningCount: sicknessSignals,
+      };
+    });
+    return rows.map((row, index, all) => {
+      const sleepWindow = all.slice(Math.max(0, index - 6), index + 1);
+      const rollingSleepDebt = sleepWindow.reduce((sum, item) => sum + Math.max(8 - (item.sleepHours ?? 8), 0), 0);
+      const previous = all[index - 1];
+      return {
+        ...row,
+        rollingSleepDebt: Number(rollingSleepDebt.toFixed(2)),
+        sleepConsistencyDelta: row.sleepHours !== null && previous?.sleepHours !== null ? Number((row.sleepHours - previous.sleepHours).toFixed(2)) : null,
+      };
+    });
+  }, [recoveryByDate, sleepByDate, wearableByDate]);
+  const caloriesBodyArchiveData = useMemo(() => caloriesBodyTrend.map((entry) => {
+    const wearable = wearableByDate.get(entry.date);
+    const wearableCaloriesBurned = finiteNumberOrNull(wearable?.total_calories_burned) ?? finiteNumberOrNull(wearable?.calories_burned);
+    const estimatedSurplusDeficit = entry.calories !== null && wearableCaloriesBurned !== null
+      ? entry.calories - wearableCaloriesBurned
+      : entry.calories !== null && estimatedMaintenanceCalories !== null
+        ? entry.calories - estimatedMaintenanceCalories
+        : null;
+    const sevenDaysAgo = canonicalWeightHistory.find((weight) => weight.date === isoDateMinusDays(entry.date, 7));
+    const weeklyGainRate = entry.bodyweight7DayAverage !== null && sevenDaysAgo?.movingAverage7 !== null && sevenDaysAgo?.movingAverage7 !== undefined
+      ? Number((entry.bodyweight7DayAverage - sevenDaysAgo.movingAverage7).toFixed(2))
+      : null;
+    return {
+      ...entry,
+      wearableCaloriesBurned,
+      estimatedMaintenanceCalories,
+      estimatedSurplusDeficit,
+      adaptiveCalorieTarget: entry.targetCalories,
+      weeklyGainRate,
+    };
+  }), [caloriesBodyTrend, canonicalWeightHistory, estimatedMaintenanceCalories, wearableByDate]);
+  const strengthHistoryData = useMemo(() => {
+    const trend = strength?.trend;
+    const history = !Array.isArray(trend) && trend?.history ? trend.history : Array.isArray(trend) ? trend : [];
+    return history
+      .map((entry) => ({
+        date: String(entry.date || entry.week || "").slice(0, 10),
+        estimatedOneRepMax: finiteNumberOrNull(entry.estimated_1rm),
+        totalVolume: finiteNumberOrNull(entry.total_volume ?? entry.volume),
+        topWeight: finiteNumberOrNull(entry.best_set_weight ?? entry.top_weight),
+      }))
+      .filter((entry) => entry.date);
+  }, [strength]);
+  const trainingArchiveData = useMemo(() => {
+    const runByDate = new Map<string, { miles: number; paceValues: number[]; duration: number }>();
+    workoutHistory.forEach((workout) => {
+      const date = workout.date.slice(0, 10);
+      const current = runByDate.get(date) ?? { miles: 0, paceValues: [], duration: 0 };
+      const miles = workoutRunMiles(workout);
+      const pace = workoutRunPace(workout);
+      current.miles += miles;
+      current.duration += finiteNumberOrNull(workout.duration_minutes) ?? 0;
+      if (pace !== null) current.paceValues.push(pace);
+      runByDate.set(date, current);
+    });
+    const strengthByDate = new Map(strengthHistoryData.map((entry) => [entry.date, entry]));
+    const baseRows = trainingSummary?.items?.length
+      ? trainingSummary.items.map((item) => ({
+          date: item.period_start,
+          totalVolume: finiteNumberOrNull(item.total_volume),
+          hardSets: finiteNumberOrNull(item.total_sets),
+          workoutDuration: finiteNumberOrNull(item.duration_minutes),
+          workoutCount: finiteNumberOrNull(item.workout_count),
+        }))
+      : trainingVolume.map((item) => ({
+          date: item.date,
+          totalVolume: finiteNumberOrNull(item.volume),
+          hardSets: null,
+          workoutDuration: null,
+          workoutCount: null,
+        }));
+    return baseRows.map((row) => {
+      const run = runByDate.get(row.date);
+      const strengthPoint = strengthByDate.get(row.date);
+      const runPace = run?.paceValues.length ? run.paceValues.reduce((sum, value) => sum + value, 0) / run.paceValues.length : null;
+      const workload = (row.totalVolume ?? 0) / 1000 + (row.hardSets ?? 0) * 1.5 + (row.workoutDuration ?? run?.duration ?? 0) / 30;
+      const recoveryScore = finiteNumberOrNull(recoveryByDate.get(row.date)?.recovery_score);
+      return {
+        ...row,
+        runningMileage: run?.miles ? Number(run.miles.toFixed(2)) : null,
+        runPace,
+        estimatedWorkload: Number(workload.toFixed(2)),
+        estimatedOneRepMax: strengthPoint?.estimatedOneRepMax ?? null,
+        strengthTrendScore: strengthPoint?.estimatedOneRepMax ?? strengthPoint?.topWeight ?? null,
+        fatigueVsPerformance: recoveryScore !== null && row.totalVolume !== null ? Number((row.totalVolume / Math.max(recoveryScore, 1)).toFixed(2)) : null,
+        recoveryScore,
+        acuteChronicWorkload: null,
+        overreachingRisk: recoveryScore !== null && recoveryScore < 55 && workload > 20 ? "watch" : "normal",
+      };
+    });
+  }, [recoveryByDate, strengthHistoryData, trainingSummary, trainingVolume, workoutHistory]);
+  const recoveryArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
+    ...recoverySleepArchiveData.map((row) => ({ row_type: "graph_recovery_sleep", ...row })),
+    ...sleepEntries.map((row) => ({ row_type: "sleep_history", ...row })),
+    ...wearableMetrics.map((row) => ({ row_type: "wearable_history", ...row })),
+    ...recoveryTrend.map((row) => ({ row_type: "recovery_history", ...row })),
+  ], [recoverySleepArchiveData, recoveryTrend, sleepEntries, wearableMetrics]);
+  const caloriesBodyArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
+    ...caloriesBodyArchiveData.map((row) => ({ row_type: "graph_calorie_body", ...row })),
+    ...nutritionHistory.map((row) => ({ row_type: "nutrition_history", ...row })),
+    ...bodyMetrics.map((row) => ({ row_type: "body_metric_history", ...row })),
+  ], [bodyMetrics, caloriesBodyArchiveData, nutritionHistory]);
+  const trainingArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
+    ...trainingArchiveData.map((row) => ({ row_type: "graph_training_performance", ...row })),
+    ...workoutHistory.map((row) => ({ row_type: "workout_history", date: row.date, workout_id: row.workout_id, workout_type: row.workout_type, classification: row.classification, total_sets: row.total_sets, total_volume: row.total_volume, duration_minutes: row.duration_minutes, source: row.source })),
+    ...muscleCoverageItems.map((row) => ({ row_type: "muscle_coverage", ...row })),
+    ...strengthHistoryData.map((row) => ({ row_type: "strength_trend", ...row })),
+  ], [muscleCoverageItems, strengthHistoryData, trainingArchiveData, workoutHistory]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -8988,6 +9446,231 @@ function HistoryPage({
 
   return (
     <div className="flex flex-col gap-4">
+      <Card className="order-1">
+        <SectionHeader
+          eyebrow="Recovery + Sleep Analytics"
+          title="Wearable Recovery Timeline"
+          action={<ArchiveExportButtons rows={recoveryArchiveExportRows} filenameBase="performance-os-recovery-sleep-archive" />}
+        />
+        <div className="space-y-4">
+          <div className="flex flex-wrap gap-2">
+            {[
+              ["sleepHours", "Sleep duration", "#60a5fa"],
+              ["sleepScore", "Sleep quality", "#a78bfa"],
+              ["recoveryScore", "Recovery readiness", "#34d399"],
+              ["restingHr", "Resting HR", "#fb7185"],
+              ["hrv", "HRV", "#fbbf24"],
+            ].map(([key, label, color]) => {
+              const metricKey = key as keyof typeof recoveryArchiveMetrics;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setRecoveryArchiveMetrics((state) => ({ ...state, [metricKey]: !state[metricKey] }))}
+                  className={cx(
+                    "inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition",
+                    recoveryArchiveMetrics[metricKey] ? "border-white/15 bg-white/[0.065] text-white" : "border-white/10 bg-white/[0.02] text-zinc-500 hover:text-zinc-300",
+                  )}
+                >
+                  <span className="h-2 w-4 rounded-full" style={{ backgroundColor: color }} />
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          {recoverySleepArchiveData.length ? (
+            <ChartFrame className="h-[360px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={recoverySleepArchiveData.slice(-120)}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
+                  <YAxis yAxisId="score" domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} width={42} />
+                  <YAxis yAxisId="sleep" orientation="right" domain={[0, 10]} stroke="#71717a" tickLine={false} axisLine={false} width={36} />
+                  <YAxis yAxisId="heart" hide domain={["dataMin - 5", "dataMax + 5"]} />
+                  <YAxis yAxisId="hrv" hide domain={["dataMin - 5", "dataMax + 5"]} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  {recoveryArchiveMetrics.sleepHours ? <Line yAxisId="sleep" dataKey="sleepHours" name="Sleep duration" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls /> : null}
+                  {recoveryArchiveMetrics.sleepScore ? <Line yAxisId="score" dataKey="sleepScore" name="Sleep quality" stroke="#a78bfa" strokeWidth={2} dot={false} connectNulls /> : null}
+                  {recoveryArchiveMetrics.recoveryScore ? <Line yAxisId="score" dataKey="recoveryScore" name="Recovery readiness" stroke="#34d399" strokeWidth={3} dot={false} connectNulls /> : null}
+                  {recoveryArchiveMetrics.restingHr ? <Line yAxisId="heart" dataKey="restingHr" name="Resting HR" stroke="#fb7185" strokeWidth={2} dot={false} connectNulls /> : null}
+                  {recoveryArchiveMetrics.hrv ? <Line yAxisId="hrv" dataKey="hrv" name="HRV" stroke="#fbbf24" strokeWidth={2} dot={false} connectNulls /> : null}
+                  <Line yAxisId="sleep" dataKey="rollingSleepDebt" name="7-day sleep debt" stroke="#f97316" strokeWidth={1.5} strokeDasharray="4 4" dot={false} connectNulls />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          ) : (
+            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
+              Google Health / Fitbit recovery, sleep, HR, and HRV history will appear here after wearable sync.
+            </div>
+          )}
+          <div className="grid gap-3 md:grid-cols-4">
+            {[
+              ["Sleep debt", recoverySleepArchiveData.at(-1)?.rollingSleepDebt !== undefined ? `${recoverySleepArchiveData.at(-1)?.rollingSleepDebt}h` : "--", "Rolling 7-day shortfall vs 8h"],
+              ["Sickness flags", `${recoverySleepArchiveData.filter((row) => row.sicknessWarningCount > 0).length}`, "Days with at least one recovery stress signal"],
+              ["Trend direction", recoverySleepArchiveData.length >= 2 && (recoverySleepArchiveData.at(-1)?.recoveryScore ?? 0) > (recoverySleepArchiveData.at(-7)?.recoveryScore ?? recoverySleepArchiveData.at(0)?.recoveryScore ?? 0) ? "Improving" : "Learning", "Recent recovery slope"],
+              ["History rows", `${recoveryArchiveExportRows.length}`, "Rows included in section export"],
+            ].map(([label, value, detail]) => (
+              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                <p className="mt-1 text-lg font-semibold text-white">{value}</p>
+                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+              </div>
+            ))}
+          </div>
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+                <p className="mt-1 text-sm font-semibold text-white">Recovery, sleep, wearable, and sickness-warning rows</p>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              {recoverySleepArchiveData.length ? <DataTable rows={recoverySleepArchiveData.slice(-20).reverse()} /> : <p className="text-sm text-zinc-400">No recovery archive rows yet.</p>}
+              {wearableMetrics.length ? <DataTable rows={wearableMetrics.slice(-10).reverse()} /> : null}
+              {sleepEntries.length ? <DataTable rows={sleepEntries.slice(-10).reverse()} /> : null}
+              {recoveryTrend.length ? <DataTable rows={recoveryTrend.slice(-10).reverse()} /> : null}
+            </div>
+          </details>
+        </div>
+      </Card>
+
+      <Card className="order-2">
+        <SectionHeader
+          eyebrow="Calories / Bodyweight / Body Fat"
+          title="Energy Balance and Body Composition"
+          action={<ArchiveExportButtons rows={caloriesBodyArchiveExportRows} filenameBase="performance-os-calories-body-archive" />}
+        />
+        <div className="space-y-4">
+          {caloriesBodyArchiveData.length ? (
+            <ChartFrame className="h-[360px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={caloriesBodyArchiveData.slice(-120)}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
+                  <YAxis yAxisId="calories" stroke="#71717a" tickLine={false} axisLine={false} width={50} />
+                  <YAxis yAxisId="weight" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={44} domain={["dataMin - 2", "dataMax + 2"]} />
+                  <YAxis yAxisId="bodyFat" hide domain={["dataMin - 1", "dataMax + 1"]} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <Line yAxisId="calories" dataKey="calories7DayAverage" name="7-day calorie intake" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls />
+                  <Line yAxisId="calories" dataKey="wearableCaloriesBurned" name="Wearable calories burned" stroke="#34d399" strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="calories" dataKey="estimatedMaintenanceCalories" name="Estimated maintenance" stroke="#fbbf24" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
+                  <Line yAxisId="calories" dataKey="adaptiveCalorieTarget" name="Adaptive calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="3 4" dot={false} connectNulls />
+                  <Line yAxisId="weight" dataKey="bodyweight" name="Bodyweight" stroke="rgba(251,146,60,0.38)" strokeWidth={1.5} dot={false} connectNulls />
+                  <Line yAxisId="weight" dataKey="bodyweight7DayAverage" name="Rolling bodyweight" stroke="#fb923c" strokeWidth={3} dot={false} connectNulls />
+                  <Line yAxisId="bodyFat" dataKey="bodyFat7PointAverage" name="Body fat %" stroke="#f472b6" strokeWidth={2} dot={false} connectNulls />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          ) : (
+            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
+              Nutrition, bodyweight, and wearable calorie trend data will appear once logs are available.
+            </div>
+          )}
+          <div className="grid gap-3 md:grid-cols-4">
+            {[
+              ["Weekly gain rate", formatSignedAnalyticsNumber(caloriesBodyArchiveData.at(-1)?.weeklyGainRate, " lb", 2), "Rolling bodyweight response"],
+              ["Estimated surplus", formatSignedAnalyticsNumber(caloriesBodyArchiveData.at(-1)?.estimatedSurplusDeficit, " kcal"), "Intake vs wearable burn or maintenance"],
+              ["Adaptive target", formatAnalyticsNumber(caloriesBodyArchiveData.at(-1)?.adaptiveCalorieTarget, " kcal"), "Saved target trend"],
+              ["Export rows", `${caloriesBodyArchiveExportRows.length}`, "Graph plus historical records"],
+            ].map(([label, value, detail]) => (
+              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                <p className="mt-1 text-lg font-semibold text-white">{value}</p>
+                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+              </div>
+            ))}
+          </div>
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+                <p className="mt-1 text-sm font-semibold text-white">Nutrition, bodyweight, body composition, and target adjustment rows</p>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4 space-y-4">
+              {excludeNutritionError ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 px-3 py-2 text-sm text-red-100">{excludeNutritionError}</p> : null}
+              {nutritionHistory.length ? <DailyNutritionHistoryTable rows={nutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} /> : <p className="text-sm text-zinc-400">No nutrition history yet.</p>}
+              {bodyMetrics.length ? <DataTable rows={bodyMetrics.slice(-20).reverse()} /> : null}
+            </div>
+          </details>
+        </div>
+      </Card>
+
+      <Card className="order-3">
+        <SectionHeader
+          eyebrow="Training Performance"
+          title="Workload, Strength, and Fatigue Archive"
+          action={<ArchiveExportButtons rows={trainingArchiveExportRows} filenameBase="performance-os-training-performance-archive" />}
+        />
+        <div className="space-y-4">
+          {trainingArchiveData.length ? (
+            <ChartFrame className="h-[360px]">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={trainingArchiveData.slice(-120)}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
+                  <YAxis yAxisId="volume" stroke="#71717a" tickLine={false} axisLine={false} width={54} />
+                  <YAxis yAxisId="workload" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={42} />
+                  <YAxis yAxisId="pace" hide />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <Line yAxisId="volume" dataKey="totalVolume" name="Total training volume" stroke="var(--accent-primary)" strokeWidth={3} dot={false} connectNulls />
+                  <Line yAxisId="workload" dataKey="hardSets" name="Hard sets" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="workload" dataKey="runningMileage" name="Running mileage" stroke="#60a5fa" strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="workload" dataKey="workoutDuration" name="Workout duration" stroke="#a78bfa" strokeWidth={2} dot={false} connectNulls />
+                  <Line yAxisId="workload" dataKey="estimatedWorkload" name="Estimated workload" stroke="#34d399" strokeWidth={3} dot={false} connectNulls />
+                  <Line yAxisId="pace" dataKey="runPace" name="Run pace" stroke="#f472b6" strokeWidth={2} dot={false} connectNulls />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          ) : (
+            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
+              Training performance graphs will appear after Hevy/manual/Strava history is available.
+            </div>
+          )}
+          <div className="grid gap-3 md:grid-cols-4">
+            {[
+              ["Training monotony", trainingArchiveData.length >= 4 ? "Tracked" : "Learning", "Requires several workload periods"],
+              ["ACWR", trainingArchiveData.at(-1)?.acuteChronicWorkload ?? "--", "Acute vs chronic workload placeholder"],
+              ["Overreaching risk", trainingArchiveData.at(-1)?.overreachingRisk ?? "learning", "Fatigue vs workload context"],
+              ["Performance slope", formatAnalyticsNumber(trainingArchiveData.at(-1)?.strengthTrendScore), "Selected strength trend"],
+            ].map(([label, value, detail]) => (
+              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                <p className="mt-1 text-lg font-semibold capitalize text-white">{value}</p>
+                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+              </div>
+            ))}
+          </div>
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+                <p className="mt-1 text-sm font-semibold text-white">Workouts, PR trend, muscle coverage, and workload rows</p>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4 grid gap-4 xl:grid-cols-2">
+              {trainingArchiveData.length ? <DataTable rows={trainingArchiveData.slice(-20).reverse()} /> : null}
+              {workoutHistory.length ? <DataTable rows={workoutHistory.slice(-10).map((workout) => ({ date: workout.date, workout_type: workout.workout_type, classification: workout.classification, total_sets: workout.total_sets, total_volume: workout.total_volume, duration_minutes: workout.duration_minutes, source: workout.source })).reverse()} /> : null}
+              {muscleCoverageItems.length ? <DataTable rows={muscleCoverageItems} /> : null}
+              {strengthHistoryData.length ? <DataTable rows={strengthHistoryData.slice(-20).reverse()} /> : null}
+            </div>
+          </details>
+        </div>
+      </Card>
+
+      <details className="group order-[80] rounded-lg border border-white/10 bg-zinc-950/70 p-5 shadow-2xl shadow-black/20 backdrop-blur">
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+          <div>
+            <p className="accent-text mb-1 text-xs font-semibold uppercase tracking-[0.18em]">Management</p>
+            <h2 className="text-lg font-semibold text-white">Detailed Tables, Backups, and Maintenance Tools</h2>
+            <p className="mt-1 text-sm text-zinc-500">Raw archive controls stay available here without taking over the analytics view.</p>
+          </div>
+          <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+        </summary>
+        <div className="mt-4 flex flex-col gap-4">
       <Card className="order-[40]">
         <SectionHeader
           eyebrow="Backup"
@@ -9715,6 +10398,8 @@ function HistoryPage({
           setMuscleTrendMetric={setMuscleTrendMetric}
         />
       </div>
+        </div>
+      </details>
     </div>
   );
 }
@@ -10862,12 +11547,13 @@ function IntegrationHealthGrid({
               ) : null}
               {card.id === "google_health" && card.metadata ? (
                 <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
+                  {card.metadata.connected !== undefined ? <p>Connected: <span className="text-zinc-300">{card.metadata.connected ? "yes" : "no"}</span></p> : null}
                   <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
-                  <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Imported: <span className="text-zinc-300">{card.metadata.imported_metrics ?? card.metadata.last_imported_count ?? 0}</span></p>
-                  {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status}</span></p> : null}
+                  <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Rows saved: <span className="text-zinc-300">{card.metadata.rows_saved ?? card.metadata.imported_metrics ?? card.metadata.last_imported_count ?? 0}</span></p>
+                  {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status === "ok" ? "successful" : card.metadata.last_status}</span></p> : null}
                   {card.metadata.latest_record ? <p>Latest daily metric: <span className="text-zinc-300">{card.metadata.latest_record}</span></p> : null}
-                  {card.metadata.last_warning ? <p className="text-amber-100">Last warning: {card.metadata.last_warning}</p> : null}
-                  {card.metadata.last_error ? <p className="text-amber-100">Last error: {card.metadata.last_error}</p> : null}
+                  {card.metadata.last_warning ? <p className="text-amber-100">Warnings: {card.metadata.last_warning}</p> : null}
+                  {card.metadata.last_error && card.metadata.last_status !== "ok" ? <p className="text-amber-100">Last error: {card.metadata.last_error}</p> : null}
                 </div>
               ) : null}
               {card.id === "fitbit" && card.metadata ? (
@@ -11676,12 +12362,36 @@ function SettingsPage({
   const stravaConnected = stravaStatus === "Connected";
   const hevyStatus = settings?.statuses?.hevy_api_key ?? settingsHealthCard(settings, "hevy")?.status ?? "Not configured";
   const withingsStatus = settings?.statuses?.withings ?? settingsHealthCard(settings, "withings")?.status ?? "Not configured";
-  const googleHealthStatus = settings?.statuses?.google_health ?? settingsHealthCard(settings, "google_health")?.label ?? "Not configured";
+  const googleHealthService = settingsService(settings, "google_health");
+  const googleHealthCard = settingsHealthCard(settings, "google_health");
+  const googleHealthStatus = settings?.statuses?.google_health ?? googleHealthCard?.label ?? "Not configured";
   const googleHealthConnected = googleHealthStatus === "Connected";
-  const googleHealthConfigured = Boolean(settingsService(settings, "google_health")?.configured ?? settingsHealthCard(settings, "google_health")?.metadata?.configured);
-  const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; details?: { last_error?: string } } | undefined;
-  const googleHealthError = String(settingsService(settings, "google_health")?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
-  const googleHealthWarning = String(settingsService(settings, "google_health")?.last_warning || settingsHealthCard(settings, "google_health")?.metadata?.last_warning || "");
+  const googleHealthConfigured = Boolean(googleHealthService?.configured ?? googleHealthCard?.metadata?.configured);
+  const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; last_warning?: string; last_status?: string; rows_saved?: number; optional_metric_warnings?: string[]; details?: { last_error?: string } } | undefined;
+  const googleHealthLastStatus = String(googleHealthService?.last_status || googleHealthCard?.metadata?.last_status || googleHealthDiagnostic?.last_status || "");
+  const googleHealthRowsSaved = finiteNumberOrNull(googleHealthService?.rows_saved)
+    ?? finiteNumberOrNull(googleHealthCard?.metadata?.rows_saved)
+    ?? finiteNumberOrNull(googleHealthService?.imported_metrics)
+    ?? finiteNumberOrNull(googleHealthCard?.metadata?.imported_metrics)
+    ?? finiteNumberOrNull(googleHealthDiagnostic?.rows_saved);
+  const googleHealthOptionalWarnings = [
+    ...(Array.isArray(googleHealthService?.optional_metric_warnings) ? googleHealthService.optional_metric_warnings : []),
+    ...(Array.isArray(googleHealthCard?.metadata?.optional_metric_warnings) ? googleHealthCard.metadata.optional_metric_warnings : []),
+    ...(Array.isArray(googleHealthDiagnostic?.optional_metric_warnings) ? googleHealthDiagnostic.optional_metric_warnings : []),
+    String(googleHealthService?.last_warning || googleHealthCard?.metadata?.last_warning || googleHealthDiagnostic?.last_warning || ""),
+  ].map((item) => String(item || "").trim()).filter(Boolean);
+  const googleHealthWarning = Array.from(new Set(googleHealthOptionalWarnings))[0] ?? "";
+  const rawGoogleHealthError = String(googleHealthService?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
+  const googleHealthError = googleHealthLastStatus === "ok" ? "" : rawGoogleHealthError;
+  const googleHealthDescription = !googleHealthConfigured
+    ? "Google Health connection is not configured yet. Add backend OAuth env vars, then redeploy the API."
+    : googleHealthLastStatus === "ok"
+      ? `Last sync successful${googleHealthRowsSaved !== null ? ` · Rows saved: ${Math.round(googleHealthRowsSaved).toLocaleString()}` : ""}${googleHealthWarning ? ` · Warning: ${googleHealthWarning}` : ""}`
+      : googleHealthError
+        ? `Last sync error: ${googleHealthError}`
+        : googleHealthWarning
+          ? `Last sync successful with warning: ${googleHealthWarning}`
+          : googleHealthService?.message ?? "Daily wearable metrics sync for readiness signals.";
   const fitbitStatus = settings?.statuses?.fitbit ?? settingsHealthCard(settings, "fitbit")?.label ?? "Not configured";
   const fitbitConnected = fitbitStatus === "Connected";
   const fitbitConfigured = Boolean(settingsService(settings, "fitbit")?.configured ?? settingsHealthCard(settings, "fitbit")?.metadata?.configured);
@@ -11720,7 +12430,7 @@ function SettingsPage({
           />
           <SettingsConnectionCard
             title="Google Health"
-            description={!googleHealthConfigured ? "Google Health connection is not configured yet. Add backend OAuth env vars, then redeploy the API." : googleHealthError ? `Last sync error: ${googleHealthError}` : googleHealthWarning ? `Last sync warning: ${googleHealthWarning}` : settingsService(settings, "google_health")?.message ?? "Daily wearable metrics sync for readiness signals."}
+            description={googleHealthDescription}
             status={googleHealthStatus}
             lastSync={settingsLastSync(settings, "google_health")}
             actions={[
@@ -14415,6 +15125,8 @@ function HomeContent() {
         trainingSummary={trainingSummary}
         trainingSummaryStatus={trainingSummaryStatus}
         muscleCoverage={muscleCoverage}
+        sleepEntries={sleepEntries}
+        wearableMetrics={wearableMetrics}
         onSyncHevy={() => {
           void syncHevyNow(true);
         }}
@@ -14556,12 +15268,14 @@ function HomeContent() {
           setApiError(null);
           setMessage("Google Health sync started. Dashboard stays usable while metrics refresh.");
           try {
-            const result = await apiSend<{ status: string; message?: string; imported_metrics?: number; fetched_days?: number; latest_record?: string; warnings?: string[]; storage_errors?: unknown[] }>("/api/google-health/sync", "POST", { days: 14 });
+            const result = await apiSend<{ status: string; message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; latest_record?: string; warnings?: string[]; optional_metric_warnings?: string[]; required_metric_failures?: string[]; storage_errors?: unknown[] }>("/api/google-health/sync", "POST", { days: 14 });
             if (result.status === "error") {
               throw new Error(result.message ?? "Google Health sync failed.");
             }
-            const warningText = result.warnings?.length ? ` ${result.warnings[0]}` : "";
-            setMessage(`${result.message ?? `Google Health sync complete: ${result.imported_metrics ?? 0} daily row(s) saved.`}${warningText}`);
+            const rowsSaved = result.rows_saved ?? result.imported_metrics ?? 0;
+            const warning = result.optional_metric_warnings?.[0] ?? result.warnings?.[0] ?? "";
+            const warningText = warning ? ` Warning: ${warning}` : "";
+            setMessage(`${result.message ?? `Google Health sync complete: ${rowsSaved} daily row(s) saved.`}${warningText}`);
             void refreshAll({ allowColdStartRetry: false });
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "Google Health sync failed.");

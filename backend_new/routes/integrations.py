@@ -369,7 +369,11 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "last_warning_count": sync.get("last_warning_count", 0),
         "last_storage_error_count": sync.get("last_storage_error_count", 0),
         "last_imported_count": sync.get("last_imported_count", 0),
+        "rows_saved": sync.get("rows_saved", sync.get("last_imported_count", 0)),
         "last_fetched_count": sync.get("last_fetched_count", 0),
+        "optional_metric_warnings": sync.get("optional_metric_warnings", []),
+        "required_metric_failures": sync.get("required_metric_failures", []),
+        "data_sources": sync.get("data_sources", {}),
         "needs_reconnect": needs_reconnect,
     }
 
@@ -1143,6 +1147,11 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "last_warning": google_health_meta.get("last_warning", ""),
             "last_status": google_health_meta.get("last_status", ""),
             "last_message": google_health_meta.get("last_message", ""),
+            "rows_saved": google_health_meta.get("rows_saved", google_health_meta.get("last_imported_count", 0)),
+            "imported_metrics": google_health_meta.get("last_imported_count", 0),
+            "fetched_days": google_health_meta.get("last_fetched_count", 0),
+            "optional_metric_warnings": google_health_meta.get("optional_metric_warnings", []),
+            "required_metric_failures": google_health_meta.get("required_metric_failures", []),
         },
         "fitbit": {
             "configured": base["fitbit"]["configured"],
@@ -1885,12 +1894,15 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         saved_records = _save_google_health_records(fetched.get("records") or {})
         latest_record = max((str(row.get("date") or "") for row in saved_rows), default="")
         sync_errors = list(saved_records.get("errors") or [])
-        sync_warnings = list(fetched.get("warnings") or [])
+        optional_metric_warnings = list(dict.fromkeys(str(item) for item in (fetched.get("optional_metric_warnings") or []) if str(item or "").strip()))
+        required_metric_failures = list(dict.fromkeys(str(item) for item in (fetched.get("required_metric_failures") or []) if str(item or "").strip()))
+        sync_warnings = list(dict.fromkeys(str(item) for item in (fetched.get("warnings") or []) if str(item or "").strip()))
+        rows_saved = len(saved_rows)
         sync_status = "partial" if sync_errors else "ok"
         sync_message = (
-            f"Google Health sync completed with storage warnings: {len(saved_rows)} daily row(s) saved."
+            f"Google Health sync completed with storage warnings: {rows_saved} daily row(s) saved."
             if sync_errors
-            else f"Google Health sync complete: {len(saved_rows)} daily row(s) saved."
+            else f"Google Health sync complete: {rows_saved} daily row(s) saved."
         )
         sync_state = _save_google_health_sync_state(
             {
@@ -1900,7 +1912,8 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "last_error": "; ".join(str(error.get("error") or "") for error in sync_errors[:2]),
                 "last_warning": "; ".join(sync_warnings[:2]),
                 "needs_reconnect": False,
-                "last_imported_count": len(saved_rows),
+                "last_imported_count": rows_saved,
+                "rows_saved": rows_saved,
                 "last_fetched_count": int(fetched.get("raw_bucket_count") or len(fetched.get("items") or [])),
                 "latest_record": latest_record,
                 "start_date": start_date,
@@ -1908,13 +1921,16 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "last_record_counts": saved_records.get("counts", {}),
                 "last_warning_count": len(sync_warnings),
                 "last_storage_error_count": len(sync_errors),
+                "optional_metric_warnings": optional_metric_warnings,
+                "required_metric_failures": required_metric_failures,
+                "data_sources": fetched.get("data_sources") or {},
             }
         )
         logger.info(
             "[google_health] sync finished run_id=%s status=%s imported=%s fetched_days=%s warnings=%s storage_errors=%s latest=%s",
             sync_run_id,
             sync_status,
-            len(saved_rows),
+            rows_saved,
             len(fetched.get("items") or []),
             len(sync_warnings),
             len(sync_errors),
@@ -1932,22 +1948,30 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "completed_at": now,
                 "start_date": start_date,
                 "end_date": end_date,
-                "imported_metrics": len(saved_rows),
+                "imported_metrics": rows_saved,
+                "rows_saved": rows_saved,
                 "record_counts": saved_records.get("counts", {}),
                 "warnings": sync_warnings,
+                "optional_metric_warnings": optional_metric_warnings,
+                "required_metric_failures": required_metric_failures,
                 "storage_errors": sync_errors[:5],
+                "data_sources": fetched.get("data_sources") or {},
             },
         )
         return {
             "status": sync_status,
             "message": sync_message,
-            "imported_metrics": len(saved_rows),
+            "rows_saved": rows_saved,
+            "imported_metrics": rows_saved,
             "imported_records": saved_records.get("counts", {}),
             "fetched_days": len(fetched.get("items") or []),
             "latest_record": latest_record,
             "last_synced_at": sync_state.get("last_synced_at", now),
             "warnings": sync_warnings,
+            "optional_metric_warnings": optional_metric_warnings,
+            "required_metric_failures": required_metric_failures,
             "storage_errors": sync_errors[:5],
+            "data_sources": fetched.get("data_sources") or {},
             "date_range": {"start_date": start_date, "end_date": end_date},
         }
     except Exception as exc:
@@ -1970,7 +1994,16 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "error": message,
             },
         )
-        return {"status": "error", "message": message, "imported_metrics": 0, "fetched_days": 0, "date_range": {"start_date": start_date, "end_date": end_date}}
+        return {
+            "status": "error",
+            "message": message,
+            "rows_saved": 0,
+            "imported_metrics": 0,
+            "fetched_days": 0,
+            "required_metric_failures": [message],
+            "optional_metric_warnings": [],
+            "date_range": {"start_date": start_date, "end_date": end_date},
+        }
 
 
 @router.post("/api/google-health/disconnect")

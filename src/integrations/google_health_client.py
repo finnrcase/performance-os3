@@ -38,6 +38,11 @@ GOOGLE_HEALTH_CORE_AGGREGATE_TYPES = [
     "com.google.active_minutes",
     "com.google.sleep.segment",
 ]
+GOOGLE_HEALTH_HEART_RATE_AGGREGATE_TYPES = [
+    "com.google.heart_rate.summary",
+    "com.google.heart_rate.bpm",
+]
+GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING = "Optional heart rate summary unavailable from Google Health."
 GOOGLE_HEALTH_OPTIONAL_AGGREGATE_TYPE_BATCHES = [
     [
         "com.google.heart_rate.summary",
@@ -222,6 +227,18 @@ def _post_json(url: str, body: dict[str, Any], access_token: str, *, context: st
             "Content-Type": "application/json",
         },
         method="POST",
+    )
+    return _request_json(request, context=context, timeout_seconds=timeout_seconds)
+
+
+def _get_json(url: str, access_token: str, *, context: str, timeout_seconds: int = 20) -> dict[str, Any]:
+    request = Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {access_token}",
+        },
+        method="GET",
     )
     return _request_json(request, context=context, timeout_seconds=timeout_seconds)
 
@@ -604,6 +621,66 @@ def _fetch_aggregate_batch(access_token: str, data_types: list[str], start_text:
     )
 
 
+def _data_source_type_names(response: dict[str, Any]) -> set[str]:
+    names: set[str] = set()
+    for source in response.get("dataSource") or []:
+        if not isinstance(source, dict):
+            continue
+        data_type = source.get("dataType") if isinstance(source.get("dataType"), dict) else {}
+        for candidate in (
+            data_type.get("name"),
+            source.get("dataTypeName"),
+            source.get("dataStreamId"),
+            source.get("dataStreamName"),
+        ):
+            text = str(candidate or "").strip()
+            if text:
+                names.add(text)
+    return names
+
+
+def list_data_sources(access_token: str) -> dict[str, Any]:
+    """Return available Google Fitness data sources for optional metric gating."""
+    if not str(access_token or "").strip():
+        return {"status": "missing_access_token", "data_sources": [], "data_type_names": []}
+    response = _get_json(
+        f"{api_base_url()}/users/me/dataSources",
+        access_token,
+        context="Google Health data source listing failed",
+    )
+    data_sources = response.get("dataSource") or []
+    data_type_names = sorted(_data_source_type_names(response))
+    logger.info(
+        "[google_health] listed data sources count=%s data_types=%s",
+        len(data_sources),
+        len(data_type_names),
+    )
+    return {"status": "ok", "data_sources": data_sources, "data_type_names": data_type_names}
+
+
+def _is_heart_rate_batch(batch: list[str]) -> bool:
+    return any("heart_rate" in str(data_type).lower() for data_type in batch)
+
+
+def _heart_rate_optional_batch(data_type_names: set[str]) -> list[str]:
+    lowered = {name.lower() for name in data_type_names}
+    if "com.google.heart_rate.summary" in lowered:
+        return ["com.google.heart_rate.summary"]
+    if "com.google.heart_rate.bpm" in lowered:
+        return ["com.google.heart_rate.bpm"]
+    if any("heart_rate" in name for name in lowered):
+        return ["com.google.heart_rate.bpm"]
+    return []
+
+
+def _optional_warning_for_batch(batch: list[str], exc: Exception | None = None) -> str:
+    if _is_heart_rate_batch(batch):
+        return GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING
+    if exc is None:
+        return f"Optional Google Health metric batch unavailable: {', '.join(batch)}."
+    return f"Skipped optional Google Health metric batch ({', '.join(batch)}): {exc}"
+
+
 def _with_resting_hr_baselines(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     history: list[float] = []
     enriched: list[dict[str, Any]] = []
@@ -746,17 +823,46 @@ def fetch_daily_metrics(
     start_text = _date_text(start_date, date.fromisoformat(end_text) - timedelta(days=13))
     merged_buckets: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
+    optional_metric_warnings: list[str] = []
+    required_metric_failures: list[str] = []
     raw_bucket_count = 0
-    batches = aggregate_type_batches()
+    data_source_summary: dict[str, Any] = {"status": "not_checked", "data_type_names": []}
+    configured_aggregate_types = bool(os.getenv("GOOGLE_HEALTH_AGGREGATE_TYPES", "").strip())
+    if configured_aggregate_types:
+        batches = aggregate_type_batches()
+    else:
+        optional_batches = [batch.copy() for batch in GOOGLE_HEALTH_OPTIONAL_AGGREGATE_TYPE_BATCHES if not _is_heart_rate_batch(batch)]
+        try:
+            data_sources = list_data_sources(access_token)
+            source_types = set(data_sources.get("data_type_names") or [])
+            data_source_summary = {
+                "status": data_sources.get("status", "ok"),
+                "data_type_names": sorted(source_types),
+                "data_source_count": len(data_sources.get("data_sources") or []),
+            }
+            heart_batch = _heart_rate_optional_batch(source_types)
+            if not heart_batch:
+                optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
+            batches = [
+                GOOGLE_HEALTH_CORE_AGGREGATE_TYPES.copy(),
+                *([heart_batch] if heart_batch else []),
+                *optional_batches,
+            ]
+        except GoogleHealthIntegrationError as exc:
+            logger.warning("[google_health] optional data source listing failed: %s", str(exc)[:500])
+            data_source_summary = {"status": "warning", "message": str(exc)}
+            optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
+            batches = [GOOGLE_HEALTH_CORE_AGGREGATE_TYPES.copy(), *optional_batches]
     for index, batch in enumerate(batches):
         try:
             response = _fetch_aggregate_batch(access_token, batch, start_text, end_text)
         except GoogleHealthIntegrationError as exc:
             if index == 0:
+                required_metric_failures.append(str(exc))
                 raise
-            warning = f"Skipped optional Google Health metric batch ({', '.join(batch)}): {exc}"
+            warning = _optional_warning_for_batch(batch, exc)
             logger.warning("[google_health] %s", warning)
-            warnings.append(warning)
+            optional_metric_warnings.append(warning)
             continue
         raw_bucket_count += len(response.get("bucket") or [])
         _merge_buckets(merged_buckets, response)
@@ -778,7 +884,12 @@ def fetch_daily_metrics(
         }
         for label, fields in missing_groups.items():
             if all(all(row.get(field) is None or str(row.get(field)).strip() == "" for field in fields) for row in items):
-                warnings.append(f"Missing Google Health metric group: {label}.")
+                if label == "resting heart rate":
+                    optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
+                else:
+                    warnings.append(f"Missing Google Health metric group: {label}.")
+    optional_metric_warnings = list(dict.fromkeys(optional_metric_warnings))
+    warnings = list(dict.fromkeys([*warnings, *optional_metric_warnings]))
     for warning in warnings:
         if warning.startswith("Missing") or warning.startswith("No Google Health"):
             logger.warning("[google_health] %s", warning)
@@ -798,6 +909,9 @@ def fetch_daily_metrics(
         "date_range": {"start_date": start_text, "end_date": end_text},
         "records": records,
         "warnings": warnings,
+        "optional_metric_warnings": optional_metric_warnings,
+        "required_metric_failures": required_metric_failures,
+        "data_sources": data_source_summary,
         "raw_bucket_count": raw_bucket_count,
     }
 
