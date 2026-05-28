@@ -3,7 +3,7 @@
 @property --startup-logo-visible {
   syntax: "<percentage>";
   inherits: false;
-  initial-value: 82%;
+  initial-value: 100%;
 }
 
 :root {
@@ -231,15 +231,33 @@ button {
 }
 
 .startup-logo-dissolve {
-  --startup-logo-visible: 82%;
-  width: fit-content;
-  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 0 var(--startup-logo-visible), rgba(0, 0, 0, 0.46) calc(var(--startup-logo-visible) + 8%), transparent calc(var(--startup-logo-visible) + 20%));
-  mask-image: radial-gradient(circle at 50% 50%, #000 0 var(--startup-logo-visible), rgba(0, 0, 0, 0.46) calc(var(--startup-logo-visible) + 8%), transparent calc(var(--startup-logo-visible) + 20%));
+  --startup-logo-visible: 100%;
   transform-origin: center;
-  will-change: opacity, clip-path, filter, transform;
+  overflow: visible;
+  will-change: opacity, filter, transform;
+}
+
+.startup-logo-shell {
+  width: min(70vw, 34vh, 320px);
+  max-width: calc(100vw - 3rem);
+  box-sizing: border-box;
+  padding: clamp(18px, 5vw, 34px);
+  display: grid;
+  place-items: center;
+}
+
+.startup-logo-image {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  object-fit: contain;
+  object-position: center;
 }
 
 .startup-screen.is-dissolving .startup-logo-dissolve {
+  -webkit-mask-image: radial-gradient(circle at 50% 50%, #000 0 var(--startup-logo-visible), rgba(0, 0, 0, 0.46) calc(var(--startup-logo-visible) + 8%), transparent calc(var(--startup-logo-visible) + 20%));
+  mask-image: radial-gradient(circle at 50% 50%, #000 0 var(--startup-logo-visible), rgba(0, 0, 0, 0.46) calc(var(--startup-logo-visible) + 8%), transparent calc(var(--startup-logo-visible) + 20%));
   animation: startup-logo-dissolve 760ms ease-out both;
 }
 
@@ -290,22 +308,19 @@ button {
 
 @keyframes startup-logo-dissolve {
   0% {
-    --startup-logo-visible: 82%;
-    clip-path: circle(78% at 50% 50%);
+    --startup-logo-visible: 100%;
     filter: blur(0);
     opacity: 1;
     transform: scale(1);
   }
   54% {
     --startup-logo-visible: 34%;
-    clip-path: circle(34% at 50% 50%);
     filter: blur(1px);
     opacity: 0.72;
     transform: scale(0.992);
   }
   100% {
     --startup-logo-visible: 0%;
-    clip-path: circle(4% at 50% 50%);
     filter: blur(5px);
     opacity: 0;
     transform: scale(0.985);

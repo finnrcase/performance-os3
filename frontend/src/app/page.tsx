@@ -1417,6 +1417,7 @@ type SettingsData = {
   hevy?: DiagnosticComponent;
   withings?: DiagnosticComponent;
   google_health?: DiagnosticComponent;
+  fitbit?: DiagnosticComponent;
   frontend?: DiagnosticComponent;
   other_integrations?: Record<string, DiagnosticComponent>;
   required_user_actions?: string[];
@@ -1425,6 +1426,67 @@ type SettingsData = {
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
   services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string }>;
+};
+
+type FitbitDebugStage = {
+  status: string;
+  message: string;
+};
+
+type FitbitDebugValue = {
+  label: string;
+  value: string;
+  raw?: string | number | null;
+  status: string;
+};
+
+type FitbitDebugPayload = {
+  status: string;
+  provider: "fitbit" | string;
+  checked_at: string;
+  message?: string;
+  connection_status: string;
+  configured: boolean;
+  connected: boolean;
+  oauth: {
+    token_status: string;
+    access_token_present: boolean;
+    refresh_token_present: boolean;
+    expires_at?: number | null;
+    granted_scopes: string[];
+    missing_scopes: string[];
+  };
+  sync: {
+    last_successful_sync?: string;
+    last_attempt_at?: string;
+    last_status?: string;
+    last_error?: string;
+    last_message?: string;
+    last_fetched_count?: number;
+    last_parsed_count?: number;
+    last_stored_count?: number;
+    latest_record?: string;
+  };
+  data_freshness: {
+    status: "green" | "yellow" | "red" | string;
+    label: string;
+    last_successful_sync?: string;
+    latest_stored_at?: string;
+    age_hours?: number | null;
+    stale?: boolean;
+    stale_message?: string;
+  };
+  latest_values: Record<string, FitbitDebugValue | undefined>;
+  pipeline: {
+    fetched?: FitbitDebugStage;
+    parsed?: FitbitDebugStage;
+    stored?: FitbitDebugStage;
+  };
+  logs: string[];
+  sync_run_id?: string;
+  imported_metrics?: number;
+  fetched_days?: number;
+  storage_errors?: unknown[];
 };
 
 type ApiConnectionLayer = {
@@ -1445,6 +1507,7 @@ type ApiConnectionTestResponse = {
   openai: ApiConnectionTestItem;
   withings: ApiConnectionTestItem;
   google_health?: ApiConnectionTestItem;
+  fitbit?: ApiConnectionTestItem;
 };
 
 type FormState = {
@@ -2392,14 +2455,14 @@ function StartupLoadingScreen({ dissolving }: Readonly<{ dissolving: boolean }>)
       <div className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(180deg,rgba(16,17,19,0.82)_0%,rgba(9,10,11,0.42)_42%,rgba(0,0,0,0.86)_100%)]" />
       <div className="relative flex min-h-dvh items-center justify-center px-6">
         <div className="-translate-y-[7vh] text-center">
-          <div className="startup-logo-dissolve mx-auto">
+          <div className="startup-logo-dissolve startup-logo-shell mx-auto">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/POSLOGO.png"
               alt="Performance OS"
-              width={176}
-              height={176}
-              className="startup-logo-glow h-32 w-32 object-contain sm:h-36 sm:w-36"
+              width={1254}
+              height={1254}
+              className="startup-logo-glow startup-logo-image"
             />
           </div>
           <div className="startup-loading-details">
@@ -10596,6 +10659,7 @@ function DiagnosticStatusDashboard({ settings }: Readonly<{ settings: SettingsDa
     ["hevy", "Hevy", settings.hevy],
     ["withings", "Withings", settings.withings],
     ["google_health", "Google Health", settings.google_health],
+    ["fitbit", "Fitbit", settings.fitbit],
   ];
   const other = Object.entries(settings.other_integrations ?? {}).map(([key, value]) => [key, key.replaceAll("_", " / "), value] as const);
   const cards = [...primary, ...other].filter(([id, , component]) => id !== "backend" && Boolean(component));
@@ -10797,11 +10861,12 @@ function ApiConnectionTestPanel({
   testing: boolean;
   onTest: () => void;
 }>) {
-  const cards: Array<{ id: "hevy" | "openai" | "withings" | "google_health"; title: string; description: string }> = [
+  const cards: Array<{ id: "hevy" | "openai" | "withings" | "google_health" | "fitbit"; title: string; description: string }> = [
     { id: "hevy", title: "Hevy", description: "API key and workout endpoint" },
     { id: "openai", title: "OpenAI / ChatGPT", description: "API key and lightweight API reachability" },
     { id: "withings", title: "Withings", description: "App credentials, OAuth token, scope, and body metrics API" },
     { id: "google_health", title: "Google Health", description: "OAuth token, scopes, and daily wearable sync readiness" },
+    { id: "fitbit", title: "Fitbit", description: "OAuth token, scopes, and wearable debug readiness" },
   ];
   return (
     <Card>
@@ -10861,6 +10926,146 @@ function ApiConnectionTestPanel({
           );
         })}
       </div>
+    </Card>
+  );
+}
+
+function fitbitFreshnessClass(status?: string) {
+  if (status === "green") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
+  if (status === "yellow") return "border-amber-300/25 bg-amber-300/10 text-amber-100";
+  if (status === "red") return "border-red-300/25 bg-red-300/10 text-red-100";
+  return "border-zinc-500/30 bg-zinc-500/10 text-zinc-300";
+}
+
+function fitbitStageClass(status?: string) {
+  const normalized = String(status || "").toLowerCase();
+  if (["ok", "success", "stored", "parsed"].includes(normalized)) return "border-emerald-300/20 bg-emerald-300/10 text-emerald-100";
+  if (["partial", "skipped", "not_run", "missing", "missing_scopes"].includes(normalized)) return "border-amber-300/20 bg-amber-300/10 text-amber-100";
+  if (["failed", "error"].includes(normalized)) return "border-red-300/20 bg-red-300/10 text-red-100";
+  return "border-zinc-500/30 bg-zinc-500/10 text-zinc-300";
+}
+
+function FitbitDebugPanel({
+  debug,
+  loading,
+  syncing,
+  onRefresh,
+  onForceSync,
+}: Readonly<{
+  debug: FitbitDebugPayload | null;
+  loading: boolean;
+  syncing: boolean;
+  onRefresh: () => void;
+  onForceSync: () => void;
+}>) {
+  const latestValueKeys = ["sleep_duration", "rem_sleep", "deep_sleep", "light_sleep", "resting_hr", "workout_hr", "calories_burned", "steps", "readiness"];
+  const stages: Array<[string, FitbitDebugStage | undefined]> = [
+    ["Fetched", debug?.pipeline.fetched],
+    ["Parsed", debug?.pipeline.parsed],
+    ["Stored", debug?.pipeline.stored],
+  ];
+  const freshness = debug?.data_freshness;
+  const sync = debug?.sync;
+  const oauth = debug?.oauth;
+  return (
+    <Card>
+      <SectionHeader
+        eyebrow="Integrations Debug"
+        title="Fitbit Debug"
+        action={
+          <div className="flex flex-wrap gap-2">
+            <button type="button" onClick={onRefresh} disabled={loading || syncing} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+              <RefreshCw className={cx("h-4 w-4", loading && "animate-spin")} />
+              Refresh
+            </button>
+            <button type="button" onClick={onForceSync} disabled={syncing} className="accent-bg inline-flex h-10 items-center gap-2 rounded-lg px-3 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
+              <RefreshCw className={cx("h-4 w-4", syncing && "animate-spin")} />
+              {syncing ? "Syncing..." : "Force Fitbit Sync"}
+            </button>
+          </div>
+        }
+      />
+      {!debug ? (
+        <p className="text-sm text-zinc-400">{loading ? "Loading Fitbit debug state..." : "Fitbit debug state has not loaded yet."}</p>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", fitbitFreshnessClass(freshness?.status))}>
+              Data Freshness: {freshness?.label ?? "Unknown"}
+            </span>
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", healthStatusClass(debug.connected ? "connected" : debug.configured ? "yellow" : "gray"))}>
+              {debug.connection_status}
+            </span>
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", fitbitStageClass(oauth?.token_status))}>
+              Token: {oauth?.token_status?.replaceAll("_", " ") || "missing"}
+            </span>
+          </div>
+          {freshness?.stale_message ? <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm text-amber-100">{freshness.stale_message}</p> : null}
+          {sync?.last_error ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 p-3 text-sm text-red-100">{sync.last_error}</p> : null}
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Last successful sync</p>
+              <p className="mt-2 text-sm font-semibold text-white">{sync?.last_successful_sync ? relativeSyncTime(sync.last_successful_sync) : "Not recorded"}</p>
+              {sync?.last_attempt_at ? <p className="mt-1 text-xs text-zinc-500">Last attempt {relativeSyncTime(sync.last_attempt_at)}</p> : null}
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Granted scopes</p>
+              <p className="mt-2 text-sm font-semibold text-white">{oauth?.granted_scopes?.length ? oauth.granted_scopes.join(", ") : "None detected"}</p>
+              {oauth?.missing_scopes?.length ? <p className="mt-1 text-xs text-amber-100">Missing: {oauth.missing_scopes.join(", ")}</p> : null}
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">OAuth/token validity</p>
+              <p className="mt-2 text-sm font-semibold capitalize text-white">{oauth?.token_status?.replaceAll("_", " ") || "missing"}</p>
+              <p className="mt-1 text-xs text-zinc-500">Access {oauth?.access_token_present ? "present" : "missing"} · Refresh {oauth?.refresh_token_present ? "present" : "missing"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Latest record</p>
+              <p className="mt-2 text-sm font-semibold text-white">{sync?.latest_record || debug.latest_values.date?.value || "No Fitbit rows"}</p>
+              <p className="mt-1 text-xs text-zinc-500">Checked {relativeSyncTime(debug.checked_at)}</p>
+            </div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-3">
+            {stages.map(([label, stage]) => (
+              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-sm font-semibold text-white">{label}</p>
+                  <span className={cx("rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", fitbitStageClass(stage?.status))}>
+                    {(stage?.status || "unknown").replaceAll("_", " ")}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs leading-5 text-zinc-400">{stage?.message || "No stage data recorded yet."}</p>
+              </div>
+            ))}
+          </div>
+          <div>
+            <p className="text-sm font-semibold text-white">Latest fetched/stored values</p>
+            <div className="mt-3 grid gap-3 md:grid-cols-3 xl:grid-cols-5">
+              {latestValueKeys.map((key) => {
+                const item = debug.latest_values[key];
+                return (
+                  <div key={key} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+                    <p className="text-xs font-medium uppercase tracking-[0.14em] text-zinc-500">{item?.label ?? key.replaceAll("_", " ")}</p>
+                    <p className="mt-2 text-sm font-semibold text-white">{item?.value ?? "No Fitbit value"}</p>
+                    <span className={cx("mt-2 inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold capitalize", fitbitStageClass(item?.status))}>
+                      {(item?.status || "missing").replaceAll("_", " ")}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <p className="text-sm font-semibold text-white">Lightweight logs</p>
+            {debug.logs?.length ? (
+              <ul className="mt-2 space-y-1 text-xs leading-5 text-zinc-400">
+                {debug.logs.slice(-8).map((log, index) => <li key={`${index}-${log}`}>{log}</li>)}
+              </ul>
+            ) : (
+              <p className="mt-2 text-xs text-zinc-500">No Fitbit debug logs recorded yet.</p>
+            )}
+          </div>
+        </div>
+      )}
     </Card>
   );
 }
@@ -11336,11 +11541,16 @@ function SettingsPage({
   accentTheme,
   apiConnectionTests,
   apiConnectionTesting,
+  fitbitDebug,
+  fitbitDebugLoading,
+  fitbitSyncing,
   forms,
   setForms,
   onSubmit,
   onAccentThemeChange,
   onTestApiConnections,
+  onRefreshFitbitDebug,
+  onForceFitbitSync,
   onConnectStrava,
   onConnectWithings,
   onConnectGoogleHealth,
@@ -11358,11 +11568,16 @@ function SettingsPage({
   accentTheme: AccentTheme;
   apiConnectionTests: ApiConnectionTestResponse | null;
   apiConnectionTesting: boolean;
+  fitbitDebug: FitbitDebugPayload | null;
+  fitbitDebugLoading: boolean;
+  fitbitSyncing: boolean;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
   onSubmit: (event: FormEvent) => void;
   onAccentThemeChange: (theme: AccentTheme) => void;
   onTestApiConnections: () => void;
+  onRefreshFitbitDebug: () => void;
+  onForceFitbitSync: () => void;
   onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
   onConnectGoogleHealth: () => void;
@@ -11530,6 +11745,7 @@ function SettingsPage({
             </p>
           </Card>
           <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
+          <FitbitDebugPanel debug={fitbitDebug} loading={fitbitDebugLoading} syncing={fitbitSyncing} onRefresh={onRefreshFitbitDebug} onForceSync={onForceFitbitSync} />
           <DiagnosticStatusDashboard settings={settings} />
           {settings?.health?.length ? (
             <IntegrationHealthGrid
@@ -11720,6 +11936,9 @@ function HomeContent() {
   const [settings, setSettings] = useState<SettingsData | null>(null);
   const [apiConnectionTests, setApiConnectionTests] = useState<ApiConnectionTestResponse | null>(null);
   const [apiConnectionTesting, setApiConnectionTesting] = useState(false);
+  const [fitbitDebug, setFitbitDebug] = useState<FitbitDebugPayload | null>(null);
+  const [fitbitDebugLoading, setFitbitDebugLoading] = useState(false);
+  const [fitbitSyncing, setFitbitSyncing] = useState(false);
   const [accentTheme, setAccentTheme] = useState<AccentTheme>(() => readStoredAccentTheme());
   const [forms, setForms] = useState<FormState>(initialForms);
   const [aiText, setAiText] = useState("");
@@ -11929,6 +12148,91 @@ function HomeContent() {
     }
   }, []);
 
+  const refreshFitbitDebug = useCallback(async () => {
+    setFitbitDebugLoading(true);
+    setApiError(null);
+    try {
+      const data = await apiGet<FitbitDebugPayload>("/api/debug/fitbit", SETTINGS_API_TIMEOUT_MS);
+      setFitbitDebug(data);
+      return data;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Fitbit debug status failed.");
+      return null;
+    } finally {
+      setFitbitDebugLoading(false);
+    }
+  }, []);
+
+  const forceFitbitSync = useCallback(async () => {
+    if (fitbitSyncing) return;
+    const path = "/api/debug/fitbit/sync";
+    const started = performance.now();
+    setFitbitSyncing(true);
+    setApiError(null);
+    setMessage("Fitbit debug sync started.");
+    recordStartupDebug({
+      key: "fitbit_debug_sync",
+      label: "Fitbit debug sync",
+      path,
+      required: false,
+      status: "pending",
+      httpStatus: null,
+      backendLabel: publicApiBaseLabel(),
+      timestamp: new Date().toISOString(),
+    });
+    try {
+      const result = await apiSend<FitbitDebugPayload>(path, "POST", { days: 7 });
+      const durationMs = Math.round(performance.now() - started);
+      setFitbitDebug(result);
+      recordStartupDebug({
+        key: "fitbit_debug_sync",
+        label: "Fitbit debug sync",
+        path,
+        required: false,
+        status: result.status === "error" ? "error" : "ok",
+        httpStatus: 200,
+        durationMs,
+        errorMessage: result.status === "error" ? result.message || result.sync?.last_error || "Fitbit debug sync failed." : undefined,
+        responseText: JSON.stringify({
+          status: result.status,
+          connection_status: result.connection_status,
+          token_status: result.oauth?.token_status,
+          pipeline: result.pipeline,
+          logs: result.logs,
+          latest_values: result.latest_values,
+        }, null, 2).slice(0, 3000),
+        backendLabel: publicApiBaseLabel(),
+        timestamp: new Date().toISOString(),
+      });
+      if (result.status === "error") {
+        setMessage(result.message || result.sync?.last_error || "Fitbit debug sync finished with errors.");
+      } else {
+        setMessage(result.message || "Fitbit debug sync complete.");
+      }
+      void apiGet<SettingsData>("/api/integrations/status?external_checks=false", SETTINGS_API_TIMEOUT_MS)
+        .then(applySettingsData)
+        .catch(() => undefined);
+    } catch (error) {
+      const durationMs = Math.round(performance.now() - started);
+      const message = error instanceof Error ? error.message : "Fitbit debug sync failed.";
+      recordStartupDebug({
+        key: "fitbit_debug_sync",
+        label: "Fitbit debug sync",
+        path,
+        required: false,
+        status: "error",
+        httpStatus: null,
+        durationMs,
+        errorMessage: message,
+        backendLabel: publicApiBaseLabel(),
+        timestamp: new Date().toISOString(),
+      });
+      setApiError(message);
+    } finally {
+      setFitbitSyncing(false);
+    }
+  }, [applySettingsData, fitbitSyncing, recordStartupDebug]);
+
   const loadDeferredData = useCallback(async () => {
     const deferredSteps: Array<{
       key: string;
@@ -11952,6 +12256,13 @@ function HomeContent() {
         run: async () => {
           await trackedApiGet<Record<string, unknown>>({ key: "backend_startup_debug", label: "Backend startup debug", path: "/api/debug/startup", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug);
         },
+      },
+      {
+        key: "fitbit_debug",
+        label: "Fitbit debug",
+        path: "/api/debug/fitbit",
+        timeoutMs: SETTINGS_API_TIMEOUT_MS,
+        run: async () => setFitbitDebug(await trackedApiGet<FitbitDebugPayload>({ key: "fitbit_debug", label: "Fitbit debug", path: "/api/debug/fitbit", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "nutrition_logs",
@@ -14040,10 +14351,19 @@ function HomeContent() {
         accentTheme={accentTheme}
         apiConnectionTests={apiConnectionTests}
         apiConnectionTesting={apiConnectionTesting}
+        fitbitDebug={fitbitDebug}
+        fitbitDebugLoading={fitbitDebugLoading}
+        fitbitSyncing={fitbitSyncing}
         forms={forms}
         setForms={setForms}
         onAccentThemeChange={handleAccentThemeChange}
         onTestApiConnections={handleTestApiConnections}
+        onRefreshFitbitDebug={() => {
+          void refreshFitbitDebug();
+        }}
+        onForceFitbitSync={() => {
+          void forceFitbitSync();
+        }}
         onSyncHevy={() => {
           void syncHevyNow(true);
         }}

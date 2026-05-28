@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import urlencode, urlparse
 from uuid import uuid4
@@ -11,7 +11,7 @@ from uuid import uuid4
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
-from backend_new.db import fetch_latest_document, insert_json_row, ping, upsert_json_row
+from backend_new.db import ensure_jsonb_table, fetch_json_rows, fetch_latest_document, insert_json_row, ping, upsert_json_row
 from backend_new.routes.body_metrics import withings_body_metric_sync_response
 from backend_new.routes.settings import settings_payload
 from backend_new.utils import app_today_iso, utc_now_iso
@@ -315,6 +315,301 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
     }
 
 
+FITBIT_EXPECTED_SCOPES = {"activity", "heartrate", "sleep", "profile"}
+FITBIT_FRESH_HOURS = 12
+FITBIT_STALE_HOURS = 24
+
+
+def _fitbit_text(value: Any) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def _fitbit_credentials(settings: dict[str, Any] | None = None) -> tuple[str, str]:
+    current = settings if isinstance(settings, dict) else _settings_document()
+    client_id = _env_or_saved(current, "FITBIT_CLIENT_ID", "fitbit_client_id")
+    client_secret = _env_or_saved(current, "FITBIT_CLIENT_SECRET", "fitbit_client_secret")
+    return client_id, client_secret
+
+
+def _fitbit_sync(settings: dict[str, Any]) -> dict[str, Any]:
+    sync = _metadata(settings).get("fitbit_sync")
+    return sync if isinstance(sync, dict) else {}
+
+
+def _fitbit_tokens(settings: dict[str, Any]) -> dict[str, Any]:
+    metadata = _metadata(settings)
+    integrations = _integrations(settings)
+    saved = metadata.get("fitbit_tokens") if isinstance(metadata.get("fitbit_tokens"), dict) else {}
+    try:
+        expires_at = int(
+            os.getenv("FITBIT_EXPIRES_AT", "").strip()
+            or os.getenv("FITBIT_TOKEN_EXPIRES_AT", "").strip()
+            or integrations.get("fitbit_expires_at")
+            or saved.get("expires_at")
+            or 0
+        )
+    except (TypeError, ValueError):
+        expires_at = 0
+    scopes = (
+        os.getenv("FITBIT_SCOPES", "").strip()
+        or _fitbit_text(integrations.get("fitbit_scopes"))
+        or _fitbit_text(saved.get("scopes"))
+    )
+    return {
+        "access_token": os.getenv("FITBIT_ACCESS_TOKEN", "").strip() or _fitbit_text(integrations.get("fitbit_access_token") or saved.get("access_token")),
+        "refresh_token": os.getenv("FITBIT_REFRESH_TOKEN", "").strip() or _fitbit_text(integrations.get("fitbit_refresh_token") or saved.get("refresh_token")),
+        "expires_at": expires_at or None,
+        "scopes": scopes,
+    }
+
+
+def _fitbit_scope_parts(scopes: str) -> list[str]:
+    return sorted({part.strip() for part in scopes.replace(",", " ").split() if part.strip()})
+
+
+def _fitbit_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    client_id, client_secret = _fitbit_credentials(settings)
+    tokens = _fitbit_tokens(settings)
+    sync = _fitbit_sync(settings)
+    configured = bool(client_id and client_secret)
+    access_token_present = bool(tokens.get("access_token"))
+    refresh_token_present = bool(tokens.get("refresh_token"))
+    scopes = _fitbit_scope_parts(str(tokens.get("scopes") or ""))
+    missing_scopes = sorted(FITBIT_EXPECTED_SCOPES.difference(scopes)) if scopes else sorted(FITBIT_EXPECTED_SCOPES)
+    expires_at = int(tokens.get("expires_at") or 0)
+    access_expired = bool(access_token_present and expires_at and expires_at <= int(time.time()))
+    needs_reconnect = bool(sync.get("needs_reconnect"))
+    if not configured:
+        status = "Not configured"
+    elif needs_reconnect:
+        status = "Reconnect required"
+    elif access_token_present or refresh_token_present:
+        status = "Connected"
+    elif configured:
+        status = "Disconnected"
+    else:
+        status = "Not configured"
+    if needs_reconnect:
+        token_status = "reconnect_required"
+    elif access_token_present and access_expired and refresh_token_present:
+        token_status = "access_expired_refresh_available"
+    elif access_token_present and not access_expired:
+        token_status = "valid"
+    elif refresh_token_present:
+        token_status = "refresh_available"
+    else:
+        token_status = "missing"
+    return status, {
+        "configured": configured,
+        "connected": status == "Connected",
+        "access_token_present": access_token_present,
+        "refresh_token_present": refresh_token_present,
+        "expires_at": expires_at or None,
+        "token_status": token_status,
+        "scopes": " ".join(scopes),
+        "granted_scopes": scopes,
+        "missing_scopes": missing_scopes,
+        "last_successful_sync": sync.get("last_successful_sync", ""),
+        "last_synced_at": sync.get("last_successful_sync", "") or sync.get("last_synced_at", ""),
+        "last_attempt_at": sync.get("last_attempt_at", ""),
+        "last_status": sync.get("last_status", ""),
+        "last_message": sync.get("last_message", ""),
+        "last_error": sync.get("last_error", ""),
+        "last_fetched_count": sync.get("last_fetched_count", 0),
+        "last_parsed_count": sync.get("last_parsed_count", 0),
+        "last_stored_count": sync.get("last_stored_count", 0),
+        "latest_record": sync.get("latest_record", ""),
+        "needs_reconnect": needs_reconnect,
+        "last_logs": sync.get("last_logs", []) if isinstance(sync.get("last_logs"), list) else [],
+        "last_pipeline": sync.get("last_pipeline", {}) if isinstance(sync.get("last_pipeline"), dict) else {},
+    }
+
+
+def _save_fitbit_sync_state(updates: dict[str, Any]) -> dict[str, Any]:
+    settings = _settings_document()
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    current = metadata.get("fitbit_sync") if isinstance(metadata.get("fitbit_sync"), dict) else {}
+    metadata["fitbit_sync"] = {**current, **updates, "updated_at": utc_now_iso()}
+    settings["metadata"] = metadata
+    _save_settings_document(settings)
+    return metadata["fitbit_sync"]
+
+
+def _fitbit_value(raw: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        value = raw.get(key)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _fitbit_latest_values() -> tuple[dict[str, Any], dict[str, Any] | None]:
+    ensure_jsonb_table("wearable_metrics")
+    rows = fetch_json_rows("wearable_metrics", limit=500, date_field="date")
+    if rows and isinstance(rows[0], dict) and "_db_error" in rows[0]:
+        return {
+            "storage_error": rows[0].get("_db_error"),
+            "sleep_duration": {"label": "Sleep duration", "value": "Storage error", "raw": None, "status": "failed"},
+            "rem_sleep": {"label": "REM sleep", "value": "Storage error", "raw": None, "status": "failed"},
+            "deep_sleep": {"label": "Deep sleep", "value": "Storage error", "raw": None, "status": "failed"},
+            "light_sleep": {"label": "Light sleep", "value": "Storage error", "raw": None, "status": "failed"},
+            "resting_hr": {"label": "Resting HR", "value": "Storage error", "raw": None, "status": "failed"},
+            "workout_hr": {"label": "Workout HR", "value": "Storage error", "raw": None, "status": "failed"},
+            "calories_burned": {"label": "Calories burned", "value": "Storage error", "raw": None, "status": "failed"},
+            "steps": {"label": "Steps", "value": "Storage error", "raw": None, "status": "failed"},
+            "readiness": {"label": "Readiness / recovery", "value": "Storage error", "raw": None, "status": "failed"},
+        }, None
+    fitbit_rows = [row for row in rows if _fitbit_text(row.get("source")).lower() == "fitbit"]
+    latest = fitbit_rows[0] if fitbit_rows else None
+
+    def metric(label: str, value: Any, suffix: str = "", *, digits: int = 0) -> dict[str, Any]:
+        if value in (None, ""):
+            return {"label": label, "value": "No Fitbit value", "raw": None, "status": "missing"}
+        try:
+            parsed = float(value)
+            display = f"{parsed:.{digits}f}" if digits else f"{round(parsed):,}"
+            return {"label": label, "value": f"{display}{suffix}", "raw": parsed, "status": "ok"}
+        except (TypeError, ValueError):
+            return {"label": label, "value": str(value), "raw": value, "status": "ok"}
+
+    if not latest:
+        empty = {key: {"label": label, "value": "No Fitbit value", "raw": None, "status": "missing"} for key, label in {
+            "sleep_duration": "Sleep duration",
+            "rem_sleep": "REM sleep",
+            "deep_sleep": "Deep sleep",
+            "light_sleep": "Light sleep",
+            "resting_hr": "Resting HR",
+            "workout_hr": "Workout HR",
+            "calories_burned": "Calories burned",
+            "steps": "Steps",
+            "readiness": "Readiness / recovery",
+        }.items()}
+        return empty, None
+
+    return {
+        "date": {"label": "Latest Fitbit date", "value": _fitbit_text(latest.get("date")) or "Unknown", "raw": latest.get("date"), "status": "ok" if latest.get("date") else "missing"},
+        "sleep_duration": metric("Sleep duration", _fitbit_value(latest, "total_sleep_minutes"), " min"),
+        "rem_sleep": metric("REM sleep", _fitbit_value(latest, "rem_sleep_minutes"), " min"),
+        "deep_sleep": metric("Deep sleep", _fitbit_value(latest, "deep_sleep_minutes"), " min"),
+        "light_sleep": metric("Light sleep", _fitbit_value(latest, "light_sleep_minutes"), " min"),
+        "resting_hr": metric("Resting HR", _fitbit_value(latest, "resting_hr"), " bpm"),
+        "workout_hr": metric("Workout HR", _fitbit_value(latest, "workout_average_hr", "average_hr"), " bpm"),
+        "calories_burned": metric("Calories burned", _fitbit_value(latest, "total_calories_burned", "calories_burned"), " kcal"),
+        "steps": metric("Steps", _fitbit_value(latest, "steps")),
+        "readiness": metric("Readiness / recovery", _fitbit_value(latest, "sleep_score", "hrv"), "", digits=1),
+    }, latest
+
+
+def _fitbit_parse_iso(value: str) -> datetime | None:
+    text = _fitbit_text(value)
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _fitbit_freshness(sync: dict[str, Any], latest_row: dict[str, Any] | None) -> dict[str, Any]:
+    last_success = _fitbit_text(sync.get("last_successful_sync") or sync.get("last_synced_at"))
+    latest_updated = _fitbit_text((latest_row or {}).get("updated_at") or (latest_row or {}).get("created_at"))
+    basis = last_success or latest_updated
+    last_status = _fitbit_text(sync.get("last_status")).lower()
+    if last_status == "error":
+        status = "red"
+        label = "Failed"
+    elif not basis:
+        status = "red"
+        label = "No Fitbit data"
+    else:
+        parsed = _fitbit_parse_iso(basis)
+        age_hours = None if parsed is None else round((datetime.now(timezone.utc) - parsed).total_seconds() / 3600, 1)
+        if age_hours is None:
+            status = "yellow"
+            label = "Unknown age"
+        elif age_hours <= FITBIT_FRESH_HOURS:
+            status = "green"
+            label = "Recent"
+        elif age_hours <= FITBIT_STALE_HOURS:
+            status = "yellow"
+            label = "Stale"
+        else:
+            status = "red"
+            label = "Old"
+        return {
+            "status": status,
+            "label": label,
+            "last_successful_sync": last_success,
+            "latest_stored_at": latest_updated,
+            "age_hours": age_hours,
+            "stale": bool(age_hours is not None and age_hours > FITBIT_FRESH_HOURS),
+            "stale_message": f"Last sync older than {FITBIT_FRESH_HOURS} hours." if age_hours is not None and age_hours > FITBIT_FRESH_HOURS else "",
+        }
+    return {
+        "status": status,
+        "label": label,
+        "last_successful_sync": last_success,
+        "latest_stored_at": latest_updated,
+        "age_hours": None,
+        "stale": True,
+        "stale_message": f"Last sync older than {FITBIT_FRESH_HOURS} hours." if basis else "No successful Fitbit sync has been recorded.",
+    }
+
+
+def _fitbit_pipeline(sync: dict[str, Any], latest_row: dict[str, Any] | None) -> dict[str, Any]:
+    pipeline = sync.get("last_pipeline") if isinstance(sync.get("last_pipeline"), dict) else {}
+    if pipeline:
+        return pipeline
+    row_found = bool(latest_row)
+    return {
+        "fetched": {"status": "not_run", "message": "Force Fitbit Sync has not fetched live data in this environment."},
+        "parsed": {"status": "not_run", "message": "No Fitbit sync parse has been recorded."},
+        "stored": {"status": "ok" if row_found else "missing", "message": "Latest Fitbit row found in wearable storage." if row_found else "No Fitbit rows found in wearable storage."},
+    }
+
+
+def _fitbit_debug_payload(*, message: str = "") -> dict[str, Any]:
+    settings = _settings_document()
+    status, meta = _fitbit_status(settings)
+    latest_values, latest_row = _fitbit_latest_values()
+    sync = _fitbit_sync(settings)
+    freshness = _fitbit_freshness(sync, latest_row)
+    pipeline = _fitbit_pipeline(sync, latest_row)
+    return {
+        "status": "ok" if freshness.get("status") != "red" else "warning",
+        "provider": "fitbit",
+        "checked_at": utc_now_iso(),
+        "message": message or "Fitbit debug status loaded.",
+        "connection_status": status,
+        "configured": bool(meta.get("configured")),
+        "connected": bool(meta.get("connected")),
+        "oauth": {
+            "token_status": meta.get("token_status", "missing"),
+            "access_token_present": bool(meta.get("access_token_present")),
+            "refresh_token_present": bool(meta.get("refresh_token_present")),
+            "expires_at": meta.get("expires_at"),
+            "granted_scopes": meta.get("granted_scopes", []),
+            "missing_scopes": meta.get("missing_scopes", []),
+        },
+        "sync": {
+            "last_successful_sync": meta.get("last_successful_sync", ""),
+            "last_attempt_at": meta.get("last_attempt_at", ""),
+            "last_status": meta.get("last_status", ""),
+            "last_error": meta.get("last_error", ""),
+            "last_message": meta.get("last_message", ""),
+            "last_fetched_count": meta.get("last_fetched_count", 0),
+            "last_parsed_count": meta.get("last_parsed_count", 0),
+            "last_stored_count": meta.get("last_stored_count", 0),
+            "latest_record": meta.get("latest_record", "") or _fitbit_text((latest_row or {}).get("date")),
+        },
+        "data_freshness": freshness,
+        "latest_values": latest_values,
+        "pipeline": pipeline,
+        "logs": list(meta.get("last_logs") or []),
+    }
+
+
 def _save_google_health_connection_record(status: str = "", metadata: dict[str, Any] | None = None) -> dict[str, Any]:
     if not status or metadata is None:
         status, metadata = _google_health_status(_settings_document())
@@ -397,6 +692,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
     strava_status, strava_meta = _strava_status(settings)
     withings_status, withings_meta = _withings_status(settings)
     google_health_status, google_health_meta = _google_health_status(settings)
+    fitbit_status, fitbit_meta = _fitbit_status(settings)
     try:
         from src.ai.food_parser import openai_analyzer_config
 
@@ -467,6 +763,16 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
                 reconnect_required=bool(google_health_meta.get("needs_reconnect")),
                 details={key: value for key, value in google_health_meta.items() if key not in {"last_error"}},
             ),
+            "fitbit": _component(
+                configured=fitbit_status in {"Connected", "Disconnected", "Reconnect required"},
+                status=_status_color(fitbit_status),
+                message=f"Fitbit is {fitbit_status.lower()}. Debug sync runs only when requested.",
+                required_env_vars=["FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET"],
+                latest_record=fitbit_meta.get("latest_record", ""),
+                last_successful_sync=fitbit_meta.get("last_successful_sync", ""),
+                reconnect_required=bool(fitbit_meta.get("needs_reconnect")),
+                details={key: value for key, value in fitbit_meta.items() if key not in {"last_error"}},
+            ),
             "required_user_actions": [],
             "other_integrations": {},
         }
@@ -476,6 +782,7 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
         "strava": strava_status,
         "withings": withings_status,
         "google_health": google_health_status,
+        "fitbit": fitbit_status,
         "openai_api_key": openai_label,
         "hevy_api_key": "Configured" if hevy_configured else "Not configured",
     }
@@ -498,12 +805,25 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "last_status": google_health_meta.get("last_status", ""),
             "last_message": google_health_meta.get("last_message", ""),
         },
+        "fitbit": {
+            "configured": base["fitbit"]["configured"],
+            "status": "ok" if fitbit_status == "Connected" else _status_slug(fitbit_status),
+            "message": base["fitbit"]["message"],
+            "last_synced_at": fitbit_meta.get("last_successful_sync", ""),
+            "latest_record": fitbit_meta.get("latest_record", ""),
+            "reconnect_required": fitbit_meta.get("needs_reconnect", False),
+            "token_status": fitbit_meta.get("token_status", "missing"),
+            "last_error": fitbit_meta.get("last_error", ""),
+            "last_status": fitbit_meta.get("last_status", ""),
+            "last_message": fitbit_meta.get("last_message", ""),
+        },
     }
     base["health"] = [
         _health_card("hevy", "Hevy", "Connected" if hevy_configured else "Not configured", {"connected": hevy_configured}),
         _health_card("strava", "Strava", strava_status, strava_meta),
         _health_card("withings", "Withings", withings_status, withings_meta),
         _health_card("google_health", "Google Health", google_health_status, google_health_meta),
+        _health_card("fitbit", "Fitbit", fitbit_status, fitbit_meta),
         _health_card("openai", "OpenAI", openai_label, {"connected": openai_status == "connected", "configured": openai_configured}),
     ]
     base["integrations"] = {
@@ -514,6 +834,8 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
         "withings_refresh_token": _mask_present(_metadata(settings).get("withings_tokens", {}).get("refresh_token") if isinstance(_metadata(settings).get("withings_tokens"), dict) else ""),
         "google_health_access_token": _mask_present(_metadata(settings).get("google_health_tokens", {}).get("access_token") if isinstance(_metadata(settings).get("google_health_tokens"), dict) else ""),
         "google_health_refresh_token": _mask_present(_metadata(settings).get("google_health_tokens", {}).get("refresh_token") if isinstance(_metadata(settings).get("google_health_tokens"), dict) else ""),
+        "fitbit_access_token": _mask_present(_fitbit_tokens(settings).get("access_token")),
+        "fitbit_refresh_token": _mask_present(_fitbit_tokens(settings).get("refresh_token")),
     }
     return base
 
@@ -582,6 +904,7 @@ def integrations_test() -> dict[str, Any]:
     strava_status, _ = _strava_status(settings)
     withings_status, _ = _withings_status(settings)
     google_health_status, _ = _google_health_status(settings)
+    fitbit_status, fitbit_meta = _fitbit_status(settings)
     hevy_configured = bool(os.getenv("HEVY_API_KEY", "").strip() or _integrations(settings).get("hevy_api_key"))
     try:
         from src.ai.food_parser import test_openai_connection
@@ -625,6 +948,203 @@ def integrations_test() -> dict[str, Any]:
         "strava": _test_result(strava_status.lower().replace(" ", "_"), f"Strava is {strava_status.lower()}."),
         "withings": _test_result(withings_status.lower().replace(" ", "_"), f"Withings is {withings_status.lower()}."),
         "google_health": _test_result(google_health_status.lower().replace(" ", "_"), f"Google Health is {google_health_status.lower()}."),
+        "fitbit": {
+            **_test_result(fitbit_status.lower().replace(" ", "_"), f"Fitbit is {fitbit_status.lower()}."),
+            "layers": {
+                "configuration": {
+                    "status": "configured" if fitbit_meta.get("configured") else "missing_credentials",
+                    "message": "Fitbit client credentials are configured." if fitbit_meta.get("configured") else "FITBIT_CLIENT_ID and FITBIT_CLIENT_SECRET are not both configured.",
+                },
+                "oauth_token": {
+                    "status": str(fitbit_meta.get("token_status") or "missing"),
+                    "message": "Fitbit token presence checked without exposing token values.",
+                },
+                "scopes": {
+                    "status": "ok" if not fitbit_meta.get("missing_scopes") else "missing_scopes",
+                    "message": "Granted scopes include expected activity, heartrate, sleep, and profile scopes." if not fitbit_meta.get("missing_scopes") else f"Missing scopes: {', '.join(fitbit_meta.get('missing_scopes') or [])}",
+                },
+            },
+        },
+    }
+
+
+@router.get("/api/debug/fitbit")
+def fitbit_debug_status() -> dict[str, Any]:
+    return _fitbit_debug_payload()
+
+
+@router.post("/api/debug/fitbit/sync")
+def fitbit_force_sync(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    from src.integrations.fitbit_client import fetch_daily_metrics, normalize_daily_metrics
+
+    payload = payload or {}
+    settings = _settings_document()
+    status, meta = _fitbit_status(settings)
+    tokens = _fitbit_tokens(settings)
+    sync_run_id = f"fitbit_debug_sync:{uuid4()}"
+    started_at = utc_now_iso()
+    try:
+        days = max(1, min(int(payload.get("days") or 7), 30))
+    except (TypeError, ValueError):
+        days = 7
+    today = date.fromisoformat(app_today_iso())
+    end_date = _fitbit_text(payload.get("end_date"))[:10] or today.isoformat()
+    try:
+        start_date = _fitbit_text(payload.get("start_date"))[:10] or (date.fromisoformat(end_date) - timedelta(days=days - 1)).isoformat()
+    except ValueError:
+        start_date = (today - timedelta(days=days - 1)).isoformat()
+        end_date = today.isoformat()
+    logs = [
+        f"endpoint hit: POST /api/debug/fitbit/sync run_id={sync_run_id}",
+        f"connection status: {status}",
+        f"token status: {meta.get('token_status', 'missing')}",
+    ]
+    missing_scopes = list(meta.get("missing_scopes") or [])
+    if missing_scopes:
+        logs.append(f"missing permissions/scopes: {', '.join(missing_scopes)}")
+    access_token = _fitbit_text(tokens.get("access_token"))
+    if not access_token:
+        message = "No Fitbit access token is available. Connect Fitbit OAuth before force sync can fetch live data."
+        pipeline = {
+            "fetched": {"status": "failed", "message": "missing_access_token"},
+            "parsed": {"status": "skipped", "message": "No Fitbit response to parse."},
+            "stored": {"status": "skipped", "message": "No parsed Fitbit rows to store."},
+        }
+        logs.append("response status: missing_access_token")
+        logs.append("parsing skipped: missing access token")
+        _save_fitbit_sync_state(
+            {
+                "last_attempt_at": started_at,
+                "last_synced_at": started_at,
+                "last_status": "error",
+                "last_message": message,
+                "last_error": message,
+                "last_fetched_count": 0,
+                "last_parsed_count": 0,
+                "last_stored_count": 0,
+                "last_pipeline": pipeline,
+                "last_logs": logs,
+                "needs_reconnect": bool(meta.get("configured")),
+            }
+        )
+        return {**_fitbit_debug_payload(message=message), "status": "error", "sync_run_id": sync_run_id}
+
+    fetched = fetch_daily_metrics(access_token, start_date=start_date, end_date=end_date)
+    response_status = _fitbit_text(fetched.get("status")) or "unknown"
+    logs.append(f"response status: {response_status}")
+    if response_status != "ok":
+        message = _fitbit_text(fetched.get("message")) or "Fitbit force sync failed."
+        pipeline = {
+            "fetched": {"status": "failed", "message": response_status},
+            "parsed": {"status": "skipped", "message": "Fitbit response did not return ok."},
+            "stored": {"status": "skipped", "message": "No parsed Fitbit rows to store."},
+        }
+        logs.append(f"parsing skipped: {message}")
+        _save_fitbit_sync_state(
+            {
+                "last_attempt_at": started_at,
+                "last_synced_at": started_at,
+                "last_status": "error",
+                "last_message": message,
+                "last_error": message,
+                "last_fetched_count": len(fetched.get("items") or []),
+                "last_parsed_count": 0,
+                "last_stored_count": 0,
+                "last_pipeline": pipeline,
+                "last_logs": logs,
+                "needs_reconnect": "token" in message.lower() or "reconnect" in message.lower(),
+            }
+        )
+        return {**_fitbit_debug_payload(message=message), "status": "error", "sync_run_id": sync_run_id, "date_range": {"start_date": start_date, "end_date": end_date}}
+
+    items = fetched.get("items") or []
+    try:
+        normalized = normalize_daily_metrics(items)
+        parsed_rows = normalized.to_dict(orient="records")
+        logs.append(f"parsed successfully: {len(parsed_rows)} row(s)")
+    except Exception as exc:
+        message = f"Fitbit parsing failed: {exc}"
+        pipeline = {
+            "fetched": {"status": "ok", "message": f"Fetched {len(items)} item(s)."},
+            "parsed": {"status": "failed", "message": type(exc).__name__},
+            "stored": {"status": "skipped", "message": "Parsing failed before storage."},
+        }
+        logs.append(f"parsing failure: {type(exc).__name__}: {exc}")
+        _save_fitbit_sync_state(
+            {
+                "last_attempt_at": started_at,
+                "last_synced_at": started_at,
+                "last_status": "error",
+                "last_message": message,
+                "last_error": message,
+                "last_fetched_count": len(items),
+                "last_parsed_count": 0,
+                "last_stored_count": 0,
+                "last_pipeline": pipeline,
+                "last_logs": logs,
+            }
+        )
+        return {**_fitbit_debug_payload(message=message), "status": "error", "sync_run_id": sync_run_id}
+
+    now = utc_now_iso()
+    saved_rows: list[dict[str, Any]] = []
+    storage_errors: list[Any] = []
+    for row in parsed_rows:
+        row_date = _fitbit_text(row.get("date"))[:10]
+        if not row_date:
+            continue
+        payload_row = {
+            **row,
+            "metric_id": _fitbit_text(row.get("metric_id")) or f"fitbit:{row_date}",
+            "source": "fitbit",
+            "created_at": _fitbit_text(row.get("created_at")) or now,
+            "updated_at": now,
+        }
+        saved = upsert_json_row("wearable_metrics", "metric_id", payload_row["metric_id"], payload_row)
+        if isinstance(saved, dict) and "_db_error" in saved:
+            storage_errors.append(saved.get("_db_error"))
+        else:
+            saved_rows.append(saved)
+    latest_record = max((_fitbit_text(row.get("date")) for row in saved_rows), default="")
+    if storage_errors:
+        logs.append(f"stored with failures: {len(saved_rows)} saved, {len(storage_errors)} failed")
+    else:
+        logs.append(f"stored successfully: {len(saved_rows)} row(s)")
+    sync_status = "partial" if storage_errors else "ok"
+    message = f"Fitbit force sync complete: {len(saved_rows)} row(s) saved." if sync_status == "ok" else f"Fitbit force sync partially stored: {len(saved_rows)} row(s) saved, {len(storage_errors)} storage error(s)."
+    pipeline = {
+        "fetched": {"status": "ok", "message": f"Fetched {len(items)} item(s)."},
+        "parsed": {"status": "ok", "message": f"Parsed {len(parsed_rows)} row(s)."},
+        "stored": {"status": "ok" if not storage_errors else "partial", "message": f"Stored {len(saved_rows)} row(s)."},
+    }
+    previous_sync = _fitbit_sync(settings)
+    _save_fitbit_sync_state(
+        {
+            "last_attempt_at": started_at,
+            "last_synced_at": now,
+            "last_successful_sync": now if sync_status == "ok" else previous_sync.get("last_successful_sync", ""),
+            "last_status": sync_status,
+            "last_message": message,
+            "last_error": "; ".join(str(error.get("message") or error) for error in storage_errors[:2]),
+            "last_fetched_count": len(items),
+            "last_parsed_count": len(parsed_rows),
+            "last_stored_count": len(saved_rows),
+            "latest_record": latest_record,
+            "start_date": start_date,
+            "end_date": end_date,
+            "last_pipeline": pipeline,
+            "last_logs": logs,
+            "needs_reconnect": False,
+        }
+    )
+    return {
+        **_fitbit_debug_payload(message=message),
+        "status": sync_status,
+        "sync_run_id": sync_run_id,
+        "imported_metrics": len(saved_rows),
+        "fetched_days": len(items),
+        "storage_errors": storage_errors[:5],
+        "date_range": {"start_date": start_date, "end_date": end_date},
     }
 
 

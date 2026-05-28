@@ -173,6 +173,60 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
     }
 
 
+def _fitbit_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    tokens = metadata.get("fitbit_tokens") if isinstance(metadata.get("fitbit_tokens"), dict) else {}
+    sync = metadata.get("fitbit_sync") if isinstance(metadata.get("fitbit_sync"), dict) else {}
+    has_credentials = (
+        integrations.get("fitbit_client_id")
+        and integrations.get("fitbit_client_secret")
+    ) or (
+        _configured_from_env("fitbit_client_id")
+        and _configured_from_env("fitbit_client_secret")
+    )
+    access_token = os.getenv("FITBIT_ACCESS_TOKEN", "").strip() or str(integrations.get("fitbit_access_token") or tokens.get("access_token") or "").strip()
+    refresh_token = os.getenv("FITBIT_REFRESH_TOKEN", "").strip() or str(integrations.get("fitbit_refresh_token") or tokens.get("refresh_token") or "").strip()
+    scopes = os.getenv("FITBIT_SCOPES", "").strip() or str(integrations.get("fitbit_scopes") or tokens.get("scopes") or "").strip()
+    try:
+        expires_at = int(os.getenv("FITBIT_EXPIRES_AT", "").strip() or os.getenv("FITBIT_TOKEN_EXPIRES_AT", "").strip() or integrations.get("fitbit_expires_at") or tokens.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+    access_expired = bool(access_token and expires_at and expires_at <= int(time.time()))
+    if not has_credentials:
+        status = "Not configured"
+    elif sync.get("needs_reconnect"):
+        status = "Reconnect required"
+    elif access_token or refresh_token:
+        status = "Connected"
+    else:
+        status = "Disconnected"
+    token_status = (
+        "reconnect_required" if sync.get("needs_reconnect")
+        else "access_expired_refresh_available" if access_token and access_expired and refresh_token
+        else "valid" if access_token and not access_expired
+        else "refresh_available" if refresh_token
+        else "missing"
+    )
+    return status, {
+        "connected": status == "Connected",
+        "configured": bool(has_credentials),
+        "token_status": token_status,
+        "access_token_present": bool(access_token),
+        "refresh_token_present": bool(refresh_token),
+        "scopes": scopes,
+        "expires_at": expires_at or None,
+        "last_synced_at": sync.get("last_successful_sync", "") or sync.get("last_synced_at", ""),
+        "latest_record": sync.get("latest_record", ""),
+        "last_error": sync.get("last_error", ""),
+        "last_status": sync.get("last_status", ""),
+        "last_message": sync.get("last_message", ""),
+        "reconnect_required": bool(sync.get("needs_reconnect") and has_credentials),
+        "imported_metrics": sync.get("last_stored_count", 0),
+        "fetched_days": sync.get("last_fetched_count", 0),
+        "parsed_metrics": sync.get("last_parsed_count", 0),
+    }
+
+
 def _openai_status(openai_config: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     configured = bool(openai_config.get("openai_key_configured"))
     last_test = metadata.get("openai_last_test") if isinstance(metadata.get("openai_last_test"), dict) else {}
@@ -250,6 +304,7 @@ def settings_payload() -> dict[str, Any]:
     withings_status = _withings_status(settings, integrations)
     strava_status, strava_service = _strava_connection(settings, integrations)
     google_health_status, google_health_service = _google_health_connection(settings, integrations)
+    fitbit_status, fitbit_service = _fitbit_connection(settings, integrations)
     wearable_credentials_configured = all(
         statuses.get(field) == "Configured"
         for field in ["fitbit_client_id", "fitbit_client_secret"]
@@ -262,6 +317,7 @@ def settings_payload() -> dict[str, Any]:
             "strava": strava_status,
             "withings": withings_status,
             "google_health": google_health_status,
+            "fitbit": fitbit_status,
             "fitbit_google_health": "Configured" if wearable_credentials_configured else "Prepared",
         }
     )
@@ -289,6 +345,12 @@ def settings_payload() -> dict[str, Any]:
             "configured": wearable_credentials_configured,
             "status": "configured" if wearable_credentials_configured else "placeholder",
             "message": "Wearable storage and manual/mock metrics are ready.",
+        },
+        "fitbit": {
+            "configured": fitbit_service["configured"],
+            "status": "connected" if fitbit_status == "Connected" else "needs_reconnect" if fitbit_status == "Reconnect required" else "disconnected" if fitbit_status == "Disconnected" else "not_configured",
+            "message": "Fitbit debug sync is available from Settings Advanced / Debug.",
+            **fitbit_service,
         },
         "google_health": {
             "configured": google_health_service["configured"],
@@ -318,6 +380,26 @@ def settings_payload() -> dict[str, Any]:
                 "fetched_days": google_health_service["fetched_days"],
                 "latest_record": google_health_service["latest_record"],
                 "last_error": google_health_service["last_error"],
+            },
+        },
+        {
+            "id": "fitbit",
+            "name": "Fitbit",
+            "status": "green" if fitbit_status == "Connected" else "yellow" if fitbit_status in {"Disconnected", "Reconnect required"} else "gray",
+            "message": services["fitbit"]["message"],
+            "last_synced_at": fitbit_service["last_synced_at"],
+            "latest_record": fitbit_service["latest_record"],
+            "action": "fitbit_debug_sync",
+            "metadata": {
+                "connection": fitbit_status,
+                "configured": fitbit_service["configured"],
+                "reconnect_required": fitbit_service["reconnect_required"],
+                "token_status": fitbit_service["token_status"],
+                "imported_metrics": fitbit_service["imported_metrics"],
+                "fetched_days": fitbit_service["fetched_days"],
+                "latest_record": fitbit_service["latest_record"],
+                "last_error": fitbit_service["last_error"],
+                "last_status": fitbit_service["last_status"],
             },
         },
         {
@@ -375,6 +457,13 @@ def settings_payload() -> dict[str, Any]:
             "latest_record": google_health_service["latest_record"],
             "reconnect_required": google_health_service["reconnect_required"],
             "last_error": google_health_service["last_error"],
+        },
+        "fitbit": {
+            "status": fitbit_status,
+            "last_successful_sync": fitbit_service["last_synced_at"],
+            "latest_record": fitbit_service["latest_record"],
+            "reconnect_required": fitbit_service["reconnect_required"],
+            "last_error": fitbit_service["last_error"],
         },
     }
 
