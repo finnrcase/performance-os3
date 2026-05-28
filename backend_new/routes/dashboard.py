@@ -16,7 +16,7 @@ from backend_new.config import app_timezone_name
 from backend_new.utils import app_today_iso, utc_now_iso
 from src.body_metrics import canonical_daily_bodyweights
 from src.analytics.recovery_engine import calculate_recovery_score
-from src.google_health_dashboard import build_google_health_dashboard_signals, merge_google_health_rows
+from src.google_health_dashboard import build_google_health_dashboard_signals
 from src.training_schedule import DEFAULT_RECURRING_SCHEDULE_PROFILE, classify_strength_split, planned_training_for_date, summarize_training_day
 
 
@@ -1815,21 +1815,6 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         {"items": [], "status": "fallback"},
         blocks,
     )
-    google_health_tables_payload = _source_block(
-        "google_health_tables",
-        "google_health_*",
-        lambda: {
-            "status": "ok",
-            "daily_summary": fetch_json_rows("google_health_daily_summary", limit=120, date_field="date"),
-            "sleep": fetch_json_rows("google_health_sleep", limit=120, date_field="date"),
-            "heart": fetch_json_rows("google_health_heart", limit=120, date_field="date"),
-            "activity": fetch_json_rows("google_health_activity", limit=120, date_field="date"),
-            "recovery_signals": fetch_json_rows("google_health_recovery_signals", limit=120, date_field="date"),
-        },
-        {"daily_summary": [], "sleep": [], "heart": [], "activity": [], "recovery_signals": [], "status": "fallback"},
-        blocks,
-    )
-
     food_rows = _safe_items(food_payload)
     nutrition_history_items = _safe_items(nutrition_history_payload)
     body_rows = _safe_items(body_payload, "canonical_items") or _safe_items(body_payload) or bundle_body_rows
@@ -1837,21 +1822,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     recovery_rows = _safe_items(recovery_payload)
     sleep_rows = _safe_items(sleep_payload)
     wearable_rows = _safe_items(wearable_payload)
-    google_health_daily_rows = _safe_items(google_health_tables_payload, "daily_summary")
-    google_health_sleep_rows = _safe_items(google_health_tables_payload, "sleep")
-    google_health_heart_rows = _safe_items(google_health_tables_payload, "heart")
-    google_health_activity_rows = _safe_items(google_health_tables_payload, "activity")
-    google_health_recovery_signal_rows = _safe_items(google_health_tables_payload, "recovery_signals")
-    merged_google_health_rows = merge_google_health_rows(
-        wearable_rows=[row for row in wearable_rows if str(row.get("source") or "").lower() == "google_health"],
-        daily_summary_rows=google_health_daily_rows,
-        sleep_rows=google_health_sleep_rows,
-        heart_rows=google_health_heart_rows,
-        activity_rows=google_health_activity_rows,
-        recovery_signal_rows=google_health_recovery_signal_rows,
-    )
-    non_google_wearable_rows = [row for row in wearable_rows if str(row.get("source") or "").lower() != "google_health"]
-    dashboard_wearable_rows = [*non_google_wearable_rows, *merged_google_health_rows]
+    dashboard_wearable_rows = wearable_rows
     training_items = _safe_items(training_payload)
     training_rows = _training_rows_from_history(training_items)
     goals = {**fallback_goals(), **(goals_payload.get("goals") if isinstance(goals_payload.get("goals"), dict) else {})}
@@ -1936,12 +1907,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "recovery": len(recovery_rows),
         "sleep": len(sleep_rows),
         "wearables": len(wearable_rows),
-        "google_health_merged_rows": len(merged_google_health_rows),
-        "google_health_daily_summary": len(google_health_daily_rows),
-        "google_health_sleep": len(google_health_sleep_rows),
-        "google_health_heart": len(google_health_heart_rows),
-        "google_health_activity": len(google_health_activity_rows),
-        "google_health_recovery_signals": len(google_health_recovery_signal_rows),
+        "normalized_wearable_rows": len(dashboard_wearable_rows),
     }
     sources = {
         "food": {
@@ -1978,17 +1944,10 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
             "latest_sleep_date": _latest_field(sleep_rows, "date"),
         },
         "wearables": {
-            "source": "wearable_metrics + google_health_*",
+            "source": "wearable_metrics",
             "latest_metric_date": _latest_field(dashboard_wearable_rows, "date"),
             "rows": len(wearable_rows),
-            "google_health_merged_rows": len(merged_google_health_rows),
-            "google_health_tables": {
-                "daily_summary": len(google_health_daily_rows),
-                "sleep": len(google_health_sleep_rows),
-                "heart": len(google_health_heart_rows),
-                "activity": len(google_health_activity_rows),
-                "recovery_signals": len(google_health_recovery_signal_rows),
-            },
+            "normalized_contract": True,
         },
     }
     cache = _dashboard_cache_payload(bundle, sources)

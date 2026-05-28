@@ -9,13 +9,13 @@ import os
 import time
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 
-from src.wearables import WEARABLE_METRIC_COLUMNS
+from src.wearables import WEARABLE_METRIC_COLUMNS, normalize_wearable_metric_rows
 
 
 logger = logging.getLogger(__name__)
@@ -30,8 +30,22 @@ GOOGLE_HEALTH_SCOPES = [
     "https://www.googleapis.com/auth/googlehealth.settings.readonly",
 ]
 DEFAULT_GOOGLE_HEALTH_API_BASE_URL = "https://health.googleapis.com"
+GOOGLE_HEALTH_PROVIDER_ID = "google_health"
+GOOGLE_FIT_LEGACY_PROVIDER_ID = "google_fit_legacy"
 GOOGLE_HEALTH_API_PATH = "google_health_v4"
 GOOGLE_HEALTH_API_LABEL = "Google Health API v4"
+GOOGLE_FIT_LEGACY_API_PATH = "google_fit_legacy"
+GOOGLE_FIT_LEGACY_API_LABEL = "Deprecated Google Fit REST API"
+GOOGLE_CONNECTED_LABEL = "Google connected"
+GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL = "Google Health API sync available"
+GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL = "Google Health API sync unavailable"
+GOOGLE_FIT_LEGACY_FOUND_LABEL = "Google Fit legacy data source found"
+GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL = "Google Fit legacy data source not found"
+GOOGLE_FIT_LEGACY_CONFIG_MESSAGE = (
+    "GOOGLE_HEALTH_API_BASE_URL points to the deprecated Google Fit/Fitness REST API. "
+    "Performance OS will not treat Google Fit REST as Google Health data. "
+    "Set GOOGLE_HEALTH_API_BASE_URL=https://health.googleapis.com and reconnect with googlehealth.* scopes."
+)
 GOOGLE_HEALTH_DAILY_ROLLUP_TYPES = [
     "steps",
     "total-calories",
@@ -44,7 +58,9 @@ GOOGLE_HEALTH_DAILY_ROLLUP_TYPES = [
 GOOGLE_HEALTH_DAILY_POINT_TYPES = [
     "daily-resting-heart-rate",
     "daily-heart-rate-variability",
+    "daily-heart-rate-zones",
     "daily-oxygen-saturation",
+    "daily-respiratory-rate",
     "daily-sleep-temperature-derivations",
 ]
 GOOGLE_HEALTH_SESSION_POINT_TYPES = [
@@ -148,6 +164,82 @@ def scopes() -> list[str]:
 
 def api_base_url() -> str:
     return os.getenv("GOOGLE_HEALTH_API_BASE_URL", "").strip().rstrip("/") or DEFAULT_GOOGLE_HEALTH_API_BASE_URL
+
+
+def is_legacy_google_fit_base_url(value: str | None = None) -> bool:
+    base_url = str(value if value is not None else api_base_url()).strip().lower()
+    return "fitness.googleapis.com" in base_url or "googleapis.com/fitness" in base_url
+
+
+def _api_family_for_url(url: str) -> str:
+    host = urlparse(str(url or "")).netloc.lower()
+    if "fitness.googleapis.com" in host:
+        return "google_fit_legacy"
+    if "health.googleapis.com" in host:
+        return "google_health"
+    if "oauth2.googleapis.com" in host or "accounts.google.com" in host:
+        return "google_oauth"
+    return "unknown"
+
+
+def _request_trace_entry(
+    trace: list[dict[str, Any]] | None,
+    *,
+    method: str,
+    url: str,
+    provider: str,
+    endpoint: str,
+    data_type: str = "",
+) -> dict[str, Any]:
+    parsed = urlparse(url)
+    entry = {
+        "provider": provider,
+        "api_family": _api_family_for_url(url),
+        "method": method,
+        "host": parsed.netloc,
+        "path": parsed.path,
+        "query_present": bool(parsed.query),
+        "url": url,
+        "endpoint": endpoint,
+        "data_type": data_type,
+        "response_status": "pending",
+        "response_count": 0,
+    }
+    if trace is not None:
+        trace.append(entry)
+    logger.info(
+        "[google_health] api request provider=%s family=%s method=%s host=%s path=%s endpoint=%s data_type=%s",
+        provider,
+        entry["api_family"],
+        method,
+        parsed.netloc,
+        parsed.path,
+        endpoint,
+        data_type,
+    )
+    return entry
+
+
+def _response_count(response: dict[str, Any]) -> int:
+    for key in ("rollupDataPoints", "dataPoints", "pairedDevices"):
+        value = response.get(key) if isinstance(response, dict) else None
+        if isinstance(value, list):
+            return len(value)
+    return 0
+
+
+def _request_trace_counts(trace: list[dict[str, Any]]) -> dict[str, Any]:
+    counts = {
+        "total": len(trace),
+        "google_health": 0,
+        "google_fit_legacy": 0,
+        "google_oauth": 0,
+        "unknown": 0,
+    }
+    for entry in trace:
+        family = str(entry.get("api_family") or "unknown")
+        counts[family] = int(counts.get(family, 0)) + 1
+    return counts
 
 
 def is_configured(settings: dict | None = None) -> bool:
@@ -402,7 +494,16 @@ def _as_int(value: Any) -> int | None:
 
 
 def _metric_present(value: Any) -> bool:
-    if value in (None, "", [], {}):
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str) and not value.strip():
+        return False
+    if isinstance(value, (list, tuple, dict, set)) and not value:
         return False
     try:
         parsed = float(value)
@@ -447,7 +548,7 @@ def _average(values: list[float]) -> float | None:
 def _new_daily_row(day: str) -> dict[str, Any]:
     return {
         "date": day,
-        "source": "google_health",
+        "source": GOOGLE_HEALTH_PROVIDER_ID,
         "sleep_hours": None,
         "sleep_score": None,
         "total_sleep_minutes": None,
@@ -518,7 +619,7 @@ def _sanitize_data_source(source: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def list_data_sources(access_token: str) -> dict[str, Any]:
+def list_data_sources(access_token: str, request_trace: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Return Google Health paired devices and supported data type identifiers.
 
     Google Health API v4 does not use the deprecated Google Fit `dataSources`
@@ -526,12 +627,79 @@ def list_data_sources(access_token: str) -> dict[str, Any]:
     debug visibility and returns the Health API data types the sync requests.
     """
     if not str(access_token or "").strip():
-        return {"status": "missing_access_token", "data_sources": [], "data_type_names": []}
-    response = _get_json(
-        f"{api_base_url()}/v4/users/me/pairedDevices?pageSize=100",
-        access_token,
-        context="Google Health paired devices listing failed",
+        return {
+            "status": "missing_access_token",
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "data_sources": [],
+            "data_type_names": [],
+            "google_health_api_sync_available": False,
+            "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+            "google_fit_legacy_data_source_status": "not_found",
+            "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
+            "api_request_log": [],
+            "api_request_counts": {"total": 0, "google_health": 0, "google_fit_legacy": 0, "google_oauth": 0, "unknown": 0},
+            "requests_sent_to_google_health_api": 0,
+            "requests_sent_to_fitness_api": 0,
+            "exact_endpoint_urls": [],
+            "google_health_api_requests": [],
+            "fitness_api_requests": [],
+        }
+    base_url = api_base_url()
+    if is_legacy_google_fit_base_url(base_url):
+        logger.warning("[google_health] legacy Google Fit REST base URL configured; skipping source discovery")
+        return {
+            "status": "legacy_google_fit_configured",
+            "message": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
+            "data_sources": [],
+            "paired_devices": [],
+            "data_type_names": [],
+            "available_data_types": [],
+            "data_source_count": 0,
+            "paired_device_count": 0,
+            "api_base_url": base_url,
+            "api_path": GOOGLE_FIT_LEGACY_API_PATH,
+            "api_path_label": GOOGLE_FIT_LEGACY_API_LABEL,
+            "provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "legacy_google_fit_detected": True,
+            "google_fit_unused": False,
+            "deprecated_fitness_api_unused": False,
+            "google_health_api_sync_available": False,
+            "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+            "google_fit_legacy_data_source_status": "found",
+            "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_FOUND_LABEL,
+            "api_request_log": [],
+            "api_request_counts": {"total": 0, "google_health": 0, "google_fit_legacy": 0, "google_oauth": 0, "unknown": 0},
+            "requests_sent_to_google_health_api": 0,
+            "requests_sent_to_fitness_api": 0,
+            "exact_endpoint_urls": [],
+            "google_health_api_requests": [],
+            "fitness_api_requests": [],
+        }
+    url = f"{base_url}/v4/users/me/pairedDevices?pageSize=100"
+    trace_entry = _request_trace_entry(
+        request_trace,
+        method="GET",
+        url=url,
+        provider=GOOGLE_HEALTH_PROVIDER_ID,
+        endpoint="pairedDevices.list",
     )
+    try:
+        response = _get_json(
+            url,
+            access_token,
+            context="Google Health paired devices listing failed",
+        )
+        trace_entry["response_status"] = "ok"
+        trace_entry["response_count"] = _response_count(response)
+        logger.info("[google_health] api response endpoint=%s status=ok count=%s", trace_entry["endpoint"], trace_entry["response_count"])
+    except GoogleHealthIntegrationError as exc:
+        trace_entry["response_status"] = "error"
+        trace_entry["error"] = str(exc)[:500]
+        logger.warning("[google_health] api response endpoint=%s status=error error=%s", trace_entry["endpoint"], str(exc)[:500])
+        raise
     data_sources = response.get("pairedDevices") or []
     data_type_names = GOOGLE_HEALTH_DATA_TYPES.copy()
     sanitized_sources = [_sanitize_data_source(source) for source in data_sources if isinstance(source, dict)]
@@ -540,6 +708,9 @@ def list_data_sources(access_token: str) -> dict[str, Any]:
         len(data_sources),
         len(data_type_names),
     )
+    trace = request_trace or [trace_entry]
+    api_request_counts = _request_trace_counts(trace)
+    exact_endpoint_urls = [str(entry.get("url") or "") for entry in trace if str(entry.get("url") or "").strip()]
     return {
         "status": "ok",
         "data_sources": sanitized_sources,
@@ -550,6 +721,52 @@ def list_data_sources(access_token: str) -> dict[str, Any]:
         "paired_device_count": len(data_sources),
         "api_path": GOOGLE_HEALTH_API_PATH,
         "api_path_label": GOOGLE_HEALTH_API_LABEL,
+        "provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+        "google_health_api_sync_available": True,
+        "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL,
+        "google_fit_legacy_data_source_status": "not_found",
+        "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
+        "api_request_log": trace,
+        "api_request_counts": api_request_counts,
+        "requests_sent_to_google_health_api": int(api_request_counts.get("google_health") or 0),
+        "requests_sent_to_fitness_api": int(api_request_counts.get("google_fit_legacy") or 0),
+        "exact_endpoint_urls": exact_endpoint_urls,
+        "google_health_api_requests": [entry for entry in trace if entry.get("api_family") == "google_health"],
+        "fitness_api_requests": [entry for entry in trace if entry.get("api_family") == "google_fit_legacy"],
+    }
+
+
+def fetch_identity(access_token: str) -> dict[str, Any]:
+    """Fetch the connected Google Health identity without exposing tokens."""
+    if not str(access_token or "").strip():
+        return {
+            "status": "missing_access_token",
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "message": "No Google Health access token is available.",
+        }
+    base_url = api_base_url()
+    if is_legacy_google_fit_base_url(base_url):
+        return {
+            "status": "legacy_google_fit_configured",
+            "provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "message": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
+        }
+    response = _get_json(
+        f"{base_url}/v4/users/me/identity",
+        access_token,
+        context="Google Health identity fetch failed",
+    )
+    return {
+        "status": "ok",
+        "provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "identity": {
+            "name": str(response.get("name") or ""),
+            "health_user_id": str(response.get("healthUserId") or ""),
+            "legacy_user_id": str(response.get("legacyUserId") or ""),
+        },
     }
 
 
@@ -584,13 +801,40 @@ def _health_date_range_body(start_text: str, end_text: str, *, page_token: str =
     }
 
 
-def _fetch_health_daily_rollup(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
-    return _post_json(
-        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp",
-        _health_date_range_body(start_text, end_text, page_token=page_token),
-        access_token,
-        context=f"Google Health {data_type} daily rollup failed",
+def _fetch_health_daily_rollup(
+    access_token: str,
+    data_type: str,
+    start_text: str,
+    end_text: str,
+    *,
+    page_token: str = "",
+    request_trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    url = f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp"
+    trace_entry = _request_trace_entry(
+        request_trace,
+        method="POST",
+        url=url,
+        provider=GOOGLE_HEALTH_PROVIDER_ID,
+        endpoint="dataPoints.dailyRollUp",
+        data_type=data_type,
     )
+    try:
+        response = _post_json(
+            url,
+            _health_date_range_body(start_text, end_text, page_token=page_token),
+            access_token,
+            context=f"Google Health {data_type} daily rollup failed",
+        )
+        trace_entry["response_status"] = "ok"
+        trace_entry["response_count"] = _response_count(response)
+        logger.info("[google_health] api response endpoint=%s data_type=%s status=ok count=%s", trace_entry["endpoint"], data_type, trace_entry["response_count"])
+        return response
+    except GoogleHealthIntegrationError as exc:
+        trace_entry["response_status"] = "error"
+        trace_entry["error"] = str(exc)[:500]
+        logger.warning("[google_health] api response endpoint=%s data_type=%s status=error error=%s", trace_entry["endpoint"], data_type, str(exc)[:500])
+        raise
 
 
 def _health_point_filter(data_type: str, start_text: str, end_text: str) -> str:
@@ -603,21 +847,56 @@ def _health_point_filter(data_type: str, start_text: str, end_text: str) -> str:
     return f'{snake}.sample_time.civil_time >= "{start_text}" AND {snake}.sample_time.civil_time < "{end_exclusive}"'
 
 
-def _fetch_health_points(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
+def _fetch_health_points(
+    access_token: str,
+    data_type: str,
+    start_text: str,
+    end_text: str,
+    *,
+    page_token: str = "",
+    request_trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     params = {
         "pageSize": 10000 if data_type not in {"sleep", "exercise"} else 25,
         "filter": _health_point_filter(data_type, start_text, end_text),
     }
     if page_token:
         params["pageToken"] = page_token
-    return _get_json(
-        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints?{urlencode(params)}",
-        access_token,
-        context=f"Google Health {data_type} data point listing failed",
+    url = f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints?{urlencode(params)}"
+    trace_entry = _request_trace_entry(
+        request_trace,
+        method="GET",
+        url=url,
+        provider=GOOGLE_HEALTH_PROVIDER_ID,
+        endpoint="dataPoints.list",
+        data_type=data_type,
     )
+    try:
+        response = _get_json(
+            url,
+            access_token,
+            context=f"Google Health {data_type} data point listing failed",
+        )
+        trace_entry["response_status"] = "ok"
+        trace_entry["response_count"] = _response_count(response)
+        logger.info("[google_health] api response endpoint=%s data_type=%s status=ok count=%s", trace_entry["endpoint"], data_type, trace_entry["response_count"])
+        return response
+    except GoogleHealthIntegrationError as exc:
+        trace_entry["response_status"] = "error"
+        trace_entry["error"] = str(exc)[:500]
+        logger.warning("[google_health] api response endpoint=%s data_type=%s status=error error=%s", trace_entry["endpoint"], data_type, str(exc)[:500])
+        raise
 
 
-def _fetch_health_reconciled_points(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
+def _fetch_health_reconciled_points(
+    access_token: str,
+    data_type: str,
+    start_text: str,
+    end_text: str,
+    *,
+    page_token: str = "",
+    request_trace: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     params = {
         "pageSize": 10000 if data_type not in {"sleep", "exercise"} else 25,
         "filter": _health_point_filter(data_type, start_text, end_text),
@@ -625,11 +904,30 @@ def _fetch_health_reconciled_points(access_token: str, data_type: str, start_tex
     }
     if page_token:
         params["pageToken"] = page_token
-    return _get_json(
-        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:reconcile?{urlencode(params)}",
-        access_token,
-        context=f"Google Health {data_type} reconciled data listing failed",
+    url = f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:reconcile?{urlencode(params)}"
+    trace_entry = _request_trace_entry(
+        request_trace,
+        method="GET",
+        url=url,
+        provider=GOOGLE_HEALTH_PROVIDER_ID,
+        endpoint="dataPoints.reconcile",
+        data_type=data_type,
     )
+    try:
+        response = _get_json(
+            url,
+            access_token,
+            context=f"Google Health {data_type} reconciled data listing failed",
+        )
+        trace_entry["response_status"] = "ok"
+        trace_entry["response_count"] = _response_count(response)
+        logger.info("[google_health] api response endpoint=%s data_type=%s status=ok count=%s", trace_entry["endpoint"], data_type, trace_entry["response_count"])
+        return response
+    except GoogleHealthIntegrationError as exc:
+        trace_entry["response_status"] = "error"
+        trace_entry["error"] = str(exc)[:500]
+        logger.warning("[google_health] api response endpoint=%s data_type=%s status=error error=%s", trace_entry["endpoint"], data_type, str(exc)[:500])
+        raise
 
 
 def _compact_health_rollup_response(response: dict[str, Any], data_type: str) -> dict[str, Any]:
@@ -775,8 +1073,13 @@ def _apply_health_point(row: dict[str, Any], data_type: str, point: dict[str, An
             hrv.get("averageHeartRateVariabilityMilliseconds")
             or hrv.get("deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds")
         )
+    elif data_type == "daily-heart-rate-zones" and isinstance(point.get("dailyHeartRateZones"), dict):
+        zones = point["dailyHeartRateZones"].get("heartRateZones")
+        row["heart_rate_zones"] = zones if isinstance(zones, list) else []
     elif data_type == "daily-oxygen-saturation" and isinstance(point.get("dailyOxygenSaturation"), dict):
         row["spo2"] = _rounded(point["dailyOxygenSaturation"].get("averagePercentage"))
+    elif data_type == "daily-respiratory-rate" and isinstance(point.get("dailyRespiratoryRate"), dict):
+        row["breathing_rate"] = _rounded(point["dailyRespiratoryRate"].get("breathsPerMinute"))
     elif data_type == "daily-sleep-temperature-derivations" and isinstance(point.get("dailySleepTemperatureDerivations"), dict):
         temp = point["dailySleepTemperatureDerivations"]
         nightly = _rounded(temp.get("nightlyTemperatureCelsius"))
@@ -795,7 +1098,14 @@ def _point_day(data_type: str, point: dict[str, Any]) -> str:
         interval = point["sleep"].get("interval") if isinstance(point["sleep"].get("interval"), dict) else {}
         civil = interval.get("civilEndTime") if isinstance(interval.get("civilEndTime"), dict) else {}
         return _google_date_text(civil.get("date")) or _date_from_google_datetime(interval.get("endTime"))
-    for key in ("dailyRestingHeartRate", "dailyHeartRateVariability", "dailyOxygenSaturation", "dailySleepTemperatureDerivations"):
+    for key in (
+        "dailyRestingHeartRate",
+        "dailyHeartRateVariability",
+        "dailyHeartRateZones",
+        "dailyOxygenSaturation",
+        "dailyRespiratoryRate",
+        "dailySleepTemperatureDerivations",
+    ):
         if isinstance(point.get(key), dict):
             day = _google_date_text(point[key].get("date"))
             if day:
@@ -861,7 +1171,7 @@ def build_google_health_records(items: list[dict[str, Any]] | pd.DataFrame | Non
         day = str(row.get("date") or "")[:10]
         if not day:
             continue
-        source = str(row.get("source") or "google_health")
+        source = str(row.get("source") or GOOGLE_HEALTH_PROVIDER_ID)
         daily_summary = {
             "summary_id": f"google_health_daily:{day}",
             "date": day,
@@ -962,12 +1272,100 @@ def fetch_daily_metrics(
     if not str(access_token or "").strip():
         return {
             "status": "missing_access_token",
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
             "items": [],
             "message": "No Google Health access token is available.",
+            "google_health_api_sync_available": False,
+            "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+            "google_fit_legacy_data_source_status": "not_found",
+            "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
+            "api_request_log": [],
+            "api_request_counts": {"total": 0, "google_health": 0, "google_fit_legacy": 0, "google_oauth": 0, "unknown": 0},
+            "requests_sent_to_google_health_api": 0,
+            "requests_sent_to_fitness_api": 0,
+            "exact_endpoint_urls": [],
+            "google_health_api_requests": [],
+            "fitness_api_requests": [],
         }
     today = datetime.now(_app_timezone()).date()
     end_text = _date_text(end_date, today)
     start_text = _date_text(start_date, date.fromisoformat(end_text) - timedelta(days=13))
+    base_url = api_base_url()
+    if is_legacy_google_fit_base_url(base_url):
+        logger.warning("[google_health] sync blocked because legacy Google Fit REST base URL is configured: %s", base_url)
+        return {
+            "status": "ok",
+            "items": [],
+            "message": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
+            "date_range": {"start_date": start_text, "end_date": end_text},
+            "records": build_google_health_records([]),
+            "warnings": [GOOGLE_FIT_LEGACY_CONFIG_MESSAGE],
+            "optional_metric_warnings": [],
+            "required_metric_failures": [],
+            "data_sources": {
+                "status": "legacy_google_fit_configured",
+                "message": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
+                "data_sources": [],
+                "paired_devices": [],
+                "data_type_names": [],
+                "available_data_types": [],
+                "data_source_count": 0,
+                "paired_device_count": 0,
+                "api_base_url": base_url,
+                "api_path": GOOGLE_FIT_LEGACY_API_PATH,
+                "api_path_label": GOOGLE_FIT_LEGACY_API_LABEL,
+                "provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+                "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+                "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+                "legacy_google_fit_detected": True,
+                "google_health_api_sync_available": False,
+                "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+                "google_fit_legacy_data_source_status": "found",
+                "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_FOUND_LABEL,
+            },
+            "provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+            "api_base_url": base_url,
+            "api_path": GOOGLE_FIT_LEGACY_API_PATH,
+            "api_path_label": GOOGLE_FIT_LEGACY_API_LABEL,
+            "google_health_api_sync_available": False,
+            "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+            "google_fit_legacy_data_source_status": "found",
+            "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_FOUND_LABEL,
+            "google_fit_unused": False,
+            "deprecated_fitness_api_unused": False,
+            "legacy_google_fit_detected": True,
+            "phone_app_data_note": "Deprecated Google Fit/Fitness API endpoints are not Google Health API data and are not used for successful wearable sync.",
+            "fallback_plan": ["google_health_api_v4"],
+            "discovered_metric_groups": {},
+            "requested_scopes": scopes(),
+            "requested_data_types": [],
+            "raw_aggregate_responses": {},
+            "raw_health_responses": {},
+            "raw_response_count": 0,
+            "raw_bucket_count": 0,
+            "fetched_days": 0,
+            "populated_days": 0,
+            "placeholder_rows": [],
+            "empty_date_rows": [],
+            "empty_date_rows_count": 0,
+            "populated_metric_counts_by_day": {},
+            "populated_fields_by_metric": {},
+            "data_available": False,
+            "recommended_next_action": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
+            "fields_populated_count": 0,
+            "fields_missing_count": 0,
+            "api_request_log": [],
+            "api_request_counts": {"total": 0, "google_health": 0, "google_fit_legacy": 0, "google_oauth": 0, "unknown": 0},
+            "requests_sent_to_google_health_api": 0,
+            "requests_sent_to_fitness_api": 0,
+            "exact_endpoint_urls": [],
+            "google_health_api_requests": [],
+            "fitness_api_requests": [],
+        }
     rows_by_day: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     optional_metric_warnings: list[str] = []
@@ -975,25 +1373,33 @@ def fetch_daily_metrics(
     raw_aggregate_responses: dict[str, Any] = {}
     data_source_summary: dict[str, Any] = {
         "status": "not_checked",
+        "provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
         "data_sources": [],
         "data_type_names": [],
         "available_data_types": GOOGLE_HEALTH_DATA_TYPES.copy(),
         "data_source_count": 0,
         "paired_devices": [],
         "paired_device_count": 0,
+        "google_health_api_sync_available": True,
+        "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL,
+        "google_fit_legacy_data_source_status": "not_found",
+        "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
     }
     discovered_groups: dict[str, list[str]] = {
         "daily_rollup": GOOGLE_HEALTH_DAILY_ROLLUP_TYPES.copy(),
         "daily_points": GOOGLE_HEALTH_DAILY_POINT_TYPES.copy(),
         "session_points": GOOGLE_HEALTH_SESSION_POINT_TYPES.copy(),
     }
+    api_request_log: list[dict[str, Any]] = []
     requested_data_types: list[str] = []
     recommended_next_action = ""
     raw_response_count = 0
     populated_by_metric: dict[str, int] = {}
 
     try:
-        data_sources = list_data_sources(access_token)
+        data_sources = list_data_sources(access_token, request_trace=api_request_log)
         data_source_summary = {
             "status": data_sources.get("status", "ok"),
             "data_sources": data_sources.get("data_sources") or [],
@@ -1002,8 +1408,15 @@ def fetch_daily_metrics(
             "available_data_types": data_sources.get("available_data_types") or GOOGLE_HEALTH_DATA_TYPES.copy(),
             "data_source_count": int(data_sources.get("data_source_count") or 0),
             "paired_device_count": int(data_sources.get("paired_device_count") or data_sources.get("data_source_count") or 0),
-            "api_path": GOOGLE_HEALTH_API_PATH,
-            "api_path_label": GOOGLE_HEALTH_API_LABEL,
+            "api_path": data_sources.get("api_path", GOOGLE_HEALTH_API_PATH),
+            "api_path_label": data_sources.get("api_path_label", GOOGLE_HEALTH_API_LABEL),
+            "provider": data_sources.get("provider", GOOGLE_HEALTH_PROVIDER_ID),
+            "primary_provider": data_sources.get("primary_provider", GOOGLE_HEALTH_PROVIDER_ID),
+            "legacy_provider": data_sources.get("legacy_provider", GOOGLE_FIT_LEGACY_PROVIDER_ID),
+            "google_health_api_sync_available": data_sources.get("google_health_api_sync_available", True),
+            "google_health_api_sync_label": data_sources.get("google_health_api_sync_label", GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL),
+            "google_fit_legacy_data_source_status": data_sources.get("google_fit_legacy_data_source_status", "not_found"),
+            "google_fit_legacy_data_source_label": data_sources.get("google_fit_legacy_data_source_label", GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL),
         }
     except GoogleHealthIntegrationError as exc:
         message = f"Google Health paired device listing failed: {exc}"
@@ -1014,7 +1427,13 @@ def fetch_daily_metrics(
     for data_type in GOOGLE_HEALTH_DAILY_ROLLUP_TYPES:
         requested_data_types.append(data_type)
         try:
-            response = _fetch_health_daily_rollup(access_token, data_type, start_text, end_text)
+            response = _fetch_health_daily_rollup(
+                access_token,
+                data_type,
+                start_text,
+                end_text,
+                request_trace=api_request_log,
+            )
         except GoogleHealthIntegrationError as exc:
             failure = f"Google Health API {data_type} dailyRollUp failed: {exc}"
             if data_type in {"heart-rate"}:
@@ -1040,17 +1459,29 @@ def fetch_daily_metrics(
     for data_type in [*GOOGLE_HEALTH_DAILY_POINT_TYPES, *GOOGLE_HEALTH_SESSION_POINT_TYPES]:
         requested_data_types.append(data_type)
         try:
-            response = _fetch_health_reconciled_points(access_token, data_type, start_text, end_text)
+            response = _fetch_health_reconciled_points(
+                access_token,
+                data_type,
+                start_text,
+                end_text,
+                request_trace=api_request_log,
+            )
             endpoint = "reconcile"
         except GoogleHealthIntegrationError as reconcile_error:
             try:
-                response = _fetch_health_points(access_token, data_type, start_text, end_text)
+                response = _fetch_health_points(
+                    access_token,
+                    data_type,
+                    start_text,
+                    end_text,
+                    request_trace=api_request_log,
+                )
                 endpoint = "list"
             except GoogleHealthIntegrationError as list_error:
                 message = f"Google Health API {data_type} dataPoints failed: reconcile={reconcile_error}; list={list_error}"
                 if data_type in {"daily-resting-heart-rate", "daily-heart-rate-variability"}:
                     optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
-                elif data_type in {"daily-oxygen-saturation", "daily-sleep-temperature-derivations", "respiratory-rate-sleep-summary"}:
+                elif data_type in {"daily-heart-rate-zones", "daily-oxygen-saturation", "daily-respiratory-rate", "daily-sleep-temperature-derivations", "respiratory-rate-sleep-summary"}:
                     optional_metric_warnings.append("Optional Google Health vitals unavailable.")
                 else:
                     warnings.append(message)
@@ -1070,6 +1501,18 @@ def fetch_daily_metrics(
 
     all_items = [_finalize_health_daily_row(row) for _, row in sorted(rows_by_day.items())]
     all_items = _with_resting_hr_baselines(all_items)
+    for row in all_items:
+        row["source"] = GOOGLE_HEALTH_PROVIDER_ID
+        row["provider"] = GOOGLE_HEALTH_PROVIDER_ID
+        row["populated_metric_count"] = populated_metric_count(row)
+        row["placeholder"] = row["populated_metric_count"] <= 0
+        row["raw_payload"] = {
+            "api_base_url": base_url,
+            "api_path": GOOGLE_HEALTH_API_PATH,
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "date": row.get("date"),
+            "requested_data_types": requested_data_types,
+        }
     items = [row for row in all_items if has_populated_metrics(row)]
     empty_items = [row for row in all_items if not has_populated_metrics(row)]
     empty_date_rows = [str(row.get("date") or "")[:10] for row in empty_items if str(row.get("date") or "").strip()]
@@ -1095,13 +1538,17 @@ def fetch_daily_metrics(
     optional_metric_warnings = list(dict.fromkeys(optional_metric_warnings))
     warnings = list(dict.fromkeys([*warnings, *optional_metric_warnings]))
     requested_data_types = _unique_preserve_order(requested_data_types)
+    api_request_counts = _request_trace_counts(api_request_log)
+    google_health_api_requests = [entry for entry in api_request_log if entry.get("api_family") == "google_health"]
+    fitness_api_requests = [entry for entry in api_request_log if entry.get("api_family") == "google_fit_legacy"]
+    exact_endpoint_urls = [str(entry.get("url") or "") for entry in api_request_log if str(entry.get("url") or "").strip()]
     for warning in warnings:
         if warning.startswith("Missing") or warning.startswith("No Google Health") or "unavailable" in warning.lower():
             logger.warning("[google_health] %s", warning)
     records = build_google_health_records(items)
     field_counts = _field_count_summary(all_items)
     logger.info(
-        "[google_health] fetched v4 metrics populated_days=%s empty_days=%s raw_points=%s warnings=%s start=%s end=%s paired_devices=%s",
+        "[google_health] fetched v4 metrics populated_days=%s empty_days=%s raw_points=%s warnings=%s start=%s end=%s paired_devices=%s health_requests=%s fitness_requests=%s",
         len(items),
         len(empty_items),
         raw_response_count,
@@ -1109,6 +1556,8 @@ def fetch_daily_metrics(
         start_text,
         end_text,
         data_source_summary.get("paired_device_count", 0),
+        api_request_counts.get("google_health", 0),
+        api_request_counts.get("google_fit_legacy", 0),
     )
     return {
         "status": "ok",
@@ -1127,6 +1576,14 @@ def fetch_daily_metrics(
         "api_base_url": api_base_url(),
         "api_path": GOOGLE_HEALTH_API_PATH,
         "api_path_label": GOOGLE_HEALTH_API_LABEL,
+        "provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "primary_provider": GOOGLE_HEALTH_PROVIDER_ID,
+        "legacy_provider": GOOGLE_FIT_LEGACY_PROVIDER_ID,
+        "google_connection_label": GOOGLE_CONNECTED_LABEL,
+        "google_health_api_sync_available": True,
+        "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL,
+        "google_fit_legacy_data_source_status": "not_found",
+        "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
         "google_fit_unused": True,
         "deprecated_fitness_api_unused": True,
         "phone_app_data_note": "Google Health API v4 is the primary wearable provider. Deprecated Google Fit/Fitness API endpoints are not used for sync.",
@@ -1147,22 +1604,20 @@ def fetch_daily_metrics(
         "populated_fields_by_metric": populated_by_metric,
         "data_available": bool(items),
         "recommended_next_action": recommended_next_action,
+        "api_request_log": api_request_log,
+        "api_request_counts": api_request_counts,
+        "requests_sent_to_google_health_api": int(api_request_counts.get("google_health") or 0),
+        "requests_sent_to_fitness_api": int(api_request_counts.get("google_fit_legacy") or 0),
+        "exact_endpoint_urls": exact_endpoint_urls,
+        "google_health_api_requests": google_health_api_requests,
+        "fitness_api_requests": fitness_api_requests,
         **field_counts,
     }
 
 
-def normalize_daily_metrics(metrics: list[dict] | pd.DataFrame | None, source: str = "google_health") -> pd.DataFrame:
+def normalize_daily_metrics(metrics: list[dict] | pd.DataFrame | None, source: str = GOOGLE_HEALTH_PROVIDER_ID) -> pd.DataFrame:
     """Normalize Google Health daily payloads into wearable metric rows."""
-    raw = metrics.copy() if isinstance(metrics, pd.DataFrame) else pd.DataFrame(metrics or [])
-    if raw.empty:
-        return pd.DataFrame(columns=WEARABLE_METRIC_COLUMNS)
-
-    normalized = pd.DataFrame()
-    for column in WEARABLE_METRIC_COLUMNS:
-        normalized[column] = raw[column] if column in raw.columns else pd.NA
-    normalized["source"] = normalized["source"].fillna(source).astype(str).str.strip().replace("", source)
-    normalized = normalized.where(pd.notna(normalized), None)
-    return normalized[WEARABLE_METRIC_COLUMNS]
+    return normalize_wearable_metric_rows(metrics, source=source, provider=source)
 
 
 def saved_token_state(settings: dict | None = None) -> tuple[dict[str, Any], dict[str, Any]]:

@@ -1,6 +1,6 @@
-"""Google Health dashboard signals.
+"""Wearable dashboard signals.
 
-These helpers keep Google Health calories as context only. Saved adaptive
+These helpers keep wearable calories as context only. Saved adaptive
 targets remain the baseline, and calorie changes require bodyweight trend
 confirmation before being suggested.
 """
@@ -26,6 +26,8 @@ GOOGLE_HEALTH_SIGNAL_FIELDS = [
     "hrv",
     "average_hr",
     "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
     "steps",
     "active_minutes",
     "active_zone_minutes",
@@ -35,6 +37,8 @@ GOOGLE_HEALTH_SIGNAL_FIELDS = [
     "calories_burned",
     "active_calories_burned",
     "basal_calories_burned",
+    "workout_minutes",
+    "cardio_load",
     "breathing_rate",
     "spo2",
     "skin_temperature",
@@ -97,7 +101,13 @@ def _same_day_row(rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
 
 
 def _value_present(value: Any, *, zero_is_missing: bool = False) -> bool:
-    if value in (None, "", [], {}):
+    if value is None:
+        return False
+    if isinstance(value, str) and not value.strip():
+        return False
+    if str(value).strip().lower() in {"nan", "none", "<na>", "nat"}:
+        return False
+    if isinstance(value, (list, tuple, dict, set)) and not value:
         return False
     parsed = _num(value)
     if zero_is_missing and parsed is not None and parsed <= 0:
@@ -105,10 +115,27 @@ def _value_present(value: Any, *, zero_is_missing: bool = False) -> bool:
     return True
 
 
+def _booleanish(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"true", "1", "yes", "placeholder"}
+
+
+def google_health_populated_metric_count(row: dict[str, Any] | None) -> int:
+    sample = row if isinstance(row, dict) else {}
+    stored = _num(sample.get("populated_metric_count"))
+    if stored is not None and stored > 0:
+        return int(stored)
+    return sum(1 for field in GOOGLE_HEALTH_SIGNAL_FIELDS if _value_present(sample.get(field), zero_is_missing=True))
+
+
+def google_health_row_has_metrics(row: dict[str, Any] | None) -> bool:
+    sample = row if isinstance(row, dict) else {}
+    return not _booleanish(sample.get("placeholder")) and google_health_populated_metric_count(sample) > 0
+
+
 def _compact_debug_row(row: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(row, dict):
         return {}
-    keep = {"date", "source", *GOOGLE_HEALTH_SIGNAL_FIELDS}
+    keep = {"date", "source", "provider", "populated_metric_count", "placeholder", "raw_payload", *GOOGLE_HEALTH_SIGNAL_FIELDS}
     return {key: row.get(key) for key in keep if key in row}
 
 
@@ -158,6 +185,10 @@ def merge_google_health_rows(
     absorb("google_health_heart", heart_rows)
     absorb("google_health_activity", activity_rows)
     absorb("google_health_recovery_signals", recovery_signal_rows)
+    for row in by_date.values():
+        count = google_health_populated_metric_count(row)
+        row["populated_metric_count"] = count
+        row["placeholder"] = count <= 0
     return sorted(by_date.values(), key=lambda row: _date_text(row.get("date")))
 
 
@@ -232,7 +263,7 @@ def _sleep_signal(row: dict[str, Any]) -> dict[str, Any]:
         "awake_minutes": _round(_num(row.get("awake_minutes")), 0),
         "efficiency": _round(efficiency, 0),
         "poor_sleep": poor,
-        "message": "Sleep data unavailable from Google Health." if status == "insufficient_data" else "Sleep is supporting recovery." if status == "good" else "Sleep quality is a recovery limiter." if status == "poor" else "Sleep is adequate, but worth watching.",
+        "message": "Sleep data unavailable from wearable provider." if status == "insufficient_data" else "Sleep is supporting recovery." if status == "good" else "Sleep quality is a recovery limiter." if status == "poor" else "Sleep is adequate, but worth watching.",
     }
 
 
@@ -329,7 +360,7 @@ def _missing_metric_warnings(row: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     for label, values in checks:
         if all(_positive_num(value) is None for value in values):
-            warnings.append(f"Google Health {label} metric is missing for this date.")
+            warnings.append(f"Wearable {label} metric is missing for this date.")
     return warnings
 
 
@@ -371,27 +402,36 @@ def build_google_health_dashboard_signals(
     body_rows: list[dict[str, Any]],
     today: str,
 ) -> dict[str, Any]:
-    """Return dashboard-ready Google Health recovery and calorie context."""
+    """Return dashboard-ready wearable recovery and calorie context."""
     day = _date_text(today)
-    rows = [dict(row) for row in wearable_rows if isinstance(row, dict)]
+    all_rows = [dict(row) for row in wearable_rows if isinstance(row, dict)]
+    rows = [row for row in all_rows if google_health_row_has_metrics(row)]
+    placeholder_rows = [row for row in all_rows if not google_health_row_has_metrics(row)]
     row = _same_day_row(rows, day)
     if not row:
         latest_date = sorted([_date_text(item.get("date")) for item in rows if _date_text(item.get("date"))])
-        reason = "no_data_for_date" if latest_date else "no_wearable_data_connected"
+        reason = "no_data_for_date" if latest_date else "connected_no_wearable_metrics" if placeholder_rows else "no_wearable_data_connected"
         return {
             "status": "insufficient_data",
-            "source": "google_health",
+            "source": "wearable_metrics",
             "date": day,
             "reason": reason,
             "latest_metric_date": latest_date[-1] if latest_date else "",
             "message": (
-                "No Google Health data for this date. Sync Google Health or choose a date with wearable data."
+                "No wearable metrics for this date. Sync a wearable provider or choose a date with wearable data."
                 if latest_date
-                else "No wearable data connected. Connect or sync Google Health to enable recovery signals."
+                else "Connected, but no wearable metrics are available yet."
+                if placeholder_rows
+                else "No wearable data connected. Connect or sync a wearable provider to enable recovery signals."
             ),
             "debug": {
                 "metric_rows_available": len(rows),
+                "raw_metric_rows_available": len(all_rows),
+                "placeholder_rows_ignored": len(placeholder_rows),
                 "latest_metric_date": latest_date[-1] if latest_date else "",
+                "latest_raw_row": {"wearable_metrics": _compact_debug_row(placeholder_rows[-1])} if placeholder_rows else {},
+                "fields_used": {},
+                "missing_fields": GOOGLE_HEALTH_SIGNAL_FIELDS,
             },
         }
 
@@ -422,11 +462,33 @@ def build_google_health_dashboard_signals(
         abnormal_signals.append("Body temperature elevated")
     if subjective["abnormal"]:
         abnormal_signals.append("Poor recovery reported")
-    sickness_status = "warning" if len(abnormal_signals) >= 2 else "watch" if abnormal_signals else "clear"
+    vitals_or_heart_available = any(
+        value is not None
+        for value in (
+            rhr.get("resting_hr"),
+            hrv.get("hrv"),
+            breathing_rate,
+            spo2,
+            skin_temperature,
+            body_temperature,
+            subjective.get("score"),
+            subjective.get("fatigue"),
+            subjective.get("sleep_quality"),
+        )
+    )
+    sickness_status = (
+        "warning"
+        if len(abnormal_signals) >= 2
+        else "watch"
+        if abnormal_signals
+        else "clear"
+        if vitals_or_heart_available
+        else "insufficient_data"
+    )
     sickness_warning = {
         "status": sickness_status,
-        "label": "Possible sickness / elevated recovery risk" if sickness_status == "warning" else "Recovery watch" if sickness_status == "watch" else "No sickness pattern detected",
-        "message": "Consider reducing intensity today. Prioritize sleep, hydration, and easy movement." if sickness_status == "warning" else "One recovery marker is off; keep intensity honest." if sickness_status == "watch" else "No multi-signal sickness pattern from available wearable data.",
+        "label": "Possible sickness / elevated recovery risk" if sickness_status == "warning" else "Recovery watch" if sickness_status == "watch" else "No sickness pattern detected" if sickness_status == "clear" else "Sickness pattern unavailable",
+        "message": "Consider reducing intensity today. Prioritize sleep, hydration, and easy movement." if sickness_status == "warning" else "One recovery marker is off; keep intensity honest." if sickness_status == "watch" else "No multi-signal sickness pattern from available wearable data." if sickness_status == "clear" else "No wearable vitals are available to evaluate sickness/recovery stress.",
         "abnormal_signals": abnormal_signals,
         "signal_count": len(abnormal_signals),
         "disclaimer": "This is not a diagnosis.",
@@ -483,7 +545,7 @@ def build_google_health_dashboard_signals(
         "logged_intake": _round(intake, 0),
         "intake_vs_burned": _round(calorie_delta, 0),
         "status": calorie_status,
-        "message": "Wearable burn unavailable from Google Health." if calorie_status == "insufficient_data" else "Likely near maintenance from intake vs Google Health burn." if calorie_status == "likely_near_maintenance" else "Google Health burn is context only; saved target remains bodyweight-trend based.",
+        "message": "Wearable burn unavailable." if calorie_status == "insufficient_data" else "Likely near maintenance from intake vs wearable burn." if calorie_status == "likely_near_maintenance" else "Wearable burn is context only; saved target remains bodyweight-trend based.",
     }
     suggested_calorie_adjustment = {
         "adjustment": suggested_adjustment,
@@ -516,6 +578,8 @@ def build_google_health_dashboard_signals(
         "activity_load": activity,
         "debug": {
             "metric_rows_available": len(rows),
+            "raw_metric_rows_available": len(all_rows),
+            "placeholder_rows_ignored": len(placeholder_rows),
             "selected_date": day,
             "source_table": ", ".join(row.get("_source_tables") or ["wearable_metrics"]),
             "source_tables": row.get("_source_tables") or ["wearable_metrics"],

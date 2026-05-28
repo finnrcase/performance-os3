@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 from uuid import uuid4
 
@@ -18,12 +19,17 @@ def _today_iso() -> str:
 
 
 def _number_or_none(value: Any) -> float | None:
-    if value in {"", None}:
+    if value is None:
+        return None
+    if isinstance(value, str) and not value.strip():
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except (TypeError, ValueError):
         return None
+    if pd.isna(parsed):
+        return None
+    return parsed
 
 
 def _number(value: Any, default: float = 0.0) -> float:
@@ -44,6 +50,33 @@ def _sort_by_date(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _valid_json_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+
+
+def _wearable_metric_value_present(value: Any) -> bool:
+    parsed = _number_or_none(value)
+    return parsed is not None and parsed > 0
+
+
+def _wearable_metric_count(item: dict[str, Any]) -> int:
+    return sum(1 for field in WEARABLE_NUMERIC_COLUMNS if _wearable_metric_value_present(item.get(field)))
+
+
+def _booleanish(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"true", "1", "yes", "placeholder"}
+
+
+def _raw_payload_value(value: Any) -> Any:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (dict, list)):
+        return value
+    text = str(value)
+    if text.strip().lower() in {"", "nan", "none", "<na>", "nat"}:
+        return ""
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return text
 
 
 def _normalize_recovery(payload: dict[str, Any]) -> dict[str, Any]:
@@ -94,8 +127,12 @@ def _normalize_wearable_metric(payload: dict[str, Any]) -> dict[str, Any]:
     item["id"] = item["metric_id"]
     item["date"] = str(item.get("date") or _today_iso())[:10]
     item["source"] = str(item.get("source") or "manual").strip() or "manual"
+    item["provider"] = str(item.get("provider") or item.get("source") or "manual").strip() or "manual"
     for field in WEARABLE_NUMERIC_COLUMNS:
         item[field] = _number_or_none(item.get(field))
+    item["populated_metric_count"] = _wearable_metric_count(item)
+    item["placeholder"] = _booleanish(item.get("placeholder")) or item["populated_metric_count"] <= 0
+    item["raw_payload"] = _raw_payload_value(item.get("raw_payload"))
     item.setdefault("created_at", now)
     item["updated_at"] = now
     return item
@@ -135,8 +172,22 @@ def get_wearable_metrics(limit: int = 500) -> dict[str, Any]:
     rows = fetch_json_rows("wearable_metrics", limit=limit, date_field="date")
     if rows and "_db_error" in rows[0]:
         return {"status": "error", "items": [], "message": "Wearable metrics are unavailable.", "diagnostics": rows[0]["_db_error"]}
-    items = _sort_by_date([_normalize_wearable_metric(row) for row in _valid_json_rows(rows)])
-    return {"status": "ok", "items": items, "source": "wearable_metrics", "diagnostics": {"rows": len(items), "storage": "jsonb"}}
+    normalized = _sort_by_date([_normalize_wearable_metric(row) for row in _valid_json_rows(rows)])
+    placeholder_items = [item for item in normalized if item.get("placeholder")]
+    items = [item for item in normalized if not item.get("placeholder")]
+    return {
+        "status": "ok",
+        "items": items,
+        "placeholder_items": placeholder_items,
+        "source": "wearable_metrics",
+        "message": "Connected, but no wearable metrics are available yet." if normalized and not items else "Wearable metrics loaded.",
+        "diagnostics": {
+            "rows": len(normalized),
+            "valid_rows": len(items),
+            "placeholder_rows": len(placeholder_items),
+            "storage": "jsonb",
+        },
+    }
 
 
 @router.post("/api/wearables/metrics")

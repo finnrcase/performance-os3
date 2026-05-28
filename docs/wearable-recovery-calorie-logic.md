@@ -6,8 +6,8 @@ dashboard signals. It is intended for internal review and external analysis of
 the calculation logic.
 
 The system is deterministic. The wearable/recovery/calorie logic does not use a
-language model to create scores. It uses saved local data, Google Health daily
-sync rows, and explicit thresholds.
+language model to create scores. It uses saved local data, normalized wearable
+rows, and explicit thresholds.
 
 Primary implementation files:
 
@@ -33,8 +33,13 @@ Primary implementation files:
    state in the app settings metadata and `google_health_connections`.
 6. Manual sync calls `/api/google-health/sync`.
 7. The backend refreshes the access token if needed.
-8. The backend requests daily aggregate Google Fitness/Health data.
-9. Normalized daily rows are saved to `wearable_metrics`.
+8. The backend requests daily Google Health API v4 data from
+   `https://health.googleapis.com/v4/users/me/...` using the `google_health`
+   provider identifier. Deprecated Google Fit/Fitness REST endpoints are
+   quarantined as `google_fit_legacy` and are not counted as successful Google
+   Health wearable sync.
+9. Provider-specific payloads are normalized into the provider-agnostic
+   `wearable_metrics` schema.
 10. Flexible raw category records are saved to:
     - `google_health_daily_summary`
     - `google_health_sleep`
@@ -43,7 +48,8 @@ Primary implementation files:
     - `google_health_recovery_signals`
     - `google_health_sync_runs`
 11. `/api/dashboard/core` loads nutrition, training, recovery, bodyweight, and
-    wearable rows.
+    normalized `wearable_metrics` rows. Dashboard/recovery calculations do not
+    read provider-specific raw tables directly.
 12. `build_google_health_dashboard_signals` creates dashboard-ready sleep,
     recovery, sickness, calorie, and activity payloads.
 13. `frontend/src/app/page.tsx` renders the Google Health Signals card and the
@@ -52,6 +58,30 @@ Primary implementation files:
 Google Health sync is not part of startup. It runs only when the user clicks
 Sync Now, so Google Health cannot freeze app boot. Dashboard startup reads
 already-saved wearable rows only.
+
+## Wearable Provider Layer
+
+Performance OS separates provider sync from recovery calculations:
+
+1. Raw provider sync:
+   - `google_health`
+   - `google_fit_legacy`
+   - `apple_health_export`
+   - `withings`
+   - future providers
+2. Normalization:
+   - each provider maps into `wearable_metrics`
+   - every row includes `source`, `provider`, `populated_metric_count`,
+     `placeholder`, and `raw_payload`
+3. Dashboard and recovery:
+   - read only normalized `wearable_metrics`
+   - ignore placeholder rows with no populated metrics
+   - treat missing metrics as unavailable, not zero
+
+This keeps provider churn isolated to sync/normalization code. Recovery,
+readiness, calorie context, and history charts use the same normalized contract
+regardless of whether the source is Google Health, an Apple Health export,
+Withings, or a future wearable provider.
 
 ## Recovery Score Logic
 

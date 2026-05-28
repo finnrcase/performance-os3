@@ -7,6 +7,7 @@ from src.wearables import (
     calculate_training_readiness_signals,
     calculate_wearable_recovery_signals,
     load_wearable_metrics,
+    normalize_wearable_metric_rows,
     save_wearable_metrics,
 )
 
@@ -57,6 +58,28 @@ def test_save_wearable_metrics_handles_missing_columns(monkeypatch, tmp_path):
     assert len(loaded) == 1
     assert loaded.iloc[0]["steps"] == 1000
     assert loaded.iloc[0]["source"] == "manual"
+
+
+def test_provider_agnostic_wearable_normalization_adds_provider_and_raw_payload():
+    normalized = normalize_wearable_metric_rows(
+        [
+            {
+                "date": "2026-05-24",
+                "source": "apple_health_export",
+                "sleep_hours": "7.2",
+                "raw_payload": {"source_file": "export.xml", "record_count": 4},
+            }
+        ],
+        source="apple_health_export",
+        provider="apple_health_export",
+    )
+
+    row = normalized.iloc[0]
+    assert row["provider"] == "apple_health_export"
+    assert row["sleep_hours"] == 7.2
+    assert row["populated_metric_count"] == 1
+    assert row["placeholder"] is False
+    assert row["raw_payload"] == '{"record_count":4,"source_file":"export.xml"}'
 
 
 def test_calculate_wearable_recovery_signals_empty_and_missing_columns():
@@ -125,8 +148,33 @@ def test_null_wearable_rows_do_not_become_zero_activity_or_calories():
     assert signals["activity"]["steps"]["latest"] is None
     assert signals["activity"]["calories_burned"]["latest"] is None
     assert signals["activity"]["activity_load"]["latest"] is None
-    assert readiness["status"] == "ok"
+    assert signals["status"] == "empty"
+    assert signals["message"] == "Connected, but no wearable metrics are available yet."
+    assert signals["diagnostics"]["placeholder_rows"] == 4
+    assert signals["diagnostics"]["valid_days"] == 0
+    assert readiness["status"] == "insufficient_data"
+    assert readiness["message"] == "Connected, but no wearable metrics are available yet."
+    assert readiness["run_recommendation"]["label"] == "Need more history"
     assert "Recent steps/activity are unusually high" not in readiness["signals"]
+
+
+def test_empty_google_health_rows_do_not_create_run_ok_readiness():
+    rows = [
+        {
+            "metric_id": f"google-empty-{index}",
+            "date": (pd.Timestamp("2026-05-01") + pd.Timedelta(days=index)).date().isoformat(),
+            "source": "google_health",
+        }
+        for index in range(14)
+    ]
+
+    readiness = calculate_training_readiness_signals(pd.DataFrame(rows))
+
+    assert readiness["status"] == "insufficient_data"
+    assert readiness["run_recommendation"]["label"] != "Run OK"
+    assert readiness["diagnostics"]["placeholder_rows"] == 14
+    assert readiness["diagnostics"]["valid_days"] == 0
+    assert readiness["sickness_warning"]["status"] == "insufficient_data"
 
 
 def test_training_readiness_needs_more_wearable_history():

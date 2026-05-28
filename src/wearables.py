@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date as date_type
 from datetime import datetime, timezone
+import json
 from uuid import uuid4
 
 import numpy as np
@@ -21,6 +22,9 @@ WEARABLE_METRIC_COLUMNS = [
     "metric_id",
     "date",
     "source",
+    "provider",
+    "populated_metric_count",
+    "placeholder",
     "sleep_hours",
     "sleep_score",
     "total_sleep_minutes",
@@ -52,9 +56,19 @@ WEARABLE_METRIC_COLUMNS = [
     "spo2",
     "skin_temperature",
     "body_temperature",
+    "raw_payload",
     "created_at",
     "updated_at",
 ]
+WEARABLE_PROVIDER_IDS = {
+    "manual",
+    "mock",
+    "google_health",
+    "google_fit_legacy",
+    "apple_health_export",
+    "withings",
+    "fitbit",
+}
 WEARABLE_NUMERIC_COLUMNS = [
     "sleep_hours",
     "sleep_score",
@@ -100,6 +114,31 @@ ACTIVITY_LOAD_COLUMNS = [
 ]
 
 
+def _metric_value_present(value) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str) and not value.strip():
+        return False
+    if isinstance(value, (list, tuple, dict, set)) and not value:
+        return False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return True
+    if pd.isna(parsed) or not np.isfinite(parsed):
+        return False
+    return parsed > 0
+
+
+def _populated_metric_count(row: pd.Series | dict) -> int:
+    return sum(1 for column in WEARABLE_NUMERIC_COLUMNS if _metric_value_present(row.get(column)))
+
+
 def _empty_wearable_metrics() -> pd.DataFrame:
     return pd.DataFrame(columns=WEARABLE_METRIC_COLUMNS)
 
@@ -116,6 +155,22 @@ def _stable_text(value) -> str:
     return "" if text.lower() in {"", "nan", "none", "<na>", "nat"} else text
 
 
+def _raw_payload_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str):
+        return "" if value.strip().lower() in {"", "nan", "none", "<na>", "nat"} else value
+    try:
+        return json.dumps(value, separators=(",", ":"), sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 def _normalize_date(value) -> str:
     if isinstance(value, datetime):
         return value.date().isoformat()
@@ -127,7 +182,18 @@ def _normalize_date(value) -> str:
     return parsed.date().isoformat()
 
 
-def _normalize_wearable_metrics(wearable_df: pd.DataFrame | None) -> pd.DataFrame:
+def _provider_from_source(source: str, provider: str | None = None) -> str:
+    candidate = _stable_text(provider) or _stable_text(source) or "manual"
+    return candidate
+
+
+def normalize_wearable_metric_rows(
+    wearable_df: pd.DataFrame | list[dict] | None,
+    *,
+    source: str = "manual",
+    provider: str | None = None,
+) -> pd.DataFrame:
+    """Normalize any wearable provider payload into the wearable_metrics schema."""
     df = pd.DataFrame(wearable_df).copy() if wearable_df is not None else _empty_wearable_metrics()
     for column in WEARABLE_METRIC_COLUMNS:
         if column not in df.columns:
@@ -140,13 +206,34 @@ def _normalize_wearable_metrics(wearable_df: pd.DataFrame | None) -> pd.DataFram
         df.loc[missing_ids, "metric_id"] = [str(uuid4()) for _ in range(int(missing_ids.sum()))]
 
     df["date"] = df["date"].apply(_normalize_date)
-    df["source"] = df["source"].fillna("manual").astype(str).str.strip().replace("", "manual")
+    default_source = _stable_text(source) or "manual"
+    df["source"] = df["source"].apply(lambda value: _stable_text(value) or default_source)
+    df["provider"] = df.apply(
+        lambda row: _provider_from_source(str(row.get("source") or default_source), _stable_text(row.get("provider")) or provider),
+        axis=1,
+    )
     for column in WEARABLE_NUMERIC_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
+    df["populated_metric_count"] = df.apply(_populated_metric_count, axis=1).astype(int)
+    existing_placeholder = (
+        df["placeholder"]
+        .fillna(False)
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin({"true", "1", "yes", "placeholder"})
+    )
+    df["placeholder"] = existing_placeholder | (df["populated_metric_count"] <= 0)
+    df["raw_payload"] = df["raw_payload"].apply(_raw_payload_text)
     for column in ["created_at", "updated_at"]:
         df[column] = df[column].fillna("").astype(str)
 
-    return df.sort_values(["date", "source", "created_at"], kind="stable").reset_index(drop=True)
+    df = df.sort_values(["date", "source", "created_at"], kind="stable").reset_index(drop=True)
+    return df.astype(object).where(pd.notna(df), None)
+
+
+def _normalize_wearable_metrics(wearable_df: pd.DataFrame | None) -> pd.DataFrame:
+    return normalize_wearable_metric_rows(wearable_df)
 
 
 def load_wearable_metrics() -> pd.DataFrame:
@@ -169,6 +256,7 @@ def save_wearable_metrics(df: pd.DataFrame | None) -> None:
 def add_wearable_metric_entry(
     date,
     source: str = "manual",
+    provider: str | None = None,
     sleep_hours=None,
     sleep_score=None,
     resting_hr=None,
@@ -185,6 +273,7 @@ def add_wearable_metric_entry(
         "metric_id": str(metric_id or uuid4()),
         "date": _normalize_date(date),
         "source": str(source or "manual").strip() or "manual",
+        "provider": _provider_from_source(str(source or "manual"), provider),
         "sleep_hours": sleep_hours,
         "sleep_score": sleep_score,
         "resting_hr": resting_hr,
@@ -193,6 +282,7 @@ def add_wearable_metric_entry(
         "active_minutes": active_minutes,
         "calories_burned": calories_burned,
         "workout_minutes": workout_minutes,
+        "raw_payload": "",
         "created_at": now,
         "updated_at": now,
     }
@@ -207,13 +297,36 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
     raw = pd.DataFrame(wearable_df).copy() if wearable_df is not None else _empty_wearable_metrics()
     missing_columns = [column for column in WEARABLE_METRIC_COLUMNS if column not in raw.columns]
     df = _normalize_wearable_metrics(raw)
+    diagnostics = {
+        "rows": int(len(raw)),
+        "valid_days": 0,
+        "missing_columns": missing_columns,
+        "placeholder_rows": 0,
+        "valid_rows": 0,
+        "message": "No wearable metrics available yet.",
+        "connected_but_no_metrics": False,
+    }
     if df.empty or "date" not in df.columns:
-        return pd.DataFrame(), {"rows": int(len(raw)), "valid_days": 0, "missing_columns": missing_columns}
+        return pd.DataFrame(), diagnostics
 
     df["_date_ts"] = pd.to_datetime(df["date"], errors="coerce")
     df = df.dropna(subset=["_date_ts"]).copy()
     if df.empty:
-        return pd.DataFrame(), {"rows": int(len(raw)), "valid_days": 0, "missing_columns": missing_columns}
+        return pd.DataFrame(), diagnostics
+
+    df["populated_metric_count"] = pd.to_numeric(df["populated_metric_count"], errors="coerce").fillna(0).astype(int)
+    placeholder_mask = df["placeholder"].fillna(False).astype(bool) | (df["populated_metric_count"] <= 0)
+    diagnostics["placeholder_rows"] = int(placeholder_mask.sum())
+    df = df.loc[~placeholder_mask].copy()
+    diagnostics["valid_rows"] = int(len(df))
+    if df.empty:
+        diagnostics["connected_but_no_metrics"] = bool(len(raw))
+        diagnostics["message"] = (
+            "Connected, but no wearable metrics are available yet."
+            if len(raw)
+            else "No wearable metrics available yet."
+        )
+        return pd.DataFrame(), diagnostics
 
     sum_columns = {
         "steps",
@@ -244,9 +357,10 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
     daily["date"] = daily["_date_ts"].dt.date.astype(str)
     daily = daily[["date", *WEARABLE_NUMERIC_COLUMNS]]
     return daily, {
-        "rows": int(len(raw)),
+        **diagnostics,
         "valid_days": int(len(daily)),
-        "missing_columns": missing_columns,
+        "message": "Wearable metrics available.",
+        "connected_but_no_metrics": False,
     }
 
 
@@ -395,9 +509,10 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
     """
     daily, diagnostics = _aggregate_daily_metrics(wearable_df)
     if daily.empty:
+        message = str(diagnostics.get("message") or "No wearable metrics available yet.")
         return {
             "status": "empty",
-            "message": "No wearable metrics available yet.",
+            "message": message,
             "latest": {},
             "sleep": {
                 "latest": None,
@@ -437,7 +552,7 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
                 "body_temperature": None,
             },
             "activity": _activity_trend(daily),
-            "flags": ["No wearable data yet."],
+            "flags": [message],
             "diagnostics": diagnostics,
         }
 
@@ -733,13 +848,16 @@ def calculate_training_readiness_signals(
     daily, diagnostics = _aggregate_daily_metrics(wearable_df)
     valid_wearable_days = int(diagnostics.get("valid_days", 0))
     if valid_wearable_days < 3:
+        message = str(diagnostics.get("message") or "Need more wearable history.")
+        if valid_wearable_days > 0 or int(diagnostics.get("rows", 0) or 0) == 0:
+            message = "Need more wearable history."
         return {
             "status": "insufficient_data",
-            "message": "Need more wearable history.",
+            "message": message,
             "run_recommendation": {
                 "color": "Gray",
                 "label": "Need more history",
-                "reason": "Log at least 3 days of wearable metrics to start readiness guidance.",
+                "reason": message if diagnostics.get("connected_but_no_metrics") else "Log at least 3 days of wearable metrics to start readiness guidance.",
             },
             "lift_recommendation": {
                 "label": "Need more history",
@@ -753,7 +871,13 @@ def calculate_training_readiness_signals(
                 "label": "Normal hydration/electrolyte risk",
                 "reason": "Not enough wearable context to flag hydration/electrolyte risk.",
             },
-            "signals": ["Need more wearable history."],
+            "sickness_warning": {
+                "status": "insufficient_data",
+                "label": "Sickness pattern unavailable",
+                "message": "No wearable vitals are available yet.",
+                "disclaimer": "This is not a diagnosis.",
+            },
+            "signals": [message],
             "diagnostics": diagnostics,
         }
 

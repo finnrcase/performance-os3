@@ -21,6 +21,7 @@ def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
                     "access_token": "present",
                     "refresh_token": "present",
                     "expires_at": 1,
+                    "scopes": "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
                 },
                 "google_health_sync": {
                     "last_status": "ok",
@@ -35,6 +36,10 @@ def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
 
     assert status == "Connected"
     assert metadata["token_status"] == "valid"
+    assert metadata["provider"] == "google_health"
+    assert metadata["google_health_api_sync_available"] is True
+    assert metadata["google_health_api_sync_label"] == "Google Health API sync available"
+    assert metadata["google_fit_legacy_data_source_status"] == "not_found"
     assert metadata["last_status"] == "ok"
     assert metadata["last_warning"] == "Optional heart rate summary unavailable from Google Health."
     assert metadata["rows_saved"] == 14
@@ -99,11 +104,11 @@ def test_google_health_sources_debug_reports_empty_source_state(monkeypatch):
     settings = {
         "integrations": {},
         "metadata": {
-            "google_health_tokens": {
-                "access_token": "access",
-                "refresh_token": "refresh",
-                "expires_at": 9999999999,
-                "scopes": "https://www.googleapis.com/auth/fitness.activity.read",
+                "google_health_tokens": {
+                    "access_token": "access",
+                    "refresh_token": "refresh",
+                    "expires_at": 9999999999,
+                    "scopes": "https://www.googleapis.com/auth/fitness.activity.read",
             },
             "google_health_sync": {
                 "last_status": "no_data",
@@ -116,6 +121,7 @@ def test_google_health_sources_debug_reports_empty_source_state(monkeypatch):
     with (
         patch("backend_new.routes.integrations.fetch_latest_document", return_value=settings),
         patch("backend_new.routes.integrations._google_health_access_token", return_value="access"),
+        patch("src.integrations.google_health_client.fetch_identity", return_value={"status": "ok", "identity": {"name": "users/me/identity"}}),
         patch("src.integrations.google_health_client.list_data_sources", return_value={"status": "ok", "data_sources": [], "data_type_names": [], "available_data_types": [], "data_source_count": 0}),
     ):
         response = client.get("/api/debug/google-health/sources")
@@ -128,6 +134,89 @@ def test_google_health_sources_debug_reports_empty_source_state(monkeypatch):
     assert payload["available_data_types"] == []
     assert "deprecated Google Fit/Fitness scopes" in payload["recommended_next_action"]
     assert payload["api_path"] == "google_health_v4"
+    assert payload["google_health_api_sync_available"] is False
+    assert payload["google_fit_legacy_data_source_status"] == "found"
+
+
+def test_google_health_raw_debug_groups_metric_counts(monkeypatch):
+    settings = {
+        "integrations": {},
+        "metadata": {
+            "google_health_tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": 9999999999,
+                "scopes": "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+            },
+            "google_health_sync": {
+                "last_status": "ok",
+                "latest_record": "2026-05-28",
+                "raw_health_responses": {
+                    "sleep": {"status": "ok", "point_count": 1, "populated_point_count": 1, "endpoint": "reconcile"},
+                    "steps": {"status": "ok", "point_count": 1, "populated_point_count": 1, "endpoint": "dailyRollUp"},
+                    "daily-heart-rate-variability": {"status": "ok", "point_count": 0, "populated_point_count": 0, "endpoint": "reconcile"},
+                },
+            },
+        },
+    }
+    rows = [{"date": "2026-05-28", "source": "google_health", "sleep_hours": 7.5, "steps": 8123}]
+
+    with (
+        patch("backend_new.routes.integrations.fetch_latest_document", return_value=settings),
+        patch("backend_new.routes.integrations.ensure_jsonb_table", return_value=None),
+        patch("backend_new.routes.integrations.fetch_json_rows", return_value=rows),
+        patch("src.integrations.google_health_client.fetch_identity", return_value={"status": "ok", "identity": {"name": "users/me/identity"}}),
+    ):
+        response = client.get("/api/debug/google-health/raw")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["raw_response_counts_by_metric"]["sleep"]["point_count"] == 1
+    assert payload["raw_response_counts_by_metric"]["steps"]["populated_point_count"] == 1
+    assert payload["populated_fields_by_day"]["2026-05-28"]["fields_populated_count"] == 2
+    assert payload["last_successful_populated_metric_date"] == "2026-05-28"
+
+
+def test_wearables_provider_status_includes_google_diagnostic(monkeypatch):
+    monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_ID", "958682873913-example.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("GOOGLE_HEALTH_REDIRECT_URI", GOOGLE_HEALTH_EXPECTED_CALLBACK_URL)
+    settings = {
+        "integrations": {},
+        "metadata": {
+            "google_health_tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": 9999999999,
+                "scopes": "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+            },
+            "google_health_sync": {
+                "last_status": "no_data",
+                "empty_date_rows_count": 0,
+                "raw_health_responses": {},
+            },
+        },
+    }
+
+    with (
+        patch("backend_new.routes.integrations.fetch_latest_document", return_value=settings),
+        patch("backend_new.routes.integrations._google_health_access_token", return_value="access"),
+        patch("backend_new.routes.integrations.ensure_jsonb_table", return_value=None),
+        patch("backend_new.routes.integrations.fetch_json_rows", return_value=[]),
+        patch("src.integrations.google_health_client.fetch_identity", return_value={"status": "ok", "identity": {"name": "users/me/identity"}}),
+        patch("src.integrations.google_health_client.list_data_sources", return_value={"status": "ok", "data_sources": [], "data_type_names": [], "available_data_types": [], "data_source_count": 0}),
+        patch("backend_new.routes.integrations._fitbit_debug_payload", return_value={"connection_status": "Disconnected", "connected": False, "oauth": {"token_status": "missing", "granted_scopes": []}, "sync": {}, "data_freshness": {}}),
+    ):
+        response = client.get("/api/debug/wearables/provider-status")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["providers"]["google_health"]["diagnostic"]["category"] == "no_backend_readable_sources"
+    assert payload["normalized_contract"]["table"] == "wearable_metrics"
+    assert payload["normalized_contract"]["dashboard_reads_provider_tables"] is False
+    assert "apple_health_export" in payload["providers"]
+    assert "withings" in payload["providers"]
+    assert payload["diagnostic_matrix"]["C_no_backend_readable_sources"] is True
 
 
 def test_google_health_client_id_leading_equals_is_normalized(monkeypatch):

@@ -186,13 +186,10 @@ def test_google_health_zero_sensor_values_are_unavailable_not_real_metrics():
         today="2026-05-27",
     )
 
-    assert result["sleep_quality"]["status"] == "insufficient_data"
-    assert result["sleep_quality"]["duration_hours"] is None
-    assert result["resting_hr_vs_baseline"]["resting_hr"] is None
-    assert result["calories_burned_vs_intake"]["calories_burned"] is None
-    assert result["calories_burned_vs_intake"]["message"] == "Wearable burn unavailable from Google Health."
-    assert result["activity_load"]["status"] == "insufficient_data"
-    assert result["activity_load"]["high_load"] is False
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "connected_no_wearable_metrics"
+    assert result["message"] == "Connected, but no wearable metrics are available yet."
+    assert result["debug"]["placeholder_rows_ignored"] == 1
 
 
 def test_google_health_dashboard_merges_split_google_health_tables():
@@ -244,3 +241,31 @@ def test_google_health_dashboard_merges_split_google_health_tables():
     assert result["resting_hr_vs_baseline"]["resting_hr"] == 54
     assert "google_health_sleep" in result["debug"]["source_tables"]
     assert result["debug"]["fields_used"]["total_calories_burned"] == 2637
+
+
+def test_google_health_dashboard_ignores_empty_placeholder_rows():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "metric_id": "google_health:2026-05-27",
+                "sleep_hours": None,
+                "steps": None,
+                "calories_burned": None,
+                "resting_hr": None,
+                "hrv": None,
+            }
+        ],
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "insufficient_data"
+    assert result["reason"] == "connected_no_wearable_metrics"
+    assert result["message"] == "Connected, but no wearable metrics are available yet."
+    assert result["debug"]["placeholder_rows_ignored"] == 1

@@ -140,7 +140,16 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
 
 
 def _google_health_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    from src.integrations.google_health_client import scopes as google_health_scopes
+    from src.integrations.google_health_client import (
+        GOOGLE_FIT_LEGACY_FOUND_LABEL,
+        GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
+        GOOGLE_FIT_LEGACY_PROVIDER_ID,
+        GOOGLE_HEALTH_PROVIDER_ID,
+        GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL,
+        GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+        is_legacy_google_fit_base_url,
+        scopes as google_health_scopes,
+    )
 
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
     tokens = metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {}
@@ -156,6 +165,23 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
     configured = bool(has_credentials and redirect_configured)
     refresh_token = str(tokens.get("refresh_token") or "").strip()
     access_token = str(tokens.get("access_token") or "").strip()
+    granted_scope_value = tokens.get("scopes") or sync.get("granted_scopes") or (" ".join(google_health_scopes()) if configured else "")
+    granted_scopes = (
+        [str(scope).strip() for scope in granted_scope_value if str(scope).strip()]
+        if isinstance(granted_scope_value, list)
+        else str(granted_scope_value or "").split()
+    )
+    has_googlehealth_scope = any("googlehealth." in scope for scope in granted_scopes)
+    has_legacy_fitness_scope = any("/auth/fitness." in scope for scope in granted_scopes)
+    legacy_google_fit_detected = is_legacy_google_fit_base_url(sync.get("api_base_url") or None)
+    google_health_api_sync_available = bool(
+        configured
+        and refresh_token
+        and not sync.get("needs_reconnect")
+        and not legacy_google_fit_detected
+        and (has_googlehealth_scope or not granted_scopes)
+    )
+    google_fit_legacy_data_source_status = "found" if legacy_google_fit_detected or (has_legacy_fitness_scope and not has_googlehealth_scope) else "not_found"
     if not configured:
         status = "Not configured"
     elif sync.get("needs_reconnect"):
@@ -167,6 +193,22 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
     return status, {
         "connected": status == "Connected",
         "configured": configured,
+        "provider": sync.get("provider", GOOGLE_HEALTH_PROVIDER_ID),
+        "primary_provider": sync.get("primary_provider", GOOGLE_HEALTH_PROVIDER_ID),
+        "legacy_provider": sync.get("legacy_provider", GOOGLE_FIT_LEGACY_PROVIDER_ID),
+        "google_connection_label": "Google connected" if refresh_token else "Google disconnected",
+        "google_health_api_sync_available": bool(sync.get("google_health_api_sync_available", google_health_api_sync_available)) and not legacy_google_fit_detected,
+        "google_health_api_sync_label": GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL
+        if legacy_google_fit_detected
+        else sync.get(
+            "google_health_api_sync_label",
+            GOOGLE_HEALTH_SYNC_AVAILABLE_LABEL if google_health_api_sync_available else GOOGLE_HEALTH_SYNC_UNAVAILABLE_LABEL,
+        ),
+        "google_fit_legacy_data_source_status": sync.get("google_fit_legacy_data_source_status", google_fit_legacy_data_source_status),
+        "google_fit_legacy_data_source_label": sync.get(
+            "google_fit_legacy_data_source_label",
+            GOOGLE_FIT_LEGACY_FOUND_LABEL if google_fit_legacy_data_source_status == "found" else GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
+        ),
         "token_status": "reconnect_required" if sync.get("needs_reconnect") else "valid" if refresh_token else "missing",
         "access_token_present": bool(access_token),
         "refresh_token_present": bool(refresh_token),
@@ -180,7 +222,7 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
             ]
             if not ready
         ],
-        "scopes": " ".join(google_health_scopes()) if configured else "",
+        "scopes": " ".join(granted_scopes),
         "last_synced_at": sync.get("last_synced_at", ""),
         "latest_record": sync.get("latest_record", ""),
         "last_error": sync.get("last_error", ""),
@@ -428,6 +470,8 @@ def settings_payload() -> dict[str, Any]:
                 "last_warning": google_health_service["last_warning"],
                 "last_status": google_health_service["last_status"],
                 "last_message": google_health_service["last_message"],
+                "google_health_api_sync_label": google_health_service["google_health_api_sync_label"],
+                "google_fit_legacy_data_source_label": google_health_service["google_fit_legacy_data_source_label"],
                 "optional_metric_warnings": google_health_service["optional_metric_warnings"],
                 "required_metric_failures": google_health_service["required_metric_failures"],
             },
@@ -510,6 +554,8 @@ def settings_payload() -> dict[str, Any]:
             "last_warning": google_health_service["last_warning"],
             "last_status": google_health_service["last_status"],
             "last_message": google_health_service["last_message"],
+            "google_health_api_sync_label": google_health_service["google_health_api_sync_label"],
+            "google_fit_legacy_data_source_label": google_health_service["google_fit_legacy_data_source_label"],
             "rows_saved": google_health_service["rows_saved"],
             "fields_populated_count": google_health_service["fields_populated_count"],
             "fields_missing_count": google_health_service["fields_missing_count"],

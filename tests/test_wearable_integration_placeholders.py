@@ -182,6 +182,10 @@ def test_google_health_api_v4_response_normalizes_daily_metrics(monkeypatch):
             return {"dataPoints": [{"dailyRestingHeartRate": {"date": day, "beatsPerMinute": 48}}]}
         if "/dataTypes/daily-heart-rate-variability/" in url:
             return {"dataPoints": [{"dailyHeartRateVariability": {"date": day, "averageHeartRateVariabilityMilliseconds": 61}}]}
+        if "/dataTypes/daily-heart-rate-zones/" in url:
+            return {"dataPoints": [{"dailyHeartRateZones": {"date": day, "heartRateZones": [{"zone": "CARDIO", "lowerBoundBpm": 120, "upperBoundBpm": 150}]}}]}
+        if "/dataTypes/daily-respiratory-rate/" in url:
+            return {"dataPoints": [{"dailyRespiratoryRate": {"date": day, "breathsPerMinute": 14.5}}]}
         return {"dataPoints": []}
 
     def fake_post_json(url, _body, _access_token, **_kwargs):
@@ -207,16 +211,26 @@ def test_google_health_api_v4_response_normalizes_daily_metrics(monkeypatch):
     normalized = google_health_client.normalize_daily_metrics(fetched["items"])
 
     assert fetched["status"] == "ok"
+    assert fetched["provider"] == "google_health"
+    assert fetched["primary_provider"] == "google_health"
     assert fetched["api_path"] == "google_health_v4"
     assert fetched["deprecated_fitness_api_unused"] is True
+    assert fetched["google_health_api_sync_available"] is True
+    assert fetched["requests_sent_to_google_health_api"] > 0
+    assert fetched["requests_sent_to_fitness_api"] == 0
+    assert all("health.googleapis.com" in url for url in fetched["exact_endpoint_urls"])
+    assert fetched["api_request_counts"]["google_fit_legacy"] == 0
+    assert "daily-respiratory-rate" in fetched["requested_data_types"]
     assert normalized.iloc[0]["source"] == "google_health"
     assert int(normalized.iloc[0]["steps"]) == 9000
     assert int(normalized.iloc[0]["active_minutes"]) == 62
     assert normalized.iloc[0]["sleep_hours"] == 8
     assert int(normalized.iloc[0]["rem_sleep_minutes"]) == 60
     assert int(normalized.iloc[0]["resting_hr"]) == 48
+    assert normalized.iloc[0]["breathing_rate"] == 14.5
     assert fetched["records"]["sleep"][0]["rem_sleep_minutes"] == 60
     assert fetched["records"]["heart"][0]["max_hr"] == 151
+    assert fetched["records"]["heart"][0]["hr_zones"][0]["zone"] == "CARDIO"
     assert fetched["empty_date_rows_count"] == 0
     assert fetched["fields_populated_count"] > 0
 
@@ -266,6 +280,8 @@ def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
     assert fetched["status"] == "ok"
     assert google_health_client.GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING in fetched["optional_metric_warnings"]
     assert fetched["required_metric_failures"] == []
+    assert fetched["requests_sent_to_google_health_api"] > 0
+    assert fetched["requests_sent_to_fitness_api"] == 0
     assert len(normalized) == 1
     assert normalized.iloc[0]["resting_hr"] is None
     assert requested_urls
@@ -294,8 +310,46 @@ def test_google_health_empty_api_responses_do_not_return_placeholder_rows(monkey
     assert fetched["data_available"] is False
     assert fetched["data_sources"]["data_source_count"] == 0
     assert fetched["api_path"] == "google_health_v4"
+    assert fetched["requests_sent_to_google_health_api"] > 0
+    assert fetched["requests_sent_to_fitness_api"] == 0
     assert google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE in fetched["warnings"]
     assert fetched["recommended_next_action"] == google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE
+
+
+def test_google_health_rejects_legacy_google_fit_rest_base_url(monkeypatch):
+    monkeypatch.setenv("GOOGLE_HEALTH_API_BASE_URL", "https://fitness.googleapis.com")
+
+    def fail_network(*_args, **_kwargs):
+        raise AssertionError("Legacy Google Fit REST must not be queried as Google Health.")
+
+    monkeypatch.setattr(google_health_client, "_get_json", fail_network)
+    monkeypatch.setattr(google_health_client, "_post_json", fail_network)
+
+    fetched = google_health_client.fetch_daily_metrics("token", start_date="2024-05-16", end_date="2024-05-16")
+    sources = google_health_client.list_data_sources("token")
+    normalized = google_health_client.normalize_daily_metrics(fetched["items"])
+
+    assert fetched["status"] == "ok"
+    assert fetched["items"] == []
+    assert normalized.empty
+    assert fetched["api_path"] == "google_fit_legacy"
+    assert fetched["provider"] == "google_fit_legacy"
+    assert fetched["primary_provider"] == "google_health"
+    assert fetched["api_path_label"] == "Deprecated Google Fit REST API"
+    assert fetched["legacy_google_fit_detected"] is True
+    assert fetched["google_health_api_sync_available"] is False
+    assert fetched["google_fit_legacy_data_source_status"] == "found"
+    assert fetched["google_fit_unused"] is False
+    assert fetched["data_available"] is False
+    assert fetched["populated_days"] == 0
+    assert fetched["recommended_next_action"] == google_health_client.GOOGLE_FIT_LEGACY_CONFIG_MESSAGE
+    assert fetched["requests_sent_to_google_health_api"] == 0
+    assert fetched["requests_sent_to_fitness_api"] == 0
+    assert fetched["exact_endpoint_urls"] == []
+    assert sources["status"] == "legacy_google_fit_configured"
+    assert sources["api_path"] == "google_fit_legacy"
+    assert sources["requests_sent_to_google_health_api"] == 0
+    assert sources["requests_sent_to_fitness_api"] == 0
 
 
 def test_google_health_records_include_rhr_baseline_and_activity_model():
@@ -335,4 +389,8 @@ def test_placeholder_normalizers_return_wearable_schema():
     assert fitbit_df.columns.tolist() == WEARABLE_METRIC_COLUMNS
     assert google_df.columns.tolist() == WEARABLE_METRIC_COLUMNS
     assert fitbit_df.iloc[0]["source"] == "fitbit"
+    assert fitbit_df.iloc[0]["provider"] == "fitbit"
     assert google_df.iloc[0]["source"] == "google_health"
+    assert google_df.iloc[0]["provider"] == "google_health"
+    assert google_df.iloc[0]["populated_metric_count"] == 1
+    assert bool(google_df.iloc[0]["placeholder"]) is False

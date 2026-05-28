@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 
 import pandas as pd
 
-from src.wearables import WEARABLE_METRIC_COLUMNS
+from src.wearables import normalize_wearable_metric_rows
 
 
 FITBIT_AUTH_URL = "https://www.fitbit.com/oauth2/authorize"
@@ -489,14 +489,4 @@ def fetch_daily_metrics(
 
 def normalize_daily_metrics(metrics: list[dict] | pd.DataFrame | None, source: str = "fitbit") -> pd.DataFrame:
     """Normalize Fitbit daily metric payloads into wearable metric rows."""
-    raw = metrics.copy() if isinstance(metrics, pd.DataFrame) else pd.DataFrame(metrics or [])
-    if raw.empty:
-        return pd.DataFrame(columns=WEARABLE_METRIC_COLUMNS)
-
-    normalized = pd.DataFrame()
-    for column in WEARABLE_METRIC_COLUMNS:
-        normalized[column] = raw[column] if column in raw.columns else pd.NA
-    normalized["source"] = normalized["source"].fillna(source).astype(str).str.strip().replace("", source)
-    if "date" in normalized:
-        normalized["date"] = normalized["date"].astype(str).str.slice(0, 10)
-    return normalized[WEARABLE_METRIC_COLUMNS]
+    return normalize_wearable_metric_rows(metrics, source=source, provider=source)

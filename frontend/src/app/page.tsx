@@ -345,6 +345,9 @@ type WearableMetricEntry = {
   metric_id: string;
   date: string;
   source: "manual" | "fitbit" | "google_health" | "mock" | string;
+  provider?: "manual" | "fitbit" | "google_health" | "google_fit_legacy" | "apple_health_export" | "withings" | string;
+  populated_metric_count?: number | null;
+  placeholder?: boolean | string | null;
   sleep_hours: number | null;
   sleep_score: number | null;
   total_sleep_minutes?: number | null;
@@ -376,6 +379,7 @@ type WearableMetricEntry = {
   spo2?: number | null;
   skin_temperature?: number | null;
   body_temperature?: number | null;
+  raw_payload?: unknown;
   created_at?: string;
   updated_at?: string;
 };
@@ -1027,6 +1031,8 @@ type SettingsHealthCard = {
     requested_data_types?: string[];
     recommended_next_action?: string;
     api_path_label?: string;
+    google_health_api_sync_label?: string;
+    google_fit_legacy_data_source_label?: string;
     phone_app_data_note?: string;
     optional_metric_warnings?: string[];
     required_metric_failures?: string[];
@@ -1445,7 +1451,7 @@ type SettingsData = {
   appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
-  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; empty_date_rows_count?: number; available_data_types?: string[]; optional_metric_warnings?: string[]; required_metric_failures?: string[]; recommended_next_action?: string; api_path?: string; api_path_label?: string; phone_app_data_note?: string }>;
+  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; empty_date_rows_count?: number; available_data_types?: string[]; optional_metric_warnings?: string[]; required_metric_failures?: string[]; recommended_next_action?: string; api_path?: string; api_path_label?: string; google_health_api_sync_label?: string; google_fit_legacy_data_source_label?: string; phone_app_data_note?: string }>;
 };
 
 type FitbitDebugStage = {
@@ -1529,15 +1535,34 @@ type GoogleHealthSourcesDebugPayload = {
   api_base_url?: string;
   api_path?: string;
   api_path_label?: string;
+  api_request_log?: Array<Record<string, unknown>>;
+  api_request_counts?: Record<string, number>;
+  requests_sent_to_google_health_api?: number;
+  requests_sent_to_fitness_api?: number;
+  exact_endpoint_urls?: string[];
+  google_health_api_requests?: Array<Record<string, unknown>>;
+  fitness_api_requests?: Array<Record<string, unknown>>;
+  google_connection_label?: string;
+  google_health_api_sync_available?: boolean;
+  google_health_api_sync_label?: string;
+  google_fit_legacy_data_source_status?: string;
+  google_fit_legacy_data_source_label?: string;
   google_fit_unused?: boolean;
   deprecated_fitness_api_unused?: boolean;
+  legacy_google_fit_detected?: boolean;
   phone_app_data_note?: string;
   fallback_plan?: string[];
   last_raw_responses?: Record<string, unknown>;
+  raw_response_counts_by_metric?: Record<string, { point_count?: number; populated_point_count?: number; status?: string; data_types?: string[]; errors?: string[] }>;
   populated_fields_by_metric?: Record<string, number>;
   populated_metric_counts_by_day?: Record<string, number>;
+  populated_fields_by_day?: Record<string, { fields_populated_count?: number; fields?: string[]; source?: string }>;
   fields_populated_count?: number;
   fields_missing_count?: number;
+  empty_placeholder_rows_count?: number;
+  last_successful_populated_metric_date?: string;
+  connected_account?: { status?: string; name?: string; health_user_id_preview?: string; legacy_user_id_preview?: string; message?: string };
+  diagnostic?: { category?: string; letter?: string; message?: string };
   empty_row_counts?: {
     empty_date_rows_count?: number;
     empty_date_rows?: string[];
@@ -2032,6 +2057,19 @@ function recommendationConfidenceLabel(confidence?: AdaptiveNutritionRecommendat
 function finiteNumberOrNull(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function finiteOptionalNumberOrNull(value: unknown) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function isoDateKeyFromUnknown(value: unknown) {
+  const text = typeof value === "string" || typeof value === "number" ? String(value).trim() : "";
+  const date = text.slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : "";
 }
 
 const DEFAULT_BASELINE_CALORIES = 2650;
@@ -4155,8 +4193,8 @@ function ChartFrame({ children, className }: Readonly<{ children: React.ReactNod
   return <div className={className}>{mounted ? children : <div className="h-full w-full animate-pulse rounded-lg bg-white/[0.04]" />}</div>;
 }
 
-function compactDate(date: string) {
-  return date?.slice(5) || "";
+function compactDate(date: unknown) {
+  return String(date ?? "").slice(5) || "";
 }
 
 function aggregateNutrition(logs: NutritionEntry[]) {
@@ -4805,11 +4843,11 @@ function Dashboard({
         </Card>
       </TargetSectionErrorBoundary>
 
-      <TargetSectionErrorBoundary title="Google Health recovery signals unavailable" description="Wearable recovery data could not render safely." resetKey={`${googleHealth?.date ?? ""}-${googleHealth?.status ?? ""}`}>
+      <TargetSectionErrorBoundary title="Wearable recovery signals unavailable" description="Wearable recovery data could not render safely." resetKey={`${googleHealth?.date ?? ""}-${googleHealth?.status ?? ""}`}>
         <Card className="xl:col-span-2">
           <SectionHeader
             eyebrow="Recovery"
-            title="Google Health Signals"
+            title="Wearable Signals"
             action={googleHealthReady ? (
               <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
                 {googleHealth?.source || "google_health"} · {googleHealth?.date || data?.date}
@@ -4822,7 +4860,7 @@ function Dashboard({
                 <DashboardHealthSignalTile
                   title="Sleep Quality"
                   value={sleepUnavailable ? "Sleep data unavailable" : sleepQuality?.score !== null && sleepQuality?.score !== undefined ? `${sleepQuality.score}/100` : "--"}
-                  detail={sleepUnavailable ? "Google Health did not provide sleep duration or stages for this date." : `${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
+                  detail={sleepUnavailable ? "The wearable provider did not provide sleep duration or stages for this date." : `${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
                   status={sleepQuality?.status}
                   icon={HeartPulse}
                 />
@@ -4850,7 +4888,7 @@ function Dashboard({
                 <DashboardHealthSignalTile
                   title="Calories Burned vs Intake"
                   value={caloriesBurned !== null ? `${Math.round(caloriesBurned).toLocaleString()} kcal` : "Wearable burn unavailable"}
-                  detail={caloriesBurned !== null ? `Intake ${caloriesIntake !== null ? Math.round(caloriesIntake).toLocaleString() : "--"} kcal · ${caloriesDelta !== null ? `${caloriesDelta > 0 ? "+" : ""}${Math.round(caloriesDelta).toLocaleString()} kcal` : "no delta"} · ${calorieBurnSignal?.message || "Burn is context, not the saved target."}` : "Google Health did not provide calorie burn for this date."}
+                  detail={caloriesBurned !== null ? `Intake ${caloriesIntake !== null ? Math.round(caloriesIntake).toLocaleString() : "--"} kcal · ${caloriesDelta !== null ? `${caloriesDelta > 0 ? "+" : ""}${Math.round(caloriesDelta).toLocaleString()} kcal` : "no delta"} · ${calorieBurnSignal?.message || "Burn is context, not the saved target."}` : "The wearable provider did not provide calorie burn for this date."}
                   status={calorieBurnSignal?.status}
                   icon={Utensils}
                 />
@@ -4864,7 +4902,7 @@ function Dashboard({
                 <DashboardHealthSignalTile
                   title="Activity Load"
                   value={activityUnavailable ? "Unavailable" : activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Need data"}
-                  detail={activityUnavailable ? "Google Health did not provide steps, active minutes, or zone minutes." : `${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active · ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone · ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}
+                  detail={activityUnavailable ? "The wearable provider did not provide steps, active minutes, or zone minutes." : `${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active · ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone · ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}
                   status={activityLoadSignal?.status}
                   icon={BarChart3}
                 />
@@ -4932,7 +4970,7 @@ function Dashboard({
                     <a href="/calculation-logic" className="accent-text-strong mt-3 inline-flex text-xs font-semibold">Open full calculation guide</a>
                   </div>
                   <div className="rounded-lg border border-white/10 bg-black/15 p-3 md:col-span-2">
-                    <p className="font-semibold text-zinc-100">Google Health row mapping</p>
+                    <p className="font-semibold text-zinc-100">Wearable row mapping</p>
                     <div className="mt-3 grid gap-3 md:grid-cols-3">
                       <div>
                         <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Raw row</p>
@@ -4953,8 +4991,8 @@ function Dashboard({
             </div>
           ) : (
             <EmptyState
-              title={googleHealth?.reason === "no_wearable_data_connected" ? "No wearable data connected" : "No Google Health data for this date"}
-              description={googleHealth?.message || "Connect or sync Google Health to show sleep, readiness, sickness risk, calories burned, and activity load."}
+              title={googleHealth?.reason === "no_wearable_data_connected" ? "No wearable data connected" : googleHealth?.reason === "connected_no_wearable_metrics" ? "Connected, but no wearable metrics are available yet" : "No wearable metrics for this date"}
+              description={googleHealth?.message || "Connect or sync a wearable provider to show sleep, readiness, sickness risk, calories burned, and activity load."}
               action="Open Settings"
               onAction={() => setActivePage("settings")}
             />
@@ -7049,14 +7087,22 @@ function formatSignedAnalyticsNumber(value: unknown, unit = "", digits = 0) {
 }
 
 function wearableSleepHours(metric: WearableMetricEntry | null | undefined) {
-  const directHours = finiteNumberOrNull(metric?.sleep_hours);
+  const directHours = finiteOptionalNumberOrNull(metric?.sleep_hours);
   if (directHours !== null) return directHours;
-  const minutes = finiteNumberOrNull(metric?.total_sleep_minutes);
+  const minutes = finiteOptionalNumberOrNull(metric?.total_sleep_minutes);
   return minutes !== null ? minutes / 60 : null;
 }
 
 function sortWearableMetrics(entries: WearableMetricEntry[]) {
-  return [...entries].sort((a, b) => `${a.date} ${a.created_at ?? ""}`.localeCompare(`${b.date} ${b.created_at ?? ""}`));
+  return arrayOrEmpty<WearableMetricEntry>(entries)
+    .filter((entry) => {
+      if (!isoDateKeyFromUnknown(entry?.date)) return false;
+      const placeholder = String(entry?.placeholder ?? "").toLowerCase();
+      if (placeholder === "true" || placeholder === "1" || placeholder === "yes" || placeholder === "placeholder") return false;
+      const populatedMetricCount = finiteNumberOrNull(entry?.populated_metric_count);
+      return populatedMetricCount === null || populatedMetricCount > 0;
+    })
+    .sort((a, b) => `${isoDateKeyFromUnknown(a.date)} ${a.created_at ?? ""}`.localeCompare(`${isoDateKeyFromUnknown(b.date)} ${b.created_at ?? ""}`));
 }
 
 function RecoveryPage({
@@ -7273,7 +7319,7 @@ function RecoveryPage({
     { label: "Recovery Readiness", value: recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
     { label: "Sleep Quality", value: sleepScore !== null ? `${Math.round(sleepScore)}/100` : "--", detail: `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`, status: sleepQuality?.status, icon: HeartPulse },
     { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: HeartPulse },
-    { label: "Resting HR vs baseline", value: restingHr === null ? "Resting HR unavailable" : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "Google Health did not provide resting HR; this is not penalized." : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
+    { label: "Resting HR vs baseline", value: restingHr === null ? "Resting HR unavailable" : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "The wearable provider did not provide resting HR; this is not penalized." : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
     { label: "HRV vs baseline", value: hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvSignal?.status, icon: Gauge },
     { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status, icon: BarChart3 },
     { label: "Sickness warning", value: sicknessLabel, detail: sicknessWarning?.message || trainingReadiness?.sickness_warning?.message || "Conservative, non-diagnostic recovery stress signal.", status: sicknessStatus, icon: AlertTriangle },
@@ -9057,8 +9103,19 @@ function HistoryPage({
     restingHr: true,
     hrv: true,
   });
-  const nutritionTrend = useMemo(() => aggregateNutrition(nutritionLogs), [nutritionLogs]);
-  const dailyNutritionTrend = useMemo(() => nutritionHistory.length ? nutritionHistory : nutritionTrend.map((entry) => ({
+  const safeNutritionLogs = arrayOrEmpty<NutritionEntry>(nutritionLogs);
+  const safeNutritionHistory = arrayOrEmpty<DailyNutritionSummary>(nutritionHistory);
+  const safeBodyMetrics = arrayOrEmpty<BodyMetricEntry>(bodyMetrics);
+  const safeRecoveryTrend = arrayOrEmpty<DashboardData["recovery_trend"][number]>(recoveryTrend);
+  const safeSleepEntries = arrayOrEmpty<SleepEntry>(sleepEntries);
+  const safeWearableMetrics = arrayOrEmpty<WearableMetricEntry>(wearableMetrics);
+  const safeTrainingVolume = arrayOrEmpty<DashboardData["training_volume"][number]>(trainingVolume);
+  const safeWorkoutHistory = arrayOrEmpty<WorkoutGroup>(workoutHistory);
+  const safeTrainingSummaryItems = arrayOrEmpty<TrainingSummaryResponse["items"][number]>(trainingSummary?.items);
+  const safeTrainingSummaryMuscleGroups = arrayOrEmpty<MuscleGroupVolumeSummary>(trainingSummary?.muscle_groups);
+  const trainingSummaryWindow = trainingSummary?.window ?? "weekly";
+  const nutritionTrend = useMemo(() => aggregateNutrition(safeNutritionLogs), [safeNutritionLogs]);
+  const dailyNutritionTrend = useMemo(() => safeNutritionHistory.length ? safeNutritionHistory : nutritionTrend.map((entry) => ({
     date: entry.date,
     total_calories: entry.calories,
     total_protein: entry.protein,
@@ -9083,27 +9140,27 @@ function HistoryPage({
     fat_delta: null,
     adherence_score: null,
     notes: "",
-  })), [nutritionHistory, nutritionTrend]);
+  })), [safeNutritionHistory, nutritionTrend]);
   const caloriesBodyTrend = useMemo(
-    () => buildCaloriesBodyTrendData(dailyNutritionTrend, bodyMetrics).slice(-120),
-    [bodyMetrics, dailyNutritionTrend],
+    () => buildCaloriesBodyTrendData(dailyNutritionTrend, safeBodyMetrics).slice(-120),
+    [dailyNutritionTrend, safeBodyMetrics],
   );
   const hasBodyweightTrend = caloriesBodyTrend.some((entry) => entry.bodyweight7DayAverage !== null || entry.bodyweight !== null);
   const hasBodyFatTrend = caloriesBodyTrend.some((entry) => entry.bodyFat7PointAverage !== null || entry.bodyFatPercent !== null);
   const dailyNutritionHistorySummary = useMemo(() => {
-    const calorieValues = nutritionHistory
+    const calorieValues = safeNutritionHistory
       .map((entry) => Number(entry.total_calories))
       .filter((value) => Number.isFinite(value));
     const averageCalories = calorieValues.length
       ? Math.round(calorieValues.reduce((total, value) => total + value, 0) / calorieValues.length)
       : null;
-    const latestDate = nutritionHistory.reduce((latest, entry) => {
+    const latestDate = safeNutritionHistory.reduce((latest, entry) => {
       const date = typeof entry.date === "string" ? entry.date : "";
       return date && (!latest || date > latest) ? date : latest;
     }, "");
 
     const summaryText = [
-      `${nutritionHistory.length.toLocaleString()} logged ${nutritionHistory.length === 1 ? "day" : "days"}`,
+      `${safeNutritionHistory.length.toLocaleString()} logged ${safeNutritionHistory.length === 1 ? "day" : "days"}`,
       averageCalories !== null ? `${averageCalories.toLocaleString()} avg kcal` : "average calories unavailable",
       latestDate ? `latest ${latestDate}` : "no latest date",
     ].join(" · ");
@@ -9111,10 +9168,10 @@ function HistoryPage({
     return {
       averageCalories,
       latestDate,
-      loggedDays: nutritionHistory.length,
+      loggedDays: safeNutritionHistory.length,
       summaryText,
     };
-  }, [nutritionHistory]);
+  }, [safeNutritionHistory]);
   const trainingLastResult = trainingSummaryStatus?.last_hevy_result ?? {};
   const trainingLastNewWorkouts = Number(trainingSummaryStatus?.last_hevy_new_workouts ?? trainingLastResult.new_workouts ?? 0) || 0;
   const trainingLastUpdatedWorkouts = Number(trainingSummaryStatus?.last_hevy_updated_workouts ?? trainingLastResult.updated_workouts ?? 0) || 0;
@@ -9140,26 +9197,35 @@ function HistoryPage({
   const optimizationBaselineInsights = arrayOrEmpty<OptimizationData["personal_baseline"]["insights"][number]>(optimizationBaseline.insights);
   const optimizationMacroDaily = arrayOrEmpty<OptimizationData["macro_adherence"]["daily"][number]>(optimizationMacroAdherence.daily);
   const optimizationMacroCorrelations = arrayOrEmpty<OptimizationData["macro_adherence"]["correlations"][number]>(optimizationMacroAdherence.correlations);
-  const muscleCoverageItems = useMemo(() => (Array.isArray(muscleCoverage?.items) ? muscleCoverage.items : []), [muscleCoverage]);
-  const canonicalWeightHistory = useMemo(() => cleanWeightHistory(bodyMetrics), [bodyMetrics]);
+  const muscleCoverageItems = useMemo(() => arrayOrEmpty<MuscleCoverageItem>(muscleCoverage?.items), [muscleCoverage]);
+  const canonicalWeightHistory = useMemo(() => cleanWeightHistory(safeBodyMetrics), [safeBodyMetrics]);
   const estimatedMaintenanceCalories = finiteNumberOrNull(adaptiveRecommendation?.recommendedTargets?.maintenance_calories)
     ?? finiteNumberOrNull(adaptiveRecommendation?.baselineRecommendedTargets?.maintenance_calories)
     ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.calories);
   const wearableByDate = useMemo(() => {
     const map = new Map<string, WearableMetricEntry>();
-    sortWearableMetrics(wearableMetrics).forEach((metric) => {
-      if (metric.date) map.set(metric.date.slice(0, 10), metric);
+    sortWearableMetrics(safeWearableMetrics).forEach((metric) => {
+      const date = isoDateKeyFromUnknown(metric?.date);
+      if (date) map.set(date, metric);
     });
     return map;
-  }, [wearableMetrics]);
+  }, [safeWearableMetrics]);
   const sleepByDate = useMemo(() => {
     const map = new Map<string, SleepEntry>();
-    sleepEntries.forEach((entry) => {
-      if (entry.date) map.set(entry.date.slice(0, 10), entry);
+    safeSleepEntries.forEach((entry) => {
+      const date = isoDateKeyFromUnknown(entry?.date);
+      if (date) map.set(date, entry);
     });
     return map;
-  }, [sleepEntries]);
-  const recoveryByDate = useMemo(() => new Map(recoveryTrend.map((entry) => [entry.date.slice(0, 10), entry])), [recoveryTrend]);
+  }, [safeSleepEntries]);
+  const recoveryByDate = useMemo(() => {
+    const map = new Map<string, DashboardData["recovery_trend"][number]>();
+    safeRecoveryTrend.forEach((entry) => {
+      const date = isoDateKeyFromUnknown(entry?.date);
+      if (date) map.set(date, entry);
+    });
+    return map;
+  }, [safeRecoveryTrend]);
   const recoverySleepArchiveData = useMemo(() => {
     const dates = Array.from(new Set([
       ...Array.from(wearableByDate.keys()),
@@ -9170,15 +9236,16 @@ function HistoryPage({
       const wearable = wearableByDate.get(date);
       const sleep = sleepByDate.get(date);
       const recovery = recoveryByDate.get(date);
-      const sleepHours = wearableSleepHours(wearable) ?? (finiteNumberOrNull(sleep?.durationMinutes) !== null ? Number(sleep?.durationMinutes) / 60 : null);
-      const sleepScore = finiteNumberOrNull(wearable?.sleep_score);
-      const restingHr = finiteNumberOrNull(wearable?.resting_hr) ?? finiteNumberOrNull(sleep?.restingHeartRate);
-      const hrv = finiteNumberOrNull(wearable?.hrv) ?? finiteNumberOrNull(sleep?.hrv);
-      const breathingRate = finiteNumberOrNull(wearable?.breathing_rate);
-      const spo2 = finiteNumberOrNull(wearable?.spo2);
-      const recoveryScore = finiteNumberOrNull(recovery?.recovery_score);
+      const sleepDurationMinutes = finiteOptionalNumberOrNull(sleep?.durationMinutes);
+      const sleepHours = wearableSleepHours(wearable) ?? (sleepDurationMinutes !== null ? sleepDurationMinutes / 60 : null);
+      const sleepScore = finiteOptionalNumberOrNull(wearable?.sleep_score);
+      const restingHr = finiteOptionalNumberOrNull(wearable?.resting_hr) ?? finiteOptionalNumberOrNull(sleep?.restingHeartRate);
+      const hrv = finiteOptionalNumberOrNull(wearable?.hrv) ?? finiteOptionalNumberOrNull(sleep?.hrv);
+      const breathingRate = finiteOptionalNumberOrNull(wearable?.breathing_rate);
+      const spo2 = finiteOptionalNumberOrNull(wearable?.spo2);
+      const recoveryScore = finiteOptionalNumberOrNull(recovery?.recovery_score);
       const sicknessSignals = [
-        finiteNumberOrNull(wearable?.resting_hr_deviation) !== null && Number(wearable?.resting_hr_deviation) >= 5,
+        finiteOptionalNumberOrNull(wearable?.resting_hr_deviation) !== null && Number(wearable?.resting_hr_deviation) >= 5,
         sleepHours !== null && sleepHours < 6.5,
         sleepScore !== null && sleepScore < 68,
         breathingRate !== null && breathingRate >= 22,
@@ -9191,28 +9258,33 @@ function HistoryPage({
         recoveryScore,
         restingHr,
         hrv,
-        remMinutes: finiteNumberOrNull(wearable?.rem_sleep_minutes) ?? finiteNumberOrNull(sleep?.remSleepMinutes),
-        deepMinutes: finiteNumberOrNull(wearable?.deep_sleep_minutes) ?? finiteNumberOrNull(sleep?.deepSleepMinutes),
-        lightMinutes: finiteNumberOrNull(wearable?.light_sleep_minutes) ?? finiteNumberOrNull(sleep?.lightSleepMinutes),
-        awakeMinutes: finiteNumberOrNull(wearable?.awake_minutes) ?? finiteNumberOrNull(sleep?.awakeMinutes),
-        sleepEfficiency: finiteNumberOrNull(wearable?.sleep_efficiency) ?? finiteNumberOrNull(sleep?.efficiencyPercent),
+        remMinutes: finiteOptionalNumberOrNull(wearable?.rem_sleep_minutes) ?? finiteOptionalNumberOrNull(sleep?.remSleepMinutes),
+        deepMinutes: finiteOptionalNumberOrNull(wearable?.deep_sleep_minutes) ?? finiteOptionalNumberOrNull(sleep?.deepSleepMinutes),
+        lightMinutes: finiteOptionalNumberOrNull(wearable?.light_sleep_minutes) ?? finiteOptionalNumberOrNull(sleep?.lightSleepMinutes),
+        awakeMinutes: finiteOptionalNumberOrNull(wearable?.awake_minutes) ?? finiteOptionalNumberOrNull(sleep?.awakeMinutes),
+        sleepEfficiency: finiteOptionalNumberOrNull(wearable?.sleep_efficiency) ?? finiteOptionalNumberOrNull(sleep?.efficiencyPercent),
         sicknessWarningCount: sicknessSignals,
       };
     });
     return rows.map((row, index, all) => {
       const sleepWindow = all.slice(Math.max(0, index - 6), index + 1);
-      const rollingSleepDebt = sleepWindow.reduce((sum, item) => sum + Math.max(8 - (item.sleepHours ?? 8), 0), 0);
+      const sleepWindowHours = sleepWindow
+        .map((item) => item?.sleepHours)
+        .filter((value): value is number => Number.isFinite(value));
+      const rollingSleepDebt = sleepWindowHours.length
+        ? sleepWindowHours.reduce((sum, hours) => sum + Math.max(8 - hours, 0), 0)
+        : null;
       const previous = all[index - 1];
       return {
         ...row,
-        rollingSleepDebt: Number(rollingSleepDebt.toFixed(2)),
+        rollingSleepDebt: rollingSleepDebt !== null ? Number(rollingSleepDebt.toFixed(2)) : null,
         sleepConsistencyDelta: row.sleepHours !== null && previous?.sleepHours !== null ? Number((row.sleepHours - previous.sleepHours).toFixed(2)) : null,
       };
     });
   }, [recoveryByDate, sleepByDate, wearableByDate]);
   const caloriesBodyArchiveData = useMemo(() => caloriesBodyTrend.map((entry) => {
     const wearable = wearableByDate.get(entry.date);
-    const wearableCaloriesBurned = finiteNumberOrNull(wearable?.total_calories_burned) ?? finiteNumberOrNull(wearable?.calories_burned);
+    const wearableCaloriesBurned = finiteOptionalNumberOrNull(wearable?.total_calories_burned) ?? finiteOptionalNumberOrNull(wearable?.calories_burned);
     const estimatedSurplusDeficit = entry.calories !== null && wearableCaloriesBurned !== null
       ? entry.calories - wearableCaloriesBurned
       : entry.calories !== null && estimatedMaintenanceCalories !== null
@@ -9235,48 +9307,52 @@ function HistoryPage({
     const trend = strength?.trend;
     const history = !Array.isArray(trend) && trend?.history ? trend.history : Array.isArray(trend) ? trend : [];
     return history
-      .map((entry) => ({
-        date: String(entry.date || entry.week || "").slice(0, 10),
-        estimatedOneRepMax: finiteNumberOrNull(entry.estimated_1rm),
-        totalVolume: finiteNumberOrNull(entry.total_volume ?? entry.volume),
-        topWeight: finiteNumberOrNull(entry.best_set_weight ?? entry.top_weight),
-      }))
+      .map((entry) => {
+        const record = recordOrEmpty(entry);
+        return {
+          date: isoDateKeyFromUnknown(record.date) || isoDateKeyFromUnknown(record.week),
+          estimatedOneRepMax: finiteOptionalNumberOrNull(record.estimated_1rm),
+          totalVolume: finiteOptionalNumberOrNull(record.total_volume ?? record.volume),
+          topWeight: finiteOptionalNumberOrNull(record.best_set_weight ?? record.top_weight),
+        };
+      })
       .filter((entry) => entry.date);
   }, [strength]);
   const trainingArchiveData = useMemo(() => {
     const runByDate = new Map<string, { miles: number; paceValues: number[]; duration: number }>();
-    workoutHistory.forEach((workout) => {
-      const date = workout.date.slice(0, 10);
+    safeWorkoutHistory.forEach((workout) => {
+      const date = isoDateKeyFromUnknown(workout?.date);
+      if (!date) return;
       const current = runByDate.get(date) ?? { miles: 0, paceValues: [], duration: 0 };
       const miles = workoutRunMiles(workout);
       const pace = workoutRunPace(workout);
       current.miles += miles;
-      current.duration += finiteNumberOrNull(workout.duration_minutes) ?? 0;
+      current.duration += finiteOptionalNumberOrNull(workout.duration_minutes) ?? 0;
       if (pace !== null) current.paceValues.push(pace);
       runByDate.set(date, current);
     });
     const strengthByDate = new Map(strengthHistoryData.map((entry) => [entry.date, entry]));
-    const baseRows = trainingSummary?.items?.length
-      ? trainingSummary.items.map((item) => ({
-          date: item.period_start,
-          totalVolume: finiteNumberOrNull(item.total_volume),
-          hardSets: finiteNumberOrNull(item.total_sets),
-          workoutDuration: finiteNumberOrNull(item.duration_minutes),
-          workoutCount: finiteNumberOrNull(item.workout_count),
+    const baseRows = (safeTrainingSummaryItems.length
+      ? safeTrainingSummaryItems.map((item) => ({
+          date: isoDateKeyFromUnknown(item?.period_start),
+          totalVolume: finiteOptionalNumberOrNull(item?.total_volume),
+          hardSets: finiteOptionalNumberOrNull(item?.total_sets),
+          workoutDuration: finiteOptionalNumberOrNull(item?.duration_minutes),
+          workoutCount: finiteOptionalNumberOrNull(item?.workout_count),
         }))
-      : trainingVolume.map((item) => ({
-          date: item.date,
-          totalVolume: finiteNumberOrNull(item.volume),
+      : safeTrainingVolume.map((item) => ({
+          date: isoDateKeyFromUnknown(item?.date),
+          totalVolume: finiteOptionalNumberOrNull(item?.volume),
           hardSets: null,
           workoutDuration: null,
           workoutCount: null,
-        }));
+        }))).filter((row) => row.date);
     return baseRows.map((row) => {
       const run = runByDate.get(row.date);
       const strengthPoint = strengthByDate.get(row.date);
       const runPace = run?.paceValues.length ? run.paceValues.reduce((sum, value) => sum + value, 0) / run.paceValues.length : null;
       const workload = (row.totalVolume ?? 0) / 1000 + (row.hardSets ?? 0) * 1.5 + (row.workoutDuration ?? run?.duration ?? 0) / 30;
-      const recoveryScore = finiteNumberOrNull(recoveryByDate.get(row.date)?.recovery_score);
+      const recoveryScore = finiteOptionalNumberOrNull(recoveryByDate.get(row.date)?.recovery_score);
       return {
         ...row,
         runningMileage: run?.miles ? Number(run.miles.toFixed(2)) : null,
@@ -9290,24 +9366,58 @@ function HistoryPage({
         overreachingRisk: recoveryScore !== null && recoveryScore < 55 && workload > 20 ? "watch" : "normal",
       };
     });
-  }, [recoveryByDate, strengthHistoryData, trainingSummary, trainingVolume, workoutHistory]);
+  }, [recoveryByDate, safeTrainingSummaryItems, safeTrainingVolume, safeWorkoutHistory, strengthHistoryData]);
   const recoveryArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
     ...recoverySleepArchiveData.map((row) => ({ row_type: "graph_recovery_sleep", ...row })),
-    ...sleepEntries.map((row) => ({ row_type: "sleep_history", ...row })),
-    ...wearableMetrics.map((row) => ({ row_type: "wearable_history", ...row })),
-    ...recoveryTrend.map((row) => ({ row_type: "recovery_history", ...row })),
-  ], [recoverySleepArchiveData, recoveryTrend, sleepEntries, wearableMetrics]);
+    ...safeSleepEntries.map((row) => ({ row_type: "sleep_history", ...row })),
+    ...safeWearableMetrics.map((row) => ({ row_type: "wearable_history", ...row })),
+    ...safeRecoveryTrend.map((row) => ({ row_type: "recovery_history", ...row })),
+  ], [recoverySleepArchiveData, safeRecoveryTrend, safeSleepEntries, safeWearableMetrics]);
   const caloriesBodyArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
     ...caloriesBodyArchiveData.map((row) => ({ row_type: "graph_calorie_body", ...row })),
-    ...nutritionHistory.map((row) => ({ row_type: "nutrition_history", ...row })),
-    ...bodyMetrics.map((row) => ({ row_type: "body_metric_history", ...row })),
-  ], [bodyMetrics, caloriesBodyArchiveData, nutritionHistory]);
+    ...safeNutritionHistory.map((row) => ({ row_type: "nutrition_history", ...row })),
+    ...safeBodyMetrics.map((row) => ({ row_type: "body_metric_history", ...row })),
+  ], [caloriesBodyArchiveData, safeBodyMetrics, safeNutritionHistory]);
   const trainingArchiveExportRows = useMemo<ArchiveExportRow[]>(() => [
     ...trainingArchiveData.map((row) => ({ row_type: "graph_training_performance", ...row })),
-    ...workoutHistory.map((row) => ({ row_type: "workout_history", date: row.date, workout_id: row.workout_id, workout_type: row.workout_type, classification: row.classification, total_sets: row.total_sets, total_volume: row.total_volume, duration_minutes: row.duration_minutes, source: row.source })),
+    ...safeWorkoutHistory.map((row) => ({ row_type: "workout_history", date: row.date, workout_id: row.workout_id, workout_type: row.workout_type, classification: row.classification, total_sets: row.total_sets, total_volume: row.total_volume, duration_minutes: row.duration_minutes, source: row.source })),
     ...muscleCoverageItems.map((row) => ({ row_type: "muscle_coverage", ...row })),
     ...strengthHistoryData.map((row) => ({ row_type: "strength_trend", ...row })),
-  ], [muscleCoverageItems, strengthHistoryData, trainingArchiveData, workoutHistory]);
+  ], [muscleCoverageItems, safeWorkoutHistory, strengthHistoryData, trainingArchiveData]);
+  const hasRecoverySleepChartData = recoverySleepArchiveData.some((row) => (
+    row.sleepHours !== null
+    || row.sleepScore !== null
+    || row.recoveryScore !== null
+    || row.restingHr !== null
+    || row.hrv !== null
+    || row.rollingSleepDebt !== null
+  ));
+  const latestRecoverySleepRow = recoverySleepArchiveData.at(-1) ?? null;
+  const recoveryScoreRows = recoverySleepArchiveData.filter((row) => row.recoveryScore !== null);
+  const latestRecoveryScore = recoveryScoreRows.at(-1)?.recoveryScore ?? null;
+  const priorRecoveryScore = recoveryScoreRows.at(-7)?.recoveryScore ?? recoveryScoreRows.at(0)?.recoveryScore ?? null;
+  const recoveryTrendDirection = (() => {
+    if (latestRecoveryScore === null || priorRecoveryScore === null) return "Learning";
+    if (latestRecoveryScore > priorRecoveryScore) return "Improving";
+    if (latestRecoveryScore < priorRecoveryScore) return "Declining";
+    return "Stable";
+  })();
+  const hasCaloriesBodyChartData = caloriesBodyArchiveData.some((row) => (
+    row.calories7DayAverage !== null
+    || row.wearableCaloriesBurned !== null
+    || row.estimatedMaintenanceCalories !== null
+    || row.adaptiveCalorieTarget !== null
+    || row.bodyweight !== null
+    || row.bodyweight7DayAverage !== null
+    || row.bodyFat7PointAverage !== null
+  ));
+  const hasTrainingChartData = trainingArchiveData.some((row) => (
+    row.totalVolume !== null
+    || row.hardSets !== null
+    || row.runningMileage !== null
+    || row.workoutDuration !== null
+    || row.runPace !== null
+  ));
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -9533,6 +9643,18 @@ function HistoryPage({
 
   return (
     <div className="flex flex-col gap-4">
+      <TargetSectionErrorBoundary
+        title="Recovery + sleep analytics unavailable"
+        description="Sleep/recovery history unavailable until wearable data syncs."
+        resetKey={`history-recovery-${recoverySleepArchiveData.length}-${safeWearableMetrics.length}-${safeSleepEntries.length}-${safeRecoveryTrend.length}`}
+        userAction="render:history:recovery-sleep"
+        stateSummary={{
+          archive_rows: recoverySleepArchiveData.length,
+          wearable_rows: safeWearableMetrics.length,
+          sleep_rows: safeSleepEntries.length,
+          recovery_rows: safeRecoveryTrend.length,
+        }}
+      >
       <Card className="order-1">
         <SectionHeader
           eyebrow="Recovery + Sleep Analytics"
@@ -9565,7 +9687,7 @@ function HistoryPage({
               );
             })}
           </div>
-          {recoverySleepArchiveData.length ? (
+          {hasRecoverySleepChartData ? (
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={recoverySleepArchiveData.slice(-120)}>
@@ -9587,14 +9709,14 @@ function HistoryPage({
             </ChartFrame>
           ) : (
             <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
-              Google Health / Fitbit recovery, sleep, HR, and HRV history will appear here after wearable sync.
+              Sleep/recovery history unavailable until wearable data syncs.
             </div>
           )}
           <div className="grid gap-3 md:grid-cols-4">
             {[
-              ["Sleep debt", recoverySleepArchiveData.at(-1)?.rollingSleepDebt !== undefined ? `${recoverySleepArchiveData.at(-1)?.rollingSleepDebt}h` : "--", "Rolling 7-day shortfall vs 8h"],
+              ["Sleep debt", latestRecoverySleepRow?.rollingSleepDebt !== null && latestRecoverySleepRow?.rollingSleepDebt !== undefined ? `${latestRecoverySleepRow.rollingSleepDebt}h` : "--", "Rolling 7-day shortfall vs 8h"],
               ["Sickness flags", `${recoverySleepArchiveData.filter((row) => row.sicknessWarningCount > 0).length}`, "Days with at least one recovery stress signal"],
-              ["Trend direction", recoverySleepArchiveData.length >= 2 && (recoverySleepArchiveData.at(-1)?.recoveryScore ?? 0) > (recoverySleepArchiveData.at(-7)?.recoveryScore ?? recoverySleepArchiveData.at(0)?.recoveryScore ?? 0) ? "Improving" : "Learning", "Recent recovery slope"],
+              ["Trend direction", recoveryTrendDirection, "Recent recovery slope"],
               ["History rows", `${recoveryArchiveExportRows.length}`, "Rows included in section export"],
             ].map(([label, value, detail]) => (
               <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
@@ -9614,14 +9736,26 @@ function HistoryPage({
             </summary>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {recoverySleepArchiveData.length ? <DataTable rows={recoverySleepArchiveData.slice(-20).reverse()} /> : <p className="text-sm text-zinc-400">No recovery archive rows yet.</p>}
-              {wearableMetrics.length ? <DataTable rows={wearableMetrics.slice(-10).reverse()} /> : null}
-              {sleepEntries.length ? <DataTable rows={sleepEntries.slice(-10).reverse()} /> : null}
-              {recoveryTrend.length ? <DataTable rows={recoveryTrend.slice(-10).reverse()} /> : null}
+              {safeWearableMetrics.length ? <DataTable rows={safeWearableMetrics.slice(-10).reverse()} /> : null}
+              {safeSleepEntries.length ? <DataTable rows={safeSleepEntries.slice(-10).reverse()} /> : null}
+              {safeRecoveryTrend.length ? <DataTable rows={safeRecoveryTrend.slice(-10).reverse()} /> : null}
             </div>
           </details>
         </div>
       </Card>
+      </TargetSectionErrorBoundary>
 
+      <TargetSectionErrorBoundary
+        title="Calories and body composition chart unavailable"
+        description="Nutrition, bodyweight, and body-fat history could not render safely."
+        resetKey={`history-calories-body-${caloriesBodyArchiveData.length}-${safeNutritionHistory.length}-${safeBodyMetrics.length}`}
+        userAction="render:history:calories-body"
+        stateSummary={{
+          archive_rows: caloriesBodyArchiveData.length,
+          nutrition_rows: safeNutritionHistory.length,
+          body_rows: safeBodyMetrics.length,
+        }}
+      >
       <Card className="order-2">
         <SectionHeader
           eyebrow="Calories / Bodyweight / Body Fat"
@@ -9629,7 +9763,7 @@ function HistoryPage({
           action={<ArchiveExportButtons rows={caloriesBodyArchiveExportRows} filenameBase="performance-os-calories-body-archive" />}
         />
         <div className="space-y-4">
-          {caloriesBodyArchiveData.length ? (
+          {hasCaloriesBodyChartData ? (
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={caloriesBodyArchiveData.slice(-120)}>
@@ -9678,13 +9812,25 @@ function HistoryPage({
             </summary>
             <div className="mt-4 space-y-4">
               {excludeNutritionError ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 px-3 py-2 text-sm text-red-100">{excludeNutritionError}</p> : null}
-              {nutritionHistory.length ? <DailyNutritionHistoryTable rows={nutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} /> : <p className="text-sm text-zinc-400">No nutrition history yet.</p>}
-              {bodyMetrics.length ? <DataTable rows={bodyMetrics.slice(-20).reverse()} /> : null}
+              {safeNutritionHistory.length ? <DailyNutritionHistoryTable rows={safeNutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} /> : <p className="text-sm text-zinc-400">No nutrition history yet.</p>}
+              {safeBodyMetrics.length ? <DataTable rows={safeBodyMetrics.slice(-20).reverse()} /> : null}
             </div>
           </details>
         </div>
       </Card>
+      </TargetSectionErrorBoundary>
 
+      <TargetSectionErrorBoundary
+        title="Training performance chart unavailable"
+        description="Training performance history could not render safely."
+        resetKey={`history-training-${trainingArchiveData.length}-${safeWorkoutHistory.length}-${safeTrainingVolume.length}`}
+        userAction="render:history:training-performance"
+        stateSummary={{
+          archive_rows: trainingArchiveData.length,
+          workout_rows: safeWorkoutHistory.length,
+          volume_rows: safeTrainingVolume.length,
+        }}
+      >
       <Card className="order-3">
         <SectionHeader
           eyebrow="Training Performance"
@@ -9692,7 +9838,7 @@ function HistoryPage({
           action={<ArchiveExportButtons rows={trainingArchiveExportRows} filenameBase="performance-os-training-performance-archive" />}
         />
         <div className="space-y-4">
-          {trainingArchiveData.length ? (
+          {hasTrainingChartData ? (
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={trainingArchiveData.slice(-120)}>
@@ -9740,13 +9886,14 @@ function HistoryPage({
             </summary>
             <div className="mt-4 grid gap-4 xl:grid-cols-2">
               {trainingArchiveData.length ? <DataTable rows={trainingArchiveData.slice(-20).reverse()} /> : null}
-              {workoutHistory.length ? <DataTable rows={workoutHistory.slice(-10).map((workout) => ({ date: workout.date, workout_type: workout.workout_type, classification: workout.classification, total_sets: workout.total_sets, total_volume: workout.total_volume, duration_minutes: workout.duration_minutes, source: workout.source })).reverse()} /> : null}
+              {safeWorkoutHistory.length ? <DataTable rows={safeWorkoutHistory.slice(-10).map((workout) => ({ date: workout.date, workout_type: workout.workout_type, classification: workout.classification, total_sets: workout.total_sets, total_volume: workout.total_volume, duration_minutes: workout.duration_minutes, source: workout.source })).reverse()} /> : null}
               {muscleCoverageItems.length ? <DataTable rows={muscleCoverageItems} /> : null}
               {strengthHistoryData.length ? <DataTable rows={strengthHistoryData.slice(-20).reverse()} /> : null}
             </div>
           </details>
         </div>
       </Card>
+      </TargetSectionErrorBoundary>
 
       <details className="group order-[80] rounded-lg border border-white/10 bg-zinc-950/70 p-5 shadow-2xl shadow-black/20 backdrop-blur">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
@@ -10358,8 +10505,8 @@ function HistoryPage({
                   {excludeNutritionError ? (
                     <p className="mb-3 rounded-lg border border-red-300/20 bg-red-300/10 px-3 py-2 text-sm text-red-100">{excludeNutritionError}</p>
                   ) : null}
-                  {nutritionHistory.length ? (
-                    <DailyNutritionHistoryTable rows={nutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} />
+                  {safeNutritionHistory.length ? (
+                    <DailyNutritionHistoryTable rows={safeNutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} />
                   ) : (
                     <div className="rounded-lg border border-dashed border-white/15 bg-black/10 p-4">
                       <p className="font-medium text-white">No nutrition history yet</p>
@@ -10373,10 +10520,10 @@ function HistoryPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Body" title="Bodyweight history" />
-          {bodyMetrics.length ? (
+          {safeBodyMetrics.length ? (
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={bodyMetrics}>
+                <AreaChart data={safeBodyMetrics}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} domain={["dataMin - 1", "dataMax + 1"]} />
@@ -10391,10 +10538,10 @@ function HistoryPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Recovery" title="Recovery trend" />
-          {recoveryTrend.length ? (
+          {safeRecoveryTrend.length ? (
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <RechartsLineChart data={recoveryTrend}>
+                <RechartsLineChart data={safeRecoveryTrend}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
@@ -10409,10 +10556,10 @@ function HistoryPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Training" title="Strength volume" />
-          {trainingVolume.length ? (
+          {safeTrainingVolume.length ? (
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={trainingVolume}>
+                <BarChart data={safeTrainingVolume}>
                   <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
@@ -10427,14 +10574,14 @@ function HistoryPage({
         </Card>
         <Card>
           <SectionHeader eyebrow="Training" title="Historical performance summaries" />
-          {trainingSummary?.items?.length ? (
+          {safeTrainingSummaryItems.length ? (
             <div className="space-y-4">
               <p className="text-sm text-zinc-400">
-                Long-term charts use consolidated {trainingSummary.window} summaries, so old Hevy set rows stay out of startup analytics.
+                Long-term charts use consolidated {trainingSummaryWindow} summaries, so old Hevy set rows stay out of startup analytics.
               </p>
               <ChartFrame className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
-                  <RechartsLineChart data={trainingSummary.items}>
+                  <RechartsLineChart data={safeTrainingSummaryItems}>
                     <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                     <XAxis dataKey="period_start" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                     <YAxis yAxisId="volume" stroke="#71717a" tickLine={false} axisLine={false} />
@@ -10445,9 +10592,9 @@ function HistoryPage({
                   </RechartsLineChart>
                 </ResponsiveContainer>
               </ChartFrame>
-              {trainingSummary.muscle_groups?.length ? (
+              {safeTrainingSummaryMuscleGroups.length ? (
                 <div className="grid gap-2 sm:grid-cols-2">
-                  {trainingSummary.muscle_groups.slice(-24).slice(0, 8).map((item) => (
+                  {safeTrainingSummaryMuscleGroups.slice(-24).slice(0, 8).map((item) => (
                     <div key={`${item.period_start}-${item.muscle_group}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
                       <div className="flex items-center justify-between gap-3">
                         <p className="text-sm font-semibold text-white">{item.muscle_group}</p>
@@ -10468,7 +10615,7 @@ function HistoryPage({
         </Card>
       </div>
       <div className="order-[50]">
-        <WorkoutHistory workouts={workoutHistory} onImportHevy={() => undefined} onMoveWorkout={onMoveWorkout} defaultExpanded metadata="Training history" />
+        <WorkoutHistory workouts={safeWorkoutHistory} onImportHevy={() => undefined} onMoveWorkout={onMoveWorkout} defaultExpanded metadata="Training history" />
       </div>
       <div className="order-3">
         <StrengthTrendsSection
@@ -11928,9 +12075,14 @@ function GoogleHealthSourcesDebugPanel({
 }>) {
   const sync = debug?.last_sync;
   const rawResponseEntries = Object.entries(debug?.last_raw_responses ?? {});
+  const rawMetricEntries = Object.entries(debug?.raw_response_counts_by_metric ?? {});
   const metricCounts = Object.entries(debug?.populated_metric_counts_by_day ?? {}).slice(-7).reverse();
+  const populatedDayEntries = Object.entries(debug?.populated_fields_by_day ?? {}).slice(0, 7);
   const populatedFieldEntries = Object.entries(debug?.populated_fields_by_metric ?? {}).filter(([, count]) => Number(count) > 0);
   const sourcePreview = (debug?.available_data_sources ?? []).slice(0, 6);
+  const apiRequestCounts = debug?.api_request_counts ?? {};
+  const apiRequestEntries = (debug?.api_request_log ?? []).slice(-10).reverse();
+  const exactEndpointUrls = (debug?.exact_endpoint_urls ?? []).slice(-8).reverse();
   return (
     <Card>
       <SectionHeader
@@ -11957,7 +12109,19 @@ function GoogleHealthSourcesDebugPanel({
             <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", fitbitFreshnessClass(debug.data_source_count > 0 ? "green" : debug.connected ? "yellow" : "red"))}>
               Paired devices: {debug.paired_device_count ?? debug.data_source_count}
             </span>
-            {debug.deprecated_fitness_api_unused ? (
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", debug.google_health_api_sync_available ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" : "border-amber-300/25 bg-amber-300/10 text-amber-100")}>
+              {debug.google_health_api_sync_label || (debug.google_health_api_sync_available ? "Google Health API sync available" : "Google Health API sync unavailable")}
+            </span>
+            {debug.google_fit_legacy_data_source_label ? (
+              <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", debug.google_fit_legacy_data_source_status === "found" ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-white/10 bg-white/[0.035] text-zinc-300")}>
+                {debug.google_fit_legacy_data_source_label}
+              </span>
+            ) : null}
+            {debug.legacy_google_fit_detected || debug.deprecated_fitness_api_unused === false ? (
+              <span className="rounded-full border border-amber-300/25 bg-amber-300/10 px-3 py-1 text-xs font-semibold text-amber-100">
+                Legacy Google Fit configured
+              </span>
+            ) : debug.deprecated_fitness_api_unused ? (
               <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
                 Google Fit unused
               </span>
@@ -11966,11 +12130,16 @@ function GoogleHealthSourcesDebugPanel({
           {debug.recommended_next_action ? (
             <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">{debug.recommended_next_action}</p>
           ) : null}
+          {debug.diagnostic?.message ? (
+            <p className={cx("rounded-lg border p-3 text-sm leading-6", debug.diagnostic.category === "data_available" ? "border-emerald-300/20 bg-emerald-300/10 text-emerald-100" : "border-amber-300/20 bg-amber-300/10 text-amber-100")}>
+              {debug.diagnostic.letter && debug.diagnostic.letter !== "ok" ? `${debug.diagnostic.letter}: ` : ""}{debug.diagnostic.message}
+            </p>
+          ) : null}
           {debug.phone_app_data_note ? (
             <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm leading-6 text-zinc-300">{debug.phone_app_data_note}</p>
           ) : null}
           {debug.source_error ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 p-3 text-sm text-red-100">{debug.source_error}</p> : null}
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Backend API path</p>
               <p className="mt-2 text-sm font-semibold text-white">{debug.api_path_label || "Google Health API v4"}</p>
@@ -11978,8 +12147,21 @@ function GoogleHealthSourcesDebugPanel({
               {debug.api_base_url ? <p className="mt-1 break-all text-xs text-zinc-500">{debug.api_base_url}</p> : null}
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">API requests</p>
+              <p className="mt-2 text-sm font-semibold text-white">Health {debug.requests_sent_to_google_health_api ?? apiRequestCounts.google_health ?? 0}</p>
+              <p className={cx("mt-1 text-xs font-semibold", Number(debug.requests_sent_to_fitness_api ?? apiRequestCounts.google_fit_legacy ?? 0) > 0 ? "text-amber-100" : "text-zinc-500")}>
+                Fitness {debug.requests_sent_to_fitness_api ?? apiRequestCounts.google_fit_legacy ?? 0}
+              </p>
+              <p className="mt-1 text-xs text-zinc-500">Total {apiRequestCounts.total ?? apiRequestEntries.length}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Granted scopes</p>
               <p className="mt-2 text-sm font-semibold text-white">{debug.granted_scopes?.length ? debug.granted_scopes.join(", ") : "None detected"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Connected account</p>
+              <p className="mt-2 text-sm font-semibold text-white">{debug.connected_account?.name || debug.connected_account?.health_user_id_preview || debug.connected_account?.status || "Not checked"}</p>
+              <p className="mt-1 text-xs text-zinc-500">{debug.connected_account?.message || "Health identity is sanitized; tokens are never shown."}</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Available data types</p>
@@ -11989,7 +12171,8 @@ function GoogleHealthSourcesDebugPanel({
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Last sync</p>
               <p className="mt-2 text-sm font-semibold text-white">{sync?.last_synced_at ? relativeSyncTime(sync.last_synced_at) : "Not recorded"}</p>
-              <p className="mt-1 text-xs text-zinc-500">Rows saved {sync?.rows_saved ?? 0} · Empty rows {debug.empty_row_counts?.empty_date_rows_count ?? 0}</p>
+              <p className="mt-1 text-xs text-zinc-500">Rows saved {sync?.rows_saved ?? 0} · Empty rows {debug.empty_placeholder_rows_count ?? debug.empty_row_counts?.empty_date_rows_count ?? 0}</p>
+              {debug.last_successful_populated_metric_date ? <p className="mt-1 text-xs text-zinc-500">Latest populated {debug.last_successful_populated_metric_date}</p> : null}
             </div>
           </div>
           <div className="grid gap-3 lg:grid-cols-2">
@@ -12010,7 +12193,17 @@ function GoogleHealthSourcesDebugPanel({
             </div>
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">
               <p className="text-sm font-semibold text-white">Raw returned data counts</p>
-              {rawResponseEntries.length ? (
+              {rawMetricEntries.length ? (
+                <div className="mt-2 grid gap-2 text-xs leading-5 text-zinc-400 md:grid-cols-2">
+                  {rawMetricEntries.map(([metric, item]) => (
+                    <div key={metric} className="rounded-lg border border-white/10 bg-white/[0.035] p-2">
+                      <p className="font-semibold text-zinc-200">{metric.replaceAll("_", " ")}: {item.status || "unknown"}</p>
+                      <p>Points {item.point_count ?? 0} · Populated {item.populated_point_count ?? 0}</p>
+                      <p className="line-clamp-2 text-zinc-500">{item.data_types?.join(", ") || "No data types recorded"}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : rawResponseEntries.length ? (
                 <div className="mt-2 space-y-2 text-xs leading-5 text-zinc-400">
                   {rawResponseEntries.map(([key, value]) => {
                     const item = value as { status?: string; bucket_count?: number; point_count?: number; populated_point_count?: number; endpoint?: string; requested_data_types?: string[] };
@@ -12026,7 +12219,14 @@ function GoogleHealthSourcesDebugPanel({
               ) : (
                 <p className="mt-2 text-xs leading-5 text-zinc-500">No Health API rollup/list responses recorded yet.</p>
               )}
-              {metricCounts.length ? (
+              {populatedDayEntries.length ? (
+                <div className="mt-3 border-t border-white/10 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Populated fields by day</p>
+                  <div className="mt-2 grid gap-1 text-xs text-zinc-400">
+                    {populatedDayEntries.map(([day, item]) => <p key={day}>{day}: <span className="text-zinc-200">{item.fields_populated_count ?? 0}</span> <span className="text-zinc-500">{item.fields?.slice(0, 5).join(", ")}</span></p>)}
+                  </div>
+                </div>
+              ) : metricCounts.length ? (
                 <div className="mt-3 border-t border-white/10 pt-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Populated metrics by day</p>
                   <div className="mt-2 grid gap-1 text-xs text-zinc-400">
@@ -12043,6 +12243,28 @@ function GoogleHealthSourcesDebugPanel({
                 </div>
               ) : null}
             </div>
+          </div>
+          <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+            <p className="text-sm font-semibold text-white">Exact API request ledger</p>
+            {apiRequestEntries.length ? (
+              <div className="mt-2 grid gap-2 text-xs leading-5 text-zinc-400 lg:grid-cols-2">
+                {apiRequestEntries.map((entry, index) => (
+                  <div key={`${index}-${String(entry.url ?? entry.path ?? "")}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-2">
+                    <p className="font-semibold text-zinc-200">
+                      {String(entry.api_family ?? "unknown")} · {String(entry.method ?? "GET")} · {String(entry.response_status ?? "pending")}
+                    </p>
+                    <p className="break-all text-zinc-500">{String(entry.host ?? "")}{String(entry.path ?? "")}</p>
+                    <p className="text-zinc-500">Provider {String(entry.provider ?? "unknown")} · Endpoint {String(entry.endpoint ?? "unknown")} · Count {String(entry.response_count ?? 0)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : exactEndpointUrls.length ? (
+              <div className="mt-2 space-y-1 text-xs leading-5 text-zinc-400">
+                {exactEndpointUrls.map((url) => <p key={url} className="break-all rounded-lg border border-white/10 bg-white/[0.035] p-2">{url}</p>)}
+              </div>
+            ) : (
+              <p className="mt-2 text-xs leading-5 text-zinc-500">No request ledger has been recorded yet. Run a Google Health sync or refresh source diagnostics.</p>
+            )}
           </div>
           {debug.fallback_plan?.length ? (
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
@@ -12617,10 +12839,23 @@ function SettingsPage({
   const rawGoogleHealthError = String(googleHealthService?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
   const googleHealthError = googleHealthLastStatus === "ok" ? "" : rawGoogleHealthError;
   const googleHealthNextAction = String(googleHealthService?.recommended_next_action || googleHealthCard?.metadata?.recommended_next_action || googleHealthDiagnostic?.details?.recommended_next_action || "");
+  const googleHealthApiLabel = String(
+    googleHealthService?.google_health_api_sync_label
+      || googleHealthCard?.metadata?.google_health_api_sync_label
+      || googleHealthSourcesDebug?.google_health_api_sync_label
+      || "",
+  );
+  const googleFitLegacyLabel = String(
+    googleHealthService?.google_fit_legacy_data_source_label
+      || googleHealthCard?.metadata?.google_fit_legacy_data_source_label
+      || googleHealthSourcesDebug?.google_fit_legacy_data_source_label
+      || "",
+  );
+  const googleHealthStatusPrefix = [googleHealthApiLabel, googleFitLegacyLabel].filter(Boolean).join(" · ");
   const googleHealthDescription = !googleHealthConfigured
     ? "Google Health connection is not configured yet. Add backend OAuth env vars, then redeploy the API."
     : googleHealthLastStatus === "ok"
-      ? `Last sync successful${googleHealthRowsSaved !== null ? ` · Rows saved: ${Math.round(googleHealthRowsSaved).toLocaleString()}` : ""}${googleHealthWarning ? ` · Warning: ${googleHealthWarning}` : ""}`
+      ? `${googleHealthStatusPrefix ? `${googleHealthStatusPrefix} · ` : ""}Last sync successful${googleHealthRowsSaved !== null ? ` · Rows saved: ${Math.round(googleHealthRowsSaved).toLocaleString()}` : ""}${googleHealthWarning ? ` · Warning: ${googleHealthWarning}` : ""}`
       : googleHealthNextAction
         ? googleHealthNextAction
       : googleHealthError
