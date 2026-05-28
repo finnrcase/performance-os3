@@ -343,7 +343,10 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
 
     client_id, client_secret = client_credentials(settings)
     redirect_configured = bool(redirect_uri(settings))
-    tokens, sync = saved_token_state(settings)
+    saved_tokens, saved_sync = saved_token_state(settings)
+    resolved = _google_health_resolved_token_state(settings)
+    tokens = resolved.get("tokens") if isinstance(resolved.get("tokens"), dict) else saved_tokens
+    sync = resolved.get("sync") if isinstance(resolved.get("sync"), dict) and resolved.get("sync") else saved_sync
     effective_api_base_url = api_base_url()
     legacy_google_fit_detected = is_legacy_google_fit_base_url(effective_api_base_url)
     refresh_token_present = bool(tokens.get("refresh_token"))
@@ -359,19 +362,19 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
     has_googlehealth_scope = any("googlehealth." in scope for scope in granted_scopes)
     has_legacy_fitness_scope = any("/auth/fitness." in scope for scope in granted_scopes)
     google_health_api_sync_available = bool(
-        configured
-        and refresh_token_present
+        refresh_token_present
         and not needs_reconnect
         and not legacy_google_fit_detected
+        and not has_legacy_fitness_scope
         and (has_googlehealth_scope or not granted_scopes)
     )
     google_fit_legacy_data_source_status = "found" if legacy_google_fit_detected or (has_legacy_fitness_scope and not has_googlehealth_scope) else "not_found"
-    if not configured:
-        status = "Not configured"
-    elif needs_reconnect:
+    if needs_reconnect or (refresh_token_present and has_legacy_fitness_scope):
         status = "Reconnect required"
     elif refresh_token_present:
         status = "Connected"
+    elif not configured:
+        status = "Not configured"
     else:
         status = "Disconnected"
     try:
@@ -391,7 +394,13 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "google_fit_legacy_data_source_label": GOOGLE_FIT_LEGACY_FOUND_LABEL if google_fit_legacy_data_source_status == "found" else GOOGLE_FIT_LEGACY_NOT_FOUND_LABEL,
         "access_token_present": access_token_present,
         "refresh_token_present": refresh_token_present,
-        "token_status": "reconnect_required" if needs_reconnect else "valid" if refresh_token_present else "missing",
+        "provider_key_used": resolved.get("provider_key", GOOGLE_HEALTH_PROVIDER_ID),
+        "storage_source_used": resolved.get("storage_source", resolved.get("source", "none")),
+        "token_storage_source": resolved.get("source", "none"),
+        "token_candidates": resolved.get("candidates", []),
+        "token_migration_available": bool(resolved.get("migration_available")),
+        "connected_at": resolved.get("connected_at", "") or sync.get("connected_at", ""),
+        "token_status": "reconnect_required" if needs_reconnect or (refresh_token_present and has_legacy_fitness_scope) else "valid" if refresh_token_present else "missing",
         "expires_at": expires_at or None,
         "scopes": " ".join(granted_scopes),
         "required_env_vars": ["GOOGLE_HEALTH_CLIENT_ID", "GOOGLE_HEALTH_CLIENT_SECRET", "GOOGLE_HEALTH_REDIRECT_URI"],
@@ -455,7 +464,7 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "phone_app_data_note": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE if legacy_google_fit_detected else sync.get("phone_app_data_note", ""),
         "fallback_plan": sync.get("fallback_plan", ["google_health_api_v4"]),
         "recommended_next_action": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE if legacy_google_fit_detected else sync.get("recommended_next_action", ""),
-        "needs_reconnect": needs_reconnect,
+        "needs_reconnect": bool(needs_reconnect or (refresh_token_present and has_legacy_fitness_scope)),
     }
 
 
@@ -926,13 +935,16 @@ def _save_google_health_connection_record(status: str = "", metadata: dict[str, 
         "refresh_token_present": bool(metadata.get("refresh_token_present")),
         "token_status": metadata.get("token_status", "missing"),
         "scopes": metadata.get("scopes", ""),
+        "provider_key_used": metadata.get("provider_key_used", "google_health"),
+        "storage_source_used": metadata.get("storage_source_used", ""),
+        "token_storage_source": metadata.get("token_storage_source", ""),
         "last_synced_at": metadata.get("last_synced_at", ""),
         "latest_record": metadata.get("latest_record", ""),
         "last_error": metadata.get("last_error", ""),
         "updated_at": now,
     }
-    if metadata.get("connected") and not payload.get("connected_at"):
-        payload["connected_at"] = now
+    if metadata.get("connected"):
+        payload["connected_at"] = metadata.get("connected_at") or now
     return upsert_json_row("google_health_connections", "connection_id", "primary", payload)
 
 
@@ -1799,6 +1811,199 @@ def _save_google_health_sync_state(updates: dict[str, Any]) -> dict[str, Any]:
     return metadata["google_health_sync"]
 
 
+GOOGLE_HEALTH_TOKEN_FIELD_NAMES = {
+    "access_token": ("access_token", "google_health_access_token"),
+    "refresh_token": ("refresh_token", "google_health_refresh_token"),
+    "expires_at": ("expires_at", "google_health_expires_at", "google_health_token_expires_at"),
+    "token_type": ("token_type", "google_health_token_type"),
+    "scopes": ("scopes", "scope", "google_health_scopes"),
+}
+
+
+def _google_health_token_text(value: Any) -> str:
+    text = _google_health_text(value)
+    return "" if text.startswith(SECRET_MARKER) or text.startswith("***") else text
+
+
+def _google_health_tokens_from_mapping(mapping: dict[str, Any] | None) -> dict[str, Any]:
+    source = mapping if isinstance(mapping, dict) else {}
+    nested = source.get("tokens") if isinstance(source.get("tokens"), dict) else {}
+    integrations = source.get("integrations") if isinstance(source.get("integrations"), dict) else {}
+    token_values: dict[str, Any] = {}
+    for canonical, aliases in GOOGLE_HEALTH_TOKEN_FIELD_NAMES.items():
+        value = ""
+        for candidate in (source, nested, integrations):
+            if not isinstance(candidate, dict):
+                continue
+            for alias in aliases:
+                value = candidate.get(alias)
+                if _google_health_token_text(value):
+                    break
+            if _google_health_token_text(value):
+                break
+        if canonical == "expires_at":
+            try:
+                token_values[canonical] = int(value or 0)
+            except (TypeError, ValueError):
+                token_values[canonical] = 0
+        else:
+            token_values[canonical] = _google_health_token_text(value)
+    if not token_values.get("access_token") and not token_values.get("refresh_token"):
+        return {}
+    token_values.setdefault("token_type", "Bearer")
+    return token_values
+
+
+def _google_health_tokens_from_document(document: dict[str, Any] | None) -> dict[str, Any]:
+    source = document if isinstance(document, dict) else {}
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    for candidate in (
+        metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {},
+        source.get("google_health_tokens") if isinstance(source.get("google_health_tokens"), dict) else {},
+        source,
+    ):
+        tokens = _google_health_tokens_from_mapping(candidate)
+        if tokens:
+            return tokens
+    return {}
+
+
+def _google_health_sync_from_document(document: dict[str, Any] | None) -> dict[str, Any]:
+    source = document if isinstance(document, dict) else {}
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    if isinstance(metadata.get("google_health_sync"), dict):
+        return dict(metadata["google_health_sync"])
+    if isinstance(source.get("google_health_sync"), dict):
+        return dict(source["google_health_sync"])
+    if isinstance(source.get("sync"), dict):
+        return dict(source["sync"])
+    return {}
+
+
+def _google_health_env_tokens() -> dict[str, Any]:
+    raw = {
+        "google_health_access_token": os.getenv("GOOGLE_HEALTH_ACCESS_TOKEN", ""),
+        "google_health_refresh_token": os.getenv("GOOGLE_HEALTH_REFRESH_TOKEN", ""),
+        "google_health_expires_at": os.getenv("GOOGLE_HEALTH_EXPIRES_AT", "") or os.getenv("GOOGLE_HEALTH_TOKEN_EXPIRES_AT", ""),
+        "google_health_token_type": os.getenv("GOOGLE_HEALTH_TOKEN_TYPE", ""),
+        "google_health_scopes": os.getenv("GOOGLE_HEALTH_GRANTED_SCOPES", "") or os.getenv("GOOGLE_HEALTH_SCOPES", ""),
+    }
+    return _google_health_tokens_from_mapping(raw)
+
+
+def _google_health_token_candidate(source: str, document: dict[str, Any] | None, *, provider_key: str = "google_health") -> dict[str, Any] | None:
+    tokens = _google_health_tokens_from_document(document)
+    if not tokens:
+        return None
+    sync = _google_health_sync_from_document(document)
+    connected_at = (
+        _google_health_text(sync.get("connected_at"))
+        or _google_health_text(tokens.get("connected_at"))
+        or _google_health_text((document or {}).get("connected_at") if isinstance(document, dict) else "")
+    )
+    return {
+        "source": source,
+        "provider_key": provider_key,
+        "storage_source": source,
+        "tokens": tokens,
+        "sync": sync,
+        "connected_at": connected_at,
+        "has_access_token": bool(tokens.get("access_token")),
+        "has_refresh_token": bool(tokens.get("refresh_token")),
+    }
+
+
+def _google_health_token_candidates(settings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    current = settings if isinstance(settings, dict) else _settings_document()
+    candidates: list[dict[str, Any]] = []
+    latest = _google_health_token_candidate("api_connections.latest.metadata.google_health_tokens", current)
+    if latest:
+        candidates.append(latest)
+        if latest.get("has_refresh_token"):
+            return candidates
+    env_tokens = _google_health_env_tokens()
+    if env_tokens:
+        candidates.append(
+            {
+                "source": "environment.google_health_tokens",
+                "provider_key": "google_health",
+                "storage_source": "environment",
+                "tokens": env_tokens,
+                "sync": {},
+                "connected_at": "",
+                "has_access_token": bool(env_tokens.get("access_token")),
+                "has_refresh_token": bool(env_tokens.get("refresh_token")),
+            }
+        )
+    for index, row in enumerate(fetch_json_rows("api_connections", limit=25)):
+        if not isinstance(row, dict) or "_db_error" in row:
+            continue
+        candidate = _google_health_token_candidate(f"api_connections.history[{index}].metadata.google_health_tokens", row)
+        if candidate:
+            candidates.append(candidate)
+    for index, row in enumerate(fetch_json_rows("google_health_connections", limit=25)):
+        if not isinstance(row, dict) or "_db_error" in row:
+            continue
+        candidate = _google_health_token_candidate(f"google_health_connections[{index}]", row)
+        if candidate:
+            candidates.append(candidate)
+    deduped: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in candidates:
+        tokens = candidate.get("tokens") if isinstance(candidate.get("tokens"), dict) else {}
+        key = (str(tokens.get("refresh_token") or ""), str(tokens.get("access_token") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
+
+
+def _google_health_resolved_token_state(settings: dict[str, Any] | None = None) -> dict[str, Any]:
+    candidates = _google_health_token_candidates(settings)
+    selected = next((candidate for candidate in candidates if candidate.get("has_refresh_token")), None)
+    if selected is None:
+        selected = next((candidate for candidate in candidates if candidate.get("has_access_token")), None)
+    if selected is None:
+        selected = {
+            "source": "none",
+            "provider_key": "google_health",
+            "storage_source": "none",
+            "tokens": {},
+            "sync": _google_health_sync_from_document(settings if isinstance(settings, dict) else _settings_document()),
+            "connected_at": "",
+            "has_access_token": False,
+            "has_refresh_token": False,
+        }
+    sanitized_candidates = [
+        {
+            "source": candidate.get("source", ""),
+            "provider_key": candidate.get("provider_key", "google_health"),
+            "access_token_present": bool(candidate.get("has_access_token")),
+            "refresh_token_present": bool(candidate.get("has_refresh_token")),
+            "expires_at": (candidate.get("tokens") if isinstance(candidate.get("tokens"), dict) else {}).get("expires_at"),
+            "connected_at": candidate.get("connected_at", ""),
+        }
+        for candidate in candidates
+    ]
+    return {
+        **selected,
+        "candidates": sanitized_candidates,
+        "migration_available": bool(selected.get("has_refresh_token") and str(selected.get("source")) not in {"api_connections.latest.metadata.google_health_tokens", "environment.google_health_tokens"}),
+    }
+
+
+def _migrate_google_health_tokens_if_needed(resolved: dict[str, Any]) -> None:
+    source = str(resolved.get("source") or "")
+    tokens = resolved.get("tokens") if isinstance(resolved.get("tokens"), dict) else {}
+    if not tokens.get("refresh_token"):
+        return
+    if source in {"api_connections.latest.metadata.google_health_tokens", "environment.google_health_tokens"}:
+        return
+    logger.info("[google_health] migrating saved token state from %s into api_connections latest metadata", source)
+    _save_google_health_tokens(tokens, connected_at=_google_health_text(resolved.get("connected_at")))
+
+
 def _google_health_text(value: Any) -> str:
     try:
         if value is None or pd_is_na(value):
@@ -1975,8 +2180,8 @@ def _google_health_source_diagnostic(
         return {"category": "wrong_api", "letter": "A", "message": "Google Fit/Fitness REST is configured, not Google Health API."}
     if not connected:
         return {"category": "not_connected", "letter": "auth", "message": "Google Health OAuth is not connected."}
-    if has_legacy_fitness_scope and not has_googlehealth_scope:
-        return {"category": "wrong_scopes", "letter": "B", "message": "Connected token has deprecated Google Fit/Fitness scopes, not googlehealth.* scopes."}
+    if has_legacy_fitness_scope:
+        return {"category": "wrong_scopes", "letter": "B", "message": "Connected token includes deprecated Google Fit/Fitness scopes that Google Health API rejects. Reconnect Google Health for a clean googlehealth.* token."}
     if not has_googlehealth_scope:
         return {"category": "wrong_scopes", "letter": "B", "message": "Connected token is missing Google Health API scopes."}
     if data_source_count <= 0 and not any((item.get("point_count") or 0) > 0 for item in raw_counts_by_metric.values()):
@@ -2017,8 +2222,8 @@ def _google_health_access_token(settings: dict[str, Any] | None = None) -> str:
     from src.integrations.google_health_client import refresh_access_token
 
     current = settings if isinstance(settings, dict) else _settings_document()
-    metadata = current.get("metadata") if isinstance(current.get("metadata"), dict) else {}
-    tokens = metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {}
+    resolved = _google_health_resolved_token_state(current)
+    tokens = resolved.get("tokens") if isinstance(resolved.get("tokens"), dict) else {}
     access_token = str(tokens.get("access_token") or "").strip()
     refresh_token = str(tokens.get("refresh_token") or "").strip()
     try:
@@ -2026,7 +2231,10 @@ def _google_health_access_token(settings: dict[str, Any] | None = None) -> str:
     except (TypeError, ValueError):
         expires_at = 0
     if not refresh_token:
-        raise RuntimeError("Google Health is not connected. Connect Google Health before syncing.")
+        message = "Google Health token not found. Reconnect Google Health."
+        _save_google_health_sync_state({"needs_reconnect": True, "last_status": "error", "last_message": message, "last_error": message, "last_synced_at": utc_now_iso()})
+        raise RuntimeError(message)
+    _migrate_google_health_tokens_if_needed(resolved)
     if access_token and expires_at > int(time.time()) + 60:
         return access_token
     logger.info("[google_health] refreshing access token")
@@ -2095,6 +2303,58 @@ def debug_google_health(request: Request) -> dict[str, Any]:
     return _google_health_debug_payload(request)
 
 
+@router.get("/api/debug/google-health/connection")
+def debug_google_health_connection() -> dict[str, Any]:
+    settings = _settings_document()
+    status, metadata = _google_health_status(settings)
+    resolved = _google_health_resolved_token_state(settings)
+    tokens = resolved.get("tokens") if isinstance(resolved.get("tokens"), dict) else {}
+    sync = resolved.get("sync") if isinstance(resolved.get("sync"), dict) else {}
+    try:
+        expires_at = int(tokens.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+    refresh_present = bool(tokens.get("refresh_token"))
+    granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
+    has_legacy_fitness_scope = any("/auth/fitness." in scope or str(scope).startswith("fitness_") for scope in granted_scopes)
+    reconnect_required = bool(sync.get("needs_reconnect")) or not refresh_present or has_legacy_fitness_scope
+    return {
+        "status": "warning" if reconnect_required else "ok",
+        "provider": "google_health",
+        "checked_at": utc_now_iso(),
+        "connection_status": status,
+        "connected": bool(refresh_present and not reconnect_required),
+        "access_token_present": bool(tokens.get("access_token")),
+        "refresh_token_present": refresh_present,
+        "token_expiry": expires_at or None,
+        "expires_at": expires_at or None,
+        "token_status": metadata.get("token_status", "missing"),
+        "provider_key_used": resolved.get("provider_key", "google_health"),
+        "storage_source_used": resolved.get("storage_source", resolved.get("source", "none")),
+        "token_storage_source": resolved.get("source", "none"),
+        "last_connection_timestamp": resolved.get("connected_at", "") or metadata.get("connected_at", ""),
+        "connected_at": resolved.get("connected_at", "") or metadata.get("connected_at", ""),
+        "needs_reconnect": reconnect_required,
+        "legacy_fitness_scopes_present": has_legacy_fitness_scope,
+        "last_error": metadata.get("last_error", ""),
+        "last_sync_status": metadata.get("last_status", ""),
+        "last_synced_at": metadata.get("last_synced_at", ""),
+        "scopes": granted_scopes,
+        "token_candidates": resolved.get("candidates", []),
+        "migration_available": bool(resolved.get("migration_available")),
+        "message": (
+            "Google Health token refresh failed. Reconnect Google Health."
+            if sync.get("needs_reconnect")
+            else "Google Health token includes deprecated Google Fit/Fitness scopes. Reconnect Google Health."
+            if has_legacy_fitness_scope
+            else
+            "Google Health token is available for sync."
+            if refresh_present
+            else "Google Health token not found. Reconnect Google Health."
+        ),
+    }
+
+
 @router.get("/api/debug/google-health/sources")
 def debug_google_health_sources() -> dict[str, Any]:
     from src.integrations.google_health_client import (
@@ -2120,8 +2380,8 @@ def debug_google_health_sources() -> dict[str, Any]:
     status, metadata = _google_health_status(settings)
     sync = _metadata(settings).get("google_health_sync")
     sync = sync if isinstance(sync, dict) else {}
-    tokens = _metadata(settings).get("google_health_tokens")
-    tokens = tokens if isinstance(tokens, dict) else {}
+    token_resolution = _google_health_resolved_token_state(settings)
+    tokens = token_resolution.get("tokens") if isinstance(token_resolution.get("tokens"), dict) else {}
     granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
     has_googlehealth_scope = any("googlehealth." in scope for scope in granted_scopes)
     has_legacy_fitness_scope = any("/auth/fitness." in scope for scope in granted_scopes)
@@ -2154,6 +2414,10 @@ def debug_google_health_sources() -> dict[str, Any]:
         "token_status": metadata.get("token_status", "missing"),
         "access_token_present": bool(metadata.get("access_token_present")),
         "refresh_token_present": bool(metadata.get("refresh_token_present")),
+        "provider_key_used": token_resolution.get("provider_key", metadata.get("provider_key_used", GOOGLE_HEALTH_PROVIDER_ID)),
+        "storage_source_used": token_resolution.get("storage_source", metadata.get("storage_source_used", "")),
+        "token_storage_source": token_resolution.get("source", metadata.get("token_storage_source", "")),
+        "token_candidates": token_resolution.get("candidates", []),
         "requested_scopes": scopes(),
         "granted_scopes": granted_scopes,
         "available_data_sources": [],
@@ -2177,6 +2441,7 @@ def debug_google_health_sources() -> dict[str, Any]:
         "phone_app_data_note": sync.get("phone_app_data_note", "Google Health API v4 is the primary wearable provider. Deprecated Google Fit/Fitness API endpoints are not used for sync."),
         "fallback_plan": sync.get("fallback_plan", ["google_health_api_v4"]),
         "last_raw_responses": last_raw_responses,
+        "normalization_audit": sync.get("normalization_audit", {}),
         "raw_response_counts_by_metric": raw_counts_by_metric,
         "populated_fields_by_metric": sync.get("populated_fields_by_metric", {}),
         "populated_metric_counts_by_day": sync.get("populated_metric_counts_by_day", {}),
@@ -2225,7 +2490,8 @@ def debug_google_health_sources() -> dict[str, Any]:
             }
         )
     if not metadata.get("connected"):
-        payload["recommended_next_action"] = "Connect Google Health OAuth before checking data sources."
+        if not str(payload.get("recommended_next_action") or "").strip():
+            payload["recommended_next_action"] = "Connect Google Health OAuth before checking data sources."
         payload["diagnostic"] = _google_health_source_diagnostic(
             connected=False,
             has_googlehealth_scope=has_googlehealth_scope,
@@ -2336,8 +2602,8 @@ def debug_google_health_raw(
     status, metadata = _google_health_status(settings)
     sync = _metadata(settings).get("google_health_sync")
     sync = sync if isinstance(sync, dict) else {}
-    tokens = _metadata(settings).get("google_health_tokens")
-    tokens = tokens if isinstance(tokens, dict) else {}
+    token_resolution = _google_health_resolved_token_state(settings)
+    tokens = token_resolution.get("tokens") if isinstance(token_resolution.get("tokens"), dict) else {}
     granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
     has_googlehealth_scope = any("googlehealth." in scope for scope in granted_scopes)
     has_legacy_fitness_scope = any("/auth/fitness." in scope for scope in granted_scopes)
@@ -2345,6 +2611,7 @@ def debug_google_health_raw(
     end_date = app_today_iso()
     start_date = (date.fromisoformat(end_date) - timedelta(days=days - 1)).isoformat()
     raw_responses = sync.get("raw_health_responses", sync.get("raw_aggregate_responses", {}))
+    normalization_audit = sync.get("normalization_audit") if isinstance(sync.get("normalization_audit"), dict) else {}
     normalized_items: list[dict[str, Any]] = []
     source = "last_sync"
     live_error = ""
@@ -2359,6 +2626,7 @@ def debug_google_health_raw(
             identity_access_token = _google_health_access_token(settings)
             fetched = fetch_daily_metrics(identity_access_token, start_date=start_date, end_date=end_date)
             raw_responses = fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {}
+            normalization_audit = fetched.get("normalization_audit") if isinstance(fetched.get("normalization_audit"), dict) else {}
             normalized_items = [dict(item) for item in (fetched.get("items") or []) if isinstance(item, dict)]
             live_api_request_log = fetched.get("api_request_log") if isinstance(fetched.get("api_request_log"), list) else []
             live_api_request_counts = fetched.get("api_request_counts") if isinstance(fetched.get("api_request_counts"), dict) else {}
@@ -2406,12 +2674,16 @@ def debug_google_health_raw(
         "connected_status": status,
         "connected": bool(metadata.get("connected")),
         "token_status": metadata.get("token_status", "missing"),
+        "provider_key_used": token_resolution.get("provider_key", metadata.get("provider_key_used", "google_health")),
+        "storage_source_used": token_resolution.get("storage_source", metadata.get("storage_source_used", "")),
+        "token_storage_source": token_resolution.get("source", metadata.get("token_storage_source", "")),
         "connected_account": _google_health_connected_account(identity_access_token, connected=bool(metadata.get("connected"))) if metadata.get("connected") else {"status": "not_connected"},
         "granted_scopes": granted_scopes,
         "date_range": {"start_date": start_date, "end_date": end_date},
         "live_probe": live,
         "live_error": live_error,
         "raw_responses": raw_responses,
+        "normalization_audit": normalization_audit,
         "raw_response_counts_by_metric": raw_counts_by_metric,
         "populated_fields_by_day": populated_fields_by_day,
         "empty_placeholder_rows_count": int(sync.get("empty_date_rows_count") or 0),
@@ -2419,6 +2691,153 @@ def debug_google_health_raw(
         "sample_normalized_rows": normalized_items[:3] if metric_rows_available else [],
         "diagnostic": diagnostic,
         "recommended_next_action": diagnostic.get("message", "") if diagnostic.get("category") != "data_available" else "",
+    }
+
+
+@router.get("/api/debug/google-health/ingestion")
+def debug_google_health_ingestion(
+    live: bool = Query(default=True),
+    days: int = Query(default=1, ge=1, le=14),
+) -> dict[str, Any]:
+    from src.integrations.google_health_client import fetch_daily_metrics
+
+    settings = _settings_document()
+    status, metadata = _google_health_status(settings)
+    token_resolution = _google_health_resolved_token_state(settings)
+    tokens = token_resolution.get("tokens") if isinstance(token_resolution.get("tokens"), dict) else {}
+    granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
+    has_legacy_fitness_scope = any("/auth/fitness." in scope or str(scope).startswith("fitness_") for scope in granted_scopes)
+    probe_token_available = bool(tokens.get("access_token") or tokens.get("refresh_token") or metadata.get("access_token_present") or metadata.get("refresh_token_present"))
+    end_date = app_today_iso()
+    start_date = (date.fromisoformat(end_date) - timedelta(days=days - 1)).isoformat()
+    stored_rows = _google_health_metric_rows(limit=500)
+    stored_rows_available = not (stored_rows and isinstance(stored_rows[0], dict) and "_db_error" in stored_rows[0])
+    stored_clean = stored_rows if stored_rows_available else []
+    stored_populated = [row for row in stored_clean if _google_health_row_field_counts(row)["fields_populated_count"] > 0]
+    sync = _metadata(settings).get("google_health_sync")
+    sync = sync if isinstance(sync, dict) else {}
+    fetched: dict[str, Any] = {}
+    live_error = ""
+    if live and (metadata.get("connected") or probe_token_available):
+        try:
+            access_token = _google_health_access_token(settings)
+            fetched = fetch_daily_metrics(access_token, start_date=start_date, end_date=end_date)
+        except Exception as exc:
+            live_error = str(exc)[:500]
+    elif not live:
+        fetched = {
+            "api_request_log": sync.get("api_request_log", []),
+            "api_request_counts": sync.get("api_request_counts", {}),
+            "exact_endpoint_urls": sync.get("exact_endpoint_urls", []),
+            "raw_health_responses": sync.get("raw_health_responses", sync.get("raw_aggregate_responses", {})),
+            "normalization_audit": sync.get("normalization_audit", {}),
+            "items": stored_clean,
+            "provider": sync.get("provider", "google_health"),
+            "source": "last_sync",
+        }
+    raw_responses = fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {}
+    normalization_audit = fetched.get("normalization_audit") if isinstance(fetched.get("normalization_audit"), dict) else {}
+    endpoint_rows = []
+    for data_type, audit in normalization_audit.items():
+        item = audit if isinstance(audit, dict) else {}
+        endpoint_rows.append(
+            {
+                "data_type": data_type,
+                "provider": item.get("provider", fetched.get("provider", "google_health")),
+                "source": item.get("source", fetched.get("provider", "google_health")),
+                "api_family": item.get("api_family", ""),
+                "endpoint": item.get("endpoint", ""),
+                "endpoint_url": item.get("endpoint_url", ""),
+                "datapoint_count": item.get("raw_datapoint_count", 0),
+                "raw_populated_datapoint_count": item.get("raw_populated_datapoint_count", 0),
+                "normalized_field_count": item.get("normalized_field_count", 0),
+                "dropped_field_count": item.get("dropped_field_count", 0),
+                "dropped_datapoint_count": item.get("dropped_datapoint_count", 0),
+                "dropped_reasons": item.get("dropped_reasons", {}),
+                "value_keys": item.get("value_keys", []),
+                "normalized_fields": item.get("normalized_fields", []),
+                "status": item.get("status", "unknown"),
+                "error": item.get("error", ""),
+                "raw_sample": item.get("raw_sample", {}),
+            }
+        )
+    api_request_counts = fetched.get("api_request_counts") if isinstance(fetched.get("api_request_counts"), dict) else sync.get("api_request_counts", {})
+    disallowed_scope_errors = [
+        row
+        for row in endpoint_rows
+        if "DISALLOWED_OAUTH_SCOPES" in str(row.get("error") or row.get("dropped_reasons") or row.get("raw_sample") or "")
+        or "disallowed oauth scope" in str(row.get("error") or "").lower()
+    ]
+    if not disallowed_scope_errors:
+        disallowed_scope_errors = [
+            row
+            for row in endpoint_rows
+            if any("DISALLOWED_OAUTH_SCOPES" in str(reason) or "disallowed OAuth scope" in str(reason).lower() for reason in (row.get("dropped_reasons") or {}).keys())
+        ]
+    return {
+        "status": "error" if live_error else "warning" if disallowed_scope_errors or has_legacy_fitness_scope else "ok" if metadata.get("connected") else "warning",
+        "provider": fetched.get("provider", "google_health"),
+        "source": "live_probe" if live else "last_sync",
+        "checked_at": utc_now_iso(),
+        "connected_status": status,
+        "connected": bool(metadata.get("connected")),
+        "access_token_present": bool(tokens.get("access_token") or metadata.get("access_token_present")),
+        "refresh_token_present": bool(tokens.get("refresh_token") or metadata.get("refresh_token_present")),
+        "granted_scopes": granted_scopes,
+        "legacy_fitness_scopes_present": has_legacy_fitness_scope,
+        "live_probe": live,
+        "live_error": live_error,
+        "date_range": {"start_date": start_date, "end_date": end_date},
+        "api_base_url": fetched.get("api_base_url", metadata.get("api_base_url", "https://health.googleapis.com")),
+        "api_path": fetched.get("api_path", metadata.get("api_path", "google_health_v4")),
+        "api_request_counts": api_request_counts,
+        "requests_sent_to_google_health_api": int(api_request_counts.get("google_health") or fetched.get("requests_sent_to_google_health_api") or 0),
+        "requests_sent_to_fitness_api": int(api_request_counts.get("google_fit_legacy") or fetched.get("requests_sent_to_fitness_api") or 0),
+        "exact_endpoint_urls": fetched.get("exact_endpoint_urls") or sync.get("exact_endpoint_urls", []),
+        "endpoint_results": endpoint_rows,
+        "disallowed_scope_endpoint_count": len(disallowed_scope_errors),
+        "raw_responses": raw_responses,
+        "raw_response_counts_by_metric": _google_health_raw_counts_by_metric(raw_responses),
+        "normalized_items_count": len(fetched.get("items") or []),
+        "normalized_field_count": int(fetched.get("fields_populated_count") or 0),
+        "normalized_missing_field_count": int(fetched.get("fields_missing_count") or 0),
+        "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
+        "storage": {
+            "table": "wearable_metrics",
+            "stored_rows": len(stored_clean),
+            "stored_populated_rows": len(stored_populated),
+            "stored_empty_rows": max(0, len(stored_clean) - len(stored_populated)),
+            "stored_fields_by_day": _google_health_populated_fields_by_day(stored_clean),
+        },
+        "where_data_disappears": (
+            "connection"
+            if not metadata.get("connected") and not probe_token_available
+            else "B_api_response_scope_rejected"
+            if disallowed_scope_errors
+            else
+            "A_api_request_or_response"
+            if not endpoint_rows or sum(int(row.get("datapoint_count") or 0) for row in endpoint_rows) == 0
+            else "C_normalization"
+            if sum(int(row.get("normalized_field_count") or 0) for row in endpoint_rows) == 0
+            else "D_storage"
+            if live and stored_clean and not stored_populated
+            else "verified_ingestion"
+        ),
+        "message": (
+            live_error
+            if live_error
+            else "Google Health API rejected the token because it includes deprecated Google Fit/Fitness scopes. Reconnect Google Health for a clean googlehealth.* token."
+            if disallowed_scope_errors
+            else "Google Health token not found. Reconnect Google Health."
+            if not metadata.get("connected") and not probe_token_available
+            else "No API endpoint requests were recorded for this probe."
+            if not endpoint_rows
+            else "No datapoints returned by the requested API endpoints."
+            if endpoint_rows and sum(int(row.get("datapoint_count") or 0) for row in endpoint_rows) == 0
+            else "Datapoints returned but no normalized fields were populated."
+            if endpoint_rows and sum(int(row.get("normalized_field_count") or 0) for row in endpoint_rows) == 0
+            else "Google Health ingestion returned populated normalized fields."
+        ),
     }
 
 
@@ -2610,10 +3029,11 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     start_date = str(payload.get("start_date") or (date.fromisoformat(end_date) - timedelta(days=days - 1)).isoformat())[:10]
     logger.info("[google_health] sync started run_id=%s start=%s end=%s days=%s", sync_run_id, start_date, end_date, days)
     try:
+        token_resolution = _google_health_resolved_token_state()
         access_token = _google_health_access_token()
-        token_state = _metadata().get("google_health_tokens")
-        granted_scopes = str((token_state if isinstance(token_state, dict) else {}).get("scopes") or "").split()
-        if any("/auth/fitness." in scope for scope in granted_scopes) and not any("googlehealth." in scope for scope in granted_scopes):
+        token_state = token_resolution.get("tokens") if isinstance(token_resolution.get("tokens"), dict) else {}
+        granted_scopes = str(token_state.get("scopes") or "").split()
+        if any("/auth/fitness." in scope or str(scope).startswith("fitness_") for scope in granted_scopes):
             raise RuntimeError(GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE)
         fetched = fetch_daily_metrics(access_token, start_date=start_date, end_date=end_date)
         if fetched.get("status") != "ok":
@@ -2707,10 +3127,14 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "available_data_types": (fetched.get("data_sources") or {}).get("available_data_types") or (fetched.get("data_sources") or {}).get("data_type_names") or [],
                 "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
                 "requested_scopes": fetched.get("requested_scopes") or [],
-                "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
+                "granted_scopes": granted_scopes,
+                "provider_key_used": token_resolution.get("provider_key", GOOGLE_HEALTH_PROVIDER_ID),
+                "storage_source_used": token_resolution.get("storage_source", token_resolution.get("source", "")),
+                "token_storage_source": token_resolution.get("source", ""),
                 "requested_data_types": fetched.get("requested_data_types") or [],
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
                 "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+                "normalization_audit": fetched.get("normalization_audit") or {},
                 "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
                 "api_path": fetched.get("api_path", "google_health_v4"),
                 "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
@@ -2780,10 +3204,14 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "available_data_types": (fetched.get("data_sources") or {}).get("available_data_types") or (fetched.get("data_sources") or {}).get("data_type_names") or [],
                 "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
                 "requested_scopes": fetched.get("requested_scopes") or [],
-                "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
+                "granted_scopes": granted_scopes,
+                "provider_key_used": token_resolution.get("provider_key", GOOGLE_HEALTH_PROVIDER_ID),
+                "storage_source_used": token_resolution.get("storage_source", token_resolution.get("source", "")),
+                "token_storage_source": token_resolution.get("source", ""),
                 "requested_data_types": fetched.get("requested_data_types") or [],
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
                 "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+                "normalization_audit": fetched.get("normalization_audit") or {},
                 "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
                 "api_path": fetched.get("api_path", "google_health_v4"),
                 "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
@@ -2842,8 +3270,13 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
             "requested_scopes": fetched.get("requested_scopes") or [],
             "requested_data_types": fetched.get("requested_data_types") or [],
+            "granted_scopes": granted_scopes,
+            "provider_key_used": token_resolution.get("provider_key", GOOGLE_HEALTH_PROVIDER_ID),
+            "storage_source_used": token_resolution.get("storage_source", token_resolution.get("source", "")),
+            "token_storage_source": token_resolution.get("source", ""),
             "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
             "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+            "normalization_audit": fetched.get("normalization_audit") or {},
             "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
             "api_path": fetched.get("api_path", "google_health_v4"),
             "api_path_label": fetched.get("api_path_label", "Google Health API v4"),

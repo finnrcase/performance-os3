@@ -6,7 +6,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from backend_new.db import fetch_latest_document, insert_json_row
+from backend_new.db import fetch_json_rows, fetch_latest_document, insert_json_row
 from backend_new.utils import utc_now_iso
 
 router = APIRouter(tags=["settings"])
@@ -45,6 +45,50 @@ ENV_BY_FIELD = {
 }
 
 MASK_PREFIXES = ("••••", "***")
+
+
+def _clean_token_value(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if not text or text.startswith(MASK_PREFIXES) else text
+
+
+def _google_health_tokens_from_document(document: dict[str, Any] | None) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    source = document if isinstance(document, dict) else {}
+    metadata = source.get("metadata") if isinstance(source.get("metadata"), dict) else {}
+    sync = metadata.get("google_health_sync") if isinstance(metadata.get("google_health_sync"), dict) else {}
+    token_maps = [
+        metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {},
+        source.get("google_health_tokens") if isinstance(source.get("google_health_tokens"), dict) else {},
+        source.get("tokens") if isinstance(source.get("tokens"), dict) else {},
+        source,
+    ]
+    for token_map in token_maps:
+        if not isinstance(token_map, dict):
+            continue
+        tokens = {
+            "access_token": _clean_token_value(token_map.get("access_token") or token_map.get("google_health_access_token")),
+            "refresh_token": _clean_token_value(token_map.get("refresh_token") or token_map.get("google_health_refresh_token")),
+            "expires_at": token_map.get("expires_at") or token_map.get("google_health_expires_at") or 0,
+            "scopes": _clean_token_value(token_map.get("scopes") or token_map.get("scope") or token_map.get("google_health_scopes")),
+        }
+        if tokens["access_token"] or tokens["refresh_token"]:
+            return tokens, "api_connections.metadata.google_health_tokens", sync
+    return {}, "", sync
+
+
+def _google_health_resolved_tokens_for_settings(settings: dict[str, Any]) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    tokens, source, sync = _google_health_tokens_from_document(settings)
+    if tokens.get("refresh_token") or tokens.get("access_token"):
+        return tokens, "api_connections.latest.metadata.google_health_tokens", sync
+    for index, row in enumerate(fetch_json_rows("api_connections", limit=25)):
+        tokens, _, row_sync = _google_health_tokens_from_document(row)
+        if tokens.get("refresh_token") or tokens.get("access_token"):
+            return tokens, f"api_connections.history[{index}].metadata.google_health_tokens", row_sync
+    for index, row in enumerate(fetch_json_rows("google_health_connections", limit=25)):
+        tokens, _, row_sync = _google_health_tokens_from_document(row)
+        if tokens.get("refresh_token") or tokens.get("access_token"):
+            return tokens, f"google_health_connections[{index}]", row_sync
+    return {}, source or "none", sync
 
 
 def _default_settings() -> dict[str, Any]:
@@ -152,8 +196,8 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
     )
 
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
-    tokens = metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {}
-    sync = metadata.get("google_health_sync") if isinstance(metadata.get("google_health_sync"), dict) else {}
+    tokens, token_storage_source, resolved_sync = _google_health_resolved_tokens_for_settings(settings)
+    sync = resolved_sync or (metadata.get("google_health_sync") if isinstance(metadata.get("google_health_sync"), dict) else {})
     has_credentials = (
         integrations.get("google_health_client_id")
         and integrations.get("google_health_client_secret")
@@ -212,6 +256,10 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
         "token_status": "reconnect_required" if sync.get("needs_reconnect") else "valid" if refresh_token else "missing",
         "access_token_present": bool(access_token),
         "refresh_token_present": bool(refresh_token),
+        "provider_key_used": GOOGLE_HEALTH_PROVIDER_ID,
+        "storage_source_used": token_storage_source,
+        "token_storage_source": token_storage_source,
+        "connected_at": sync.get("connected_at", ""),
         "required_env_vars": ["GOOGLE_HEALTH_CLIENT_ID", "GOOGLE_HEALTH_CLIENT_SECRET", "GOOGLE_HEALTH_REDIRECT_URI"],
         "missing_env_vars": [
             name

@@ -78,7 +78,8 @@ GOOGLE_HEALTH_NO_SOURCES_MESSAGE = (
     "Check Google Health API access, OAuth consent scopes, and that the Fitbit/Google Health app has synced recently."
 )
 GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE = (
-    "This token only has deprecated Google Fit/Fitness scopes. Reconnect Google Health to grant googlehealth.* scopes."
+    "This token includes deprecated Google Fit/Fitness scopes that Google Health API rejects. "
+    "Reconnect Google Health to grant a clean googlehealth.* token."
 )
 GOOGLE_HEALTH_METRIC_FIELDS = [
     "sleep_hours",
@@ -158,7 +159,18 @@ def redirect_uri(settings: dict | None = None, fallback: str = "") -> str:
 def scopes() -> list[str]:
     configured = os.getenv("GOOGLE_HEALTH_SCOPES", "").strip()
     if configured:
-        return [scope for scope in configured.replace(",", " ").split() if scope]
+        configured_scopes = [scope for scope in configured.replace(",", " ").split() if scope]
+        health_scopes = [
+            scope
+            for scope in configured_scopes
+            if "googlehealth." in scope or scope == "https://www.googleapis.com/auth/cloud-platform"
+        ]
+        legacy_scopes = [scope for scope in configured_scopes if "/auth/fitness." in scope or scope.startswith("fitness_")]
+        if legacy_scopes:
+            logger.warning("[google_health] ignoring deprecated Fitness scopes in GOOGLE_HEALTH_SCOPES: %s", ",".join(legacy_scopes))
+        if health_scopes:
+            return health_scopes
+        logger.warning("[google_health] GOOGLE_HEALTH_SCOPES did not include Google Health scopes; using safe defaults.")
     return GOOGLE_HEALTH_SCOPES.copy()
 
 
@@ -228,6 +240,16 @@ def _response_count(response: dict[str, Any]) -> int:
     return 0
 
 
+def _latest_trace_for_data_type(trace: list[dict[str, Any]], data_type: str, endpoint: str = "") -> dict[str, Any]:
+    for entry in reversed(trace):
+        if entry.get("data_type") != data_type:
+            continue
+        if endpoint and endpoint not in str(entry.get("endpoint") or ""):
+            continue
+        return dict(entry)
+    return {}
+
+
 def _request_trace_counts(trace: list[dict[str, Any]]) -> dict[str, Any]:
     counts = {
         "total": len(trace),
@@ -277,7 +299,10 @@ def get_auth_url(
         "response_type": "code",
         "access_type": "offline",
         "prompt": "consent",
-        "include_granted_scopes": "true",
+        # Keep this false: Google Health rejects tokens that include legacy
+        # Google Fit/Fitness scopes, and incremental auth can silently carry
+        # those old grants into an otherwise-correct Google Health token.
+        "include_granted_scopes": "false",
         "scope": " ".join(scope or scopes()),
     }
     if state:
@@ -540,6 +565,11 @@ def _field_count_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
+def _row_metric_fields(row: dict[str, Any] | None) -> set[str]:
+    sample = row if isinstance(row, dict) else {}
+    return {field for field in GOOGLE_HEALTH_METRIC_FIELDS if _metric_present(sample.get(field))}
+
+
 def _average(values: list[float]) -> float | None:
     valid = [float(value) for value in values if value is not None and not pd.isna(value)]
     return sum(valid) / len(valid) if valid else None
@@ -644,6 +674,7 @@ def list_data_sources(access_token: str, request_trace: list[dict[str, Any]] | N
             "exact_endpoint_urls": [],
             "google_health_api_requests": [],
             "fitness_api_requests": [],
+            "normalization_audit": {},
         }
     base_url = api_base_url()
     if is_legacy_google_fit_base_url(base_url):
@@ -1354,6 +1385,7 @@ def fetch_daily_metrics(
             "empty_date_rows_count": 0,
             "populated_metric_counts_by_day": {},
             "populated_fields_by_metric": {},
+            "normalization_audit": {},
             "data_available": False,
             "recommended_next_action": GOOGLE_FIT_LEGACY_CONFIG_MESSAGE,
             "fields_populated_count": 0,
@@ -1397,6 +1429,7 @@ def fetch_daily_metrics(
     recommended_next_action = ""
     raw_response_count = 0
     populated_by_metric: dict[str, int] = {}
+    normalization_audit: dict[str, dict[str, Any]] = {}
 
     try:
         data_sources = list_data_sources(access_token, request_trace=api_request_log)
@@ -1443,8 +1476,43 @@ def fetch_daily_metrics(
                 required_metric_failures.append(failure)
                 warnings.append(failure)
             raw_aggregate_responses[data_type] = {"status": "error", "requested_data_types": [data_type], "endpoint": "dailyRollUp", "error": str(exc)}
+            trace_entry = _latest_trace_for_data_type(api_request_log, data_type, "dailyRollUp")
+            normalization_audit[data_type] = {
+                "provider": GOOGLE_HEALTH_PROVIDER_ID,
+                "source": GOOGLE_HEALTH_PROVIDER_ID,
+                "endpoint": "dailyRollUp",
+                "endpoint_url": trace_entry.get("url", f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp"),
+                "api_family": trace_entry.get("api_family", "google_health"),
+                "data_type": data_type,
+                "status": "error",
+                "error": str(exc),
+                "raw_datapoint_count": 0,
+                "raw_populated_datapoint_count": 0,
+                "normalized_field_count": 0,
+                "applied_datapoint_count": 0,
+                "dropped_datapoint_count": 0,
+                "dropped_reasons": {"request_error": 1},
+                "raw_sample": {},
+            }
             continue
         compact = _compact_health_rollup_response(response, data_type)
+        trace_entry = _latest_trace_for_data_type(api_request_log, data_type, "dailyRollUp")
+        audit = {
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "source": GOOGLE_HEALTH_PROVIDER_ID,
+            "endpoint": "dailyRollUp",
+            "endpoint_url": trace_entry.get("url", f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp"),
+            "api_family": trace_entry.get("api_family", "google_health"),
+            "data_type": data_type,
+            "raw_datapoint_count": compact["point_count"],
+            "raw_populated_datapoint_count": compact["populated_point_count"],
+            "value_keys": compact.get("value_keys", []),
+            "normalized_field_count": 0,
+            "applied_datapoint_count": 0,
+            "dropped_datapoint_count": 0,
+            "dropped_reasons": {},
+            "raw_sample": compact.get("sample", {}),
+        }
         raw_aggregate_responses[data_type] = {"status": "ok", **compact}
         raw_response_count += compact["point_count"]
         populated_by_metric[data_type] = int(compact["populated_point_count"])
@@ -1453,8 +1521,22 @@ def fetch_daily_metrics(
                 continue
             day = _google_date_text((point.get("civilStartTime") if isinstance(point.get("civilStartTime"), dict) else {}).get("date"))
             if not day:
+                audit["dropped_datapoint_count"] += 1
+                audit["dropped_reasons"]["missing_day"] = int(audit["dropped_reasons"].get("missing_day", 0)) + 1
                 continue
-            _apply_health_rollup(_row_for_day(rows_by_day, day), data_type, point)
+            row = _row_for_day(rows_by_day, day)
+            before_fields = _row_metric_fields(row)
+            _apply_health_rollup(row, data_type, point)
+            added_fields = sorted(_row_metric_fields(row) - before_fields)
+            if added_fields:
+                audit["applied_datapoint_count"] += 1
+                audit["normalized_field_count"] += len(added_fields)
+                audit.setdefault("normalized_fields", [])
+                audit["normalized_fields"] = sorted(set([*audit["normalized_fields"], *added_fields]))
+            elif compact["populated_point_count"]:
+                audit["dropped_datapoint_count"] += 1
+                audit["dropped_reasons"]["no_supported_fields"] = int(audit["dropped_reasons"].get("no_supported_fields", 0)) + 1
+        normalization_audit[data_type] = audit
 
     for data_type in [*GOOGLE_HEALTH_DAILY_POINT_TYPES, *GOOGLE_HEALTH_SESSION_POINT_TYPES]:
         requested_data_types.append(data_type)
@@ -1486,8 +1568,43 @@ def fetch_daily_metrics(
                 else:
                     warnings.append(message)
                 raw_aggregate_responses[data_type] = {"status": "error", "requested_data_types": [data_type], "endpoint": "reconcile/list", "error": message}
+                trace_entry = _latest_trace_for_data_type(api_request_log, data_type)
+                normalization_audit[data_type] = {
+                    "provider": GOOGLE_HEALTH_PROVIDER_ID,
+                    "source": GOOGLE_HEALTH_PROVIDER_ID,
+                    "endpoint": "reconcile/list",
+                    "endpoint_url": trace_entry.get("url", ""),
+                    "api_family": trace_entry.get("api_family", "google_health"),
+                    "data_type": data_type,
+                    "status": "error",
+                    "error": message,
+                    "raw_datapoint_count": 0,
+                    "raw_populated_datapoint_count": 0,
+                    "normalized_field_count": 0,
+                    "applied_datapoint_count": 0,
+                    "dropped_datapoint_count": 0,
+                    "dropped_reasons": {"request_error": 1},
+                    "raw_sample": {},
+                }
                 continue
         compact = _compact_health_points_response(response, data_type, endpoint=endpoint)
+        trace_entry = _latest_trace_for_data_type(api_request_log, data_type, endpoint)
+        audit = {
+            "provider": GOOGLE_HEALTH_PROVIDER_ID,
+            "source": GOOGLE_HEALTH_PROVIDER_ID,
+            "endpoint": endpoint,
+            "endpoint_url": trace_entry.get("url", ""),
+            "api_family": trace_entry.get("api_family", "google_health"),
+            "data_type": data_type,
+            "raw_datapoint_count": compact["point_count"],
+            "raw_populated_datapoint_count": compact["populated_point_count"],
+            "value_keys": compact.get("value_keys", []),
+            "normalized_field_count": 0,
+            "applied_datapoint_count": 0,
+            "dropped_datapoint_count": 0,
+            "dropped_reasons": {},
+            "raw_sample": compact.get("sample", {}),
+        }
         raw_aggregate_responses[data_type] = {"status": "ok", **compact}
         raw_response_count += compact["point_count"]
         populated_by_metric[data_type] = int(compact["populated_point_count"])
@@ -1496,8 +1613,22 @@ def fetch_daily_metrics(
                 continue
             day = _point_day(data_type, point)
             if not day:
+                audit["dropped_datapoint_count"] += 1
+                audit["dropped_reasons"]["missing_day"] = int(audit["dropped_reasons"].get("missing_day", 0)) + 1
                 continue
-            _apply_health_point(_row_for_day(rows_by_day, day), data_type, point)
+            row = _row_for_day(rows_by_day, day)
+            before_fields = _row_metric_fields(row)
+            _apply_health_point(row, data_type, point)
+            added_fields = sorted(_row_metric_fields(row) - before_fields)
+            if added_fields:
+                audit["applied_datapoint_count"] += 1
+                audit["normalized_field_count"] += len(added_fields)
+                audit.setdefault("normalized_fields", [])
+                audit["normalized_fields"] = sorted(set([*audit["normalized_fields"], *added_fields]))
+            elif compact["populated_point_count"]:
+                audit["dropped_datapoint_count"] += 1
+                audit["dropped_reasons"]["no_supported_fields"] = int(audit["dropped_reasons"].get("no_supported_fields", 0)) + 1
+        normalization_audit[data_type] = audit
 
     all_items = [_finalize_health_daily_row(row) for _, row in sorted(rows_by_day.items())]
     all_items = _with_resting_hr_baselines(all_items)
@@ -1538,6 +1669,12 @@ def fetch_daily_metrics(
     optional_metric_warnings = list(dict.fromkeys(optional_metric_warnings))
     warnings = list(dict.fromkeys([*warnings, *optional_metric_warnings]))
     requested_data_types = _unique_preserve_order(requested_data_types)
+    for audit in normalization_audit.values():
+        audit["status"] = audit.get("status", "ok")
+        audit["dropped_field_count"] = max(
+            0,
+            int(audit.get("raw_populated_datapoint_count") or 0) - int(audit.get("normalized_field_count") or 0),
+        )
     api_request_counts = _request_trace_counts(api_request_log)
     google_health_api_requests = [entry for entry in api_request_log if entry.get("api_family") == "google_health"]
     fitness_api_requests = [entry for entry in api_request_log if entry.get("api_family") == "google_fit_legacy"]
@@ -1602,6 +1739,7 @@ def fetch_daily_metrics(
         "empty_date_rows_count": len(empty_date_rows),
         "populated_metric_counts_by_day": populated_metric_counts_by_day(all_items),
         "populated_fields_by_metric": populated_by_metric,
+        "normalization_audit": normalization_audit,
         "data_available": bool(items),
         "recommended_next_action": recommended_next_action,
         "api_request_log": api_request_log,

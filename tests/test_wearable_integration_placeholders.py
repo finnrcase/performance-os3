@@ -1,4 +1,5 @@
 import pandas as pd
+from urllib.parse import parse_qs, urlparse
 
 from src.config import default_settings, integration_status, load_settings
 from src.integrations import fitbit_client, google_health_client
@@ -63,6 +64,22 @@ def test_auth_urls_when_configured_do_not_require_secrets_in_url(monkeypatch):
     assert google["status"] == "ok"
     assert "google-id" in google["auth_url"]
     assert "google-secret" not in google["auth_url"]
+    google_query = parse_qs(urlparse(google["auth_url"]).query)
+    assert google_query["include_granted_scopes"] == ["false"]
+    assert all("/auth/fitness." not in scope for scope in google_query["scope"][0].split())
+
+
+def test_google_health_scopes_filter_legacy_fitness_env(monkeypatch):
+    monkeypatch.setenv(
+        "GOOGLE_HEALTH_SCOPES",
+        "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly "
+        "https://www.googleapis.com/auth/fitness.activity.read "
+        "fitness_sleep_read",
+    )
+
+    configured_scopes = google_health_client.scopes()
+
+    assert configured_scopes == ["https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly"]
 
 
 def test_fitbit_token_exchange_and_refresh_parse_token_payloads(monkeypatch):
@@ -220,6 +237,10 @@ def test_google_health_api_v4_response_normalizes_daily_metrics(monkeypatch):
     assert fetched["requests_sent_to_fitness_api"] == 0
     assert all("health.googleapis.com" in url for url in fetched["exact_endpoint_urls"])
     assert fetched["api_request_counts"]["google_fit_legacy"] == 0
+    assert fetched["normalization_audit"]["steps"]["endpoint_url"].startswith("https://health.googleapis.com/")
+    assert fetched["normalization_audit"]["steps"]["raw_datapoint_count"] == 1
+    assert fetched["normalization_audit"]["steps"]["normalized_field_count"] >= 1
+    assert fetched["normalization_audit"]["steps"]["dropped_field_count"] == 0
     assert "daily-respiratory-rate" in fetched["requested_data_types"]
     assert normalized.iloc[0]["source"] == "google_health"
     assert int(normalized.iloc[0]["steps"]) == 9000
@@ -282,6 +303,8 @@ def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
     assert fetched["required_metric_failures"] == []
     assert fetched["requests_sent_to_google_health_api"] > 0
     assert fetched["requests_sent_to_fitness_api"] == 0
+    assert fetched["normalization_audit"]["sleep"]["raw_datapoint_count"] == 1
+    assert fetched["normalization_audit"]["sleep"]["normalized_field_count"] >= 1
     assert len(normalized) == 1
     assert normalized.iloc[0]["resting_hr"] is None
     assert requested_urls
@@ -312,6 +335,7 @@ def test_google_health_empty_api_responses_do_not_return_placeholder_rows(monkey
     assert fetched["api_path"] == "google_health_v4"
     assert fetched["requests_sent_to_google_health_api"] > 0
     assert fetched["requests_sent_to_fitness_api"] == 0
+    assert all(item["raw_datapoint_count"] == 0 for item in fetched["normalization_audit"].values())
     assert google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE in fetched["warnings"]
     assert fetched["recommended_next_action"] == google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE
 

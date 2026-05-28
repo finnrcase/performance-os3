@@ -1033,6 +1033,10 @@ type SettingsHealthCard = {
     api_path_label?: string;
     google_health_api_sync_label?: string;
     google_fit_legacy_data_source_label?: string;
+    provider_key_used?: string;
+    storage_source_used?: string;
+    token_storage_source?: string;
+    connected_at?: string;
     phone_app_data_note?: string;
     optional_metric_warnings?: string[];
     required_metric_failures?: string[];
@@ -1524,6 +1528,10 @@ type GoogleHealthSourcesDebugPayload = {
   token_status: string;
   access_token_present: boolean;
   refresh_token_present: boolean;
+  provider_key_used?: string;
+  storage_source_used?: string;
+  token_storage_source?: string;
+  token_candidates?: Array<Record<string, unknown>>;
   requested_scopes: string[];
   granted_scopes: string[];
   available_data_sources: Array<Record<string, unknown>>;
@@ -11783,6 +11791,7 @@ function IntegrationHealthGrid({
                 <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
                   {card.metadata.connected !== undefined ? <p>Connected: <span className="text-zinc-300">{card.metadata.connected ? "yes" : "no"}</span></p> : null}
                   <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
+                  {card.metadata.token_storage_source ? <p>Token source: <span className="text-zinc-300">{card.metadata.token_storage_source}</span></p> : null}
                   <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Rows saved: <span className="text-zinc-300">{card.metadata.rows_saved ?? card.metadata.imported_metrics ?? card.metadata.last_imported_count ?? 0}</span></p>
                   {card.metadata.fields_populated_count !== undefined ? <p>Latest fields: <span className="text-zinc-300">{card.metadata.fields_populated_count}</span> populated · <span className="text-zinc-300">{card.metadata.fields_missing_count ?? 0}</span> missing</p> : null}
                   {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status === "ok" ? "successful" : card.metadata.last_status}</span></p> : null}
@@ -12106,6 +12115,11 @@ function GoogleHealthSourcesDebugPanel({
             <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", fitbitStageClass(debug.token_status))}>
               Token: {debug.token_status?.replaceAll("_", " ") || "missing"}
             </span>
+            {debug.token_storage_source ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1 text-xs font-semibold text-zinc-300">
+                Token source: {debug.token_storage_source}
+              </span>
+            ) : null}
             <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", fitbitFreshnessClass(debug.data_source_count > 0 ? "green" : debug.connected ? "yellow" : "red"))}>
               Paired devices: {debug.paired_device_count ?? debug.data_source_count}
             </span>
