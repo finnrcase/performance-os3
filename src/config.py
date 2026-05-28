@@ -18,6 +18,7 @@ INTEGRATION_FIELDS = {
     "strava_redirect_uri": "",
     "fitbit_client_id": "",
     "fitbit_client_secret": "",
+    "fitbit_redirect_uri": "",
     "google_health_client_id": "",
     "google_health_client_secret": "",
     "google_health_redirect_uri": "",
@@ -83,6 +84,28 @@ GOOGLE_HEALTH_SYNC_FIELDS = {
     "needs_reconnect": False,
 }
 
+FITBIT_TOKEN_FIELDS = {
+    "access_token": "",
+    "refresh_token": "",
+    "expires_at": 0,
+    "token_type": "",
+    "scopes": "",
+    "user_id": "",
+}
+
+FITBIT_SYNC_FIELDS = {
+    "last_synced_at": "",
+    "last_successful_sync": "",
+    "last_error": "",
+    "last_message": "",
+    "last_status": "",
+    "last_fetched_count": 0,
+    "last_parsed_count": 0,
+    "last_stored_count": 0,
+    "latest_record": "",
+    "needs_reconnect": False,
+}
+
 
 def normalize_accent_color(value: object) -> str:
     """Return a supported accent theme id, preserving lime as the default."""
@@ -103,6 +126,8 @@ def default_settings() -> dict:
             "withings_sync": WITHINGS_SYNC_FIELDS.copy(),
             "google_health_tokens": GOOGLE_HEALTH_TOKEN_FIELDS.copy(),
             "google_health_sync": GOOGLE_HEALTH_SYNC_FIELDS.copy(),
+            "fitbit_tokens": FITBIT_TOKEN_FIELDS.copy(),
+            "fitbit_sync": FITBIT_SYNC_FIELDS.copy(),
         },
     }
 
@@ -154,6 +179,16 @@ def load_settings() -> dict:
         key: saved_google_health_sync.get(key, default)
         for key, default in GOOGLE_HEALTH_SYNC_FIELDS.items()
     }
+    saved_fitbit_tokens = saved.get("metadata", {}).get("fitbit_tokens", {})
+    settings["metadata"]["fitbit_tokens"] = {
+        key: saved_fitbit_tokens.get(key, default)
+        for key, default in FITBIT_TOKEN_FIELDS.items()
+    }
+    saved_fitbit_sync = saved.get("metadata", {}).get("fitbit_sync", {})
+    settings["metadata"]["fitbit_sync"] = {
+        key: saved_fitbit_sync.get(key, default)
+        for key, default in FITBIT_SYNC_FIELDS.items()
+    }
     return settings
 
 
@@ -201,6 +236,16 @@ def save_settings(settings: dict) -> None:
         key: google_health_sync.get(key, default)
         for key, default in GOOGLE_HEALTH_SYNC_FIELDS.items()
     }
+    fitbit_tokens = settings.get("metadata", {}).get("fitbit_tokens", {})
+    normalized["metadata"]["fitbit_tokens"] = {
+        key: fitbit_tokens.get(key, default)
+        for key, default in FITBIT_TOKEN_FIELDS.items()
+    }
+    fitbit_sync = settings.get("metadata", {}).get("fitbit_sync", {})
+    normalized["metadata"]["fitbit_sync"] = {
+        key: fitbit_sync.get(key, default)
+        for key, default in FITBIT_SYNC_FIELDS.items()
+    }
     save_document("user_settings", SETTINGS_PATH, normalized)
 
 
@@ -246,6 +291,7 @@ def integration_status(key: str, settings: dict) -> str:
     if key in {
         "fitbit_client_id",
         "fitbit_client_secret",
+        "fitbit_redirect_uri",
         "google_health_client_id",
         "google_health_client_secret",
         "google_health_redirect_uri",

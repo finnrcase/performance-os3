@@ -273,14 +273,15 @@ def _google_health_redirect_uri(request: Request) -> str:
 
 
 def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    from src.integrations.google_health_client import client_credentials, saved_token_state, scopes
+    from src.integrations.google_health_client import client_credentials, redirect_uri, saved_token_state, scopes
 
     client_id, client_secret = client_credentials(settings)
+    redirect_configured = bool(redirect_uri(settings))
     tokens, sync = saved_token_state(settings)
     refresh_token_present = bool(tokens.get("refresh_token"))
     access_token_present = bool(tokens.get("access_token"))
     needs_reconnect = bool(sync.get("needs_reconnect"))
-    configured = bool(client_id and client_secret)
+    configured = bool(client_id and client_secret and redirect_configured)
     if not configured:
         status = "Not configured"
     elif needs_reconnect:
@@ -301,6 +302,16 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "token_status": "reconnect_required" if needs_reconnect else "valid" if refresh_token_present else "missing",
         "expires_at": expires_at or None,
         "scopes": str((tokens.get("scopes") or " ".join(scopes())) if configured else ""),
+        "required_env_vars": ["GOOGLE_HEALTH_CLIENT_ID", "GOOGLE_HEALTH_CLIENT_SECRET", "GOOGLE_HEALTH_REDIRECT_URI"],
+        "missing_env_vars": [
+            name
+            for name, ready in [
+                ("GOOGLE_HEALTH_CLIENT_ID", bool(client_id)),
+                ("GOOGLE_HEALTH_CLIENT_SECRET", bool(client_secret)),
+                ("GOOGLE_HEALTH_REDIRECT_URI", redirect_configured),
+            ]
+            if not ready
+        ],
         "last_synced_at": sync.get("last_synced_at", ""),
         "latest_record": sync.get("latest_record", ""),
         "last_error": sync.get("last_error", ""),
@@ -321,7 +332,14 @@ FITBIT_STALE_HOURS = 24
 
 
 def _fitbit_text(value: Any) -> str:
-    return "" if value is None else str(value).strip()
+    try:
+        if value is None or pd_is_na(value):
+            return ""
+    except Exception:
+        if value is None:
+            return ""
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "nan", "none", "<na>", "nat"} else text
 
 
 def _fitbit_credentials(settings: dict[str, Any] | None = None) -> tuple[str, str]:
@@ -329,6 +347,12 @@ def _fitbit_credentials(settings: dict[str, Any] | None = None) -> tuple[str, st
     client_id = _env_or_saved(current, "FITBIT_CLIENT_ID", "fitbit_client_id")
     client_secret = _env_or_saved(current, "FITBIT_CLIENT_SECRET", "fitbit_client_secret")
     return client_id, client_secret
+
+
+def _fitbit_redirect_uri(request: Request) -> str:
+    from src.integrations.fitbit_client import redirect_uri
+
+    return redirect_uri(_settings_document(), fallback=str(request.url_for("fitbit_callback")))
 
 
 def _fitbit_sync(settings: dict[str, Any]) -> dict[str, Any]:
@@ -360,6 +384,8 @@ def _fitbit_tokens(settings: dict[str, Any]) -> dict[str, Any]:
         "refresh_token": os.getenv("FITBIT_REFRESH_TOKEN", "").strip() or _fitbit_text(integrations.get("fitbit_refresh_token") or saved.get("refresh_token")),
         "expires_at": expires_at or None,
         "scopes": scopes,
+        "user_id": os.getenv("FITBIT_USER_ID", "").strip() or _fitbit_text(integrations.get("fitbit_user_id") or saved.get("user_id")),
+        "token_type": _fitbit_text(saved.get("token_type")) or "Bearer",
     }
 
 
@@ -369,9 +395,10 @@ def _fitbit_scope_parts(scopes: str) -> list[str]:
 
 def _fitbit_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     client_id, client_secret = _fitbit_credentials(settings)
+    redirect_configured = bool(_env_or_saved(settings, "FITBIT_REDIRECT_URI", "fitbit_redirect_uri"))
     tokens = _fitbit_tokens(settings)
     sync = _fitbit_sync(settings)
-    configured = bool(client_id and client_secret)
+    configured = bool(client_id and client_secret and redirect_configured)
     access_token_present = bool(tokens.get("access_token"))
     refresh_token_present = bool(tokens.get("refresh_token"))
     scopes = _fitbit_scope_parts(str(tokens.get("scopes") or ""))
@@ -409,6 +436,17 @@ def _fitbit_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
         "scopes": " ".join(scopes),
         "granted_scopes": scopes,
         "missing_scopes": missing_scopes,
+        "required_env_vars": ["FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET", "FITBIT_REDIRECT_URI"],
+        "missing_env_vars": [
+            name
+            for name, ready in [
+                ("FITBIT_CLIENT_ID", bool(client_id)),
+                ("FITBIT_CLIENT_SECRET", bool(client_secret)),
+                ("FITBIT_REDIRECT_URI", redirect_configured),
+            ]
+            if not ready
+        ],
+        "user_id": str(tokens.get("user_id") or ""),
         "last_successful_sync": sync.get("last_successful_sync", ""),
         "last_synced_at": sync.get("last_successful_sync", "") or sync.get("last_synced_at", ""),
         "last_attempt_at": sync.get("last_attempt_at", ""),
@@ -435,12 +473,143 @@ def _save_fitbit_sync_state(updates: dict[str, Any]) -> dict[str, Any]:
     return metadata["fitbit_sync"]
 
 
+def _save_fitbit_tokens(token_patch: dict[str, Any], *, connected_at: str = "") -> dict[str, Any]:
+    settings = _settings_document()
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    previous = metadata.get("fitbit_tokens") if isinstance(metadata.get("fitbit_tokens"), dict) else {}
+    tokens = {**previous, **{key: value for key, value in token_patch.items() if value not in (None, "")}}
+    if not tokens.get("refresh_token") and previous.get("refresh_token"):
+        tokens["refresh_token"] = previous.get("refresh_token")
+    metadata["fitbit_tokens"] = tokens
+    sync = metadata.get("fitbit_sync") if isinstance(metadata.get("fitbit_sync"), dict) else {}
+    metadata["fitbit_sync"] = {
+        **sync,
+        "needs_reconnect": False,
+        "last_error": "",
+        "last_message": "Fitbit token state saved.",
+        **({"connected_at": connected_at} if connected_at else {}),
+        "updated_at": utc_now_iso(),
+    }
+    settings["metadata"] = metadata
+    saved = _save_settings_document(settings)
+    logger.info("[fitbit] token state saved access_present=%s refresh_present=%s user_id_present=%s", bool(tokens.get("access_token")), bool(tokens.get("refresh_token")), bool(tokens.get("user_id")))
+    return saved
+
+
+def _clear_fitbit_connection(*, mark_error: bool = False, reason: str = "") -> None:
+    settings = _settings_document()
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    integrations = settings.get("integrations") if isinstance(settings.get("integrations"), dict) else {}
+    integrations.update(
+        {
+            "fitbit_access_token": "",
+            "fitbit_refresh_token": "",
+            "fitbit_expires_at": 0,
+            "fitbit_scopes": "",
+            "fitbit_user_id": "",
+        }
+    )
+    metadata["fitbit_tokens"] = {
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0,
+        "token_type": "",
+        "scopes": "",
+        "user_id": "",
+    }
+    metadata["fitbit_sync"] = {
+        **(metadata.get("fitbit_sync") if isinstance(metadata.get("fitbit_sync"), dict) else {}),
+        "needs_reconnect": bool(mark_error),
+        "last_error": reason if mark_error else "",
+        "last_message": reason,
+        "disconnected_at": utc_now_iso(),
+    }
+    settings["integrations"] = integrations
+    settings["metadata"] = metadata
+    _save_settings_document(settings)
+    logger.info("[fitbit] connection cleared mark_error=%s reason_present=%s", mark_error, bool(reason))
+
+
+def _fitbit_access_token(settings: dict[str, Any] | None = None) -> str:
+    from src.integrations.fitbit_client import refresh_access_token
+
+    current = settings if isinstance(settings, dict) else _settings_document()
+    tokens = _fitbit_tokens(current)
+    access_token = _fitbit_text(tokens.get("access_token"))
+    refresh_token = _fitbit_text(tokens.get("refresh_token"))
+    try:
+        expires_at = int(tokens.get("expires_at") or 0)
+    except (TypeError, ValueError):
+        expires_at = 0
+    if not access_token and not refresh_token:
+        raise RuntimeError("No Fitbit access token is available. Connect Fitbit OAuth before force sync can fetch live data.")
+    if access_token and expires_at > int(time.time()) + 120:
+        return access_token
+    if not refresh_token:
+        message = "Fitbit access token expired and no refresh token is available. Reconnect Fitbit."
+        _save_fitbit_sync_state({"needs_reconnect": True, "last_status": "error", "last_message": message, "last_error": message, "last_synced_at": utc_now_iso()})
+        raise RuntimeError(message)
+    logger.info("[fitbit] refreshing access token")
+    refreshed = refresh_access_token(refresh_token, current)
+    if refreshed.get("status") != "ok" or not refreshed.get("tokens", {}).get("access_token"):
+        message = str(refreshed.get("message") or "Fitbit token refresh failed.")
+        logger.warning("[fitbit] token refresh failed: %s", message[:500])
+        _save_fitbit_sync_state({"needs_reconnect": True, "last_status": "error", "last_message": message, "last_error": message, "last_synced_at": utc_now_iso()})
+        raise RuntimeError(message)
+    _save_fitbit_tokens(refreshed["tokens"])
+    logger.info("[fitbit] token refresh succeeded")
+    return str(refreshed["tokens"]["access_token"])
+
+
 def _fitbit_value(raw: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         value = raw.get(key)
         if value not in (None, ""):
             return value
     return None
+
+
+def _fitbit_json_value(value: Any) -> Any:
+    try:
+        if value is None or pd_is_na(value):
+            return None
+    except Exception:
+        if value is None:
+            return None
+    return value
+
+
+FITBIT_WEARABLE_VALUE_FIELDS = {
+    "sleep_hours",
+    "sleep_score",
+    "total_sleep_minutes",
+    "rem_sleep_minutes",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "awake_minutes",
+    "sleep_efficiency",
+    "resting_hr",
+    "hrv",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
+    "steps",
+    "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "distance_miles",
+    "calories_burned",
+    "total_calories_burned",
+    "active_calories_burned",
+    "basal_calories_burned",
+    "workout_minutes",
+    "cardio_load",
+    "breathing_rate",
+    "spo2",
+    "skin_temperature",
+    "body_temperature",
+}
 
 
 def _fitbit_latest_values() -> tuple[dict[str, Any], dict[str, Any] | None]:
@@ -766,8 +935,8 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "fitbit": _component(
                 configured=fitbit_status in {"Connected", "Disconnected", "Reconnect required"},
                 status=_status_color(fitbit_status),
-                message=f"Fitbit is {fitbit_status.lower()}. Debug sync runs only when requested.",
-                required_env_vars=["FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET"],
+                message=f"Fitbit is {fitbit_status.lower()}. Sync runs only when requested.",
+                required_env_vars=["FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET", "FITBIT_REDIRECT_URI"],
                 latest_record=fitbit_meta.get("latest_record", ""),
                 last_successful_sync=fitbit_meta.get("last_successful_sync", ""),
                 reconnect_required=bool(fitbit_meta.get("needs_reconnect")),
@@ -968,6 +1137,91 @@ def integrations_test() -> dict[str, Any]:
     }
 
 
+@router.get("/api/fitbit/connect")
+@router.get("/api/integrations/fitbit/auth-url")
+def connect_fitbit(request: Request, reconnect: bool = Query(default=False)) -> dict[str, Any]:
+    from src.integrations.fitbit_client import get_auth_url
+
+    if reconnect:
+        _clear_fitbit_connection(mark_error=False, reason="Reconnect requested from Settings.")
+    redirect_uri = _fitbit_redirect_uri(request)
+    redirect_error = _oauth_redirect_error("FITBIT", redirect_uri)
+    if redirect_error:
+        logger.warning("[fitbit] auth url blocked: %s", redirect_error)
+        return {"status": "error", "message": redirect_error, "auth_url": "", "redirect_uri": redirect_uri}
+    result = get_auth_url(_settings_document(), redirect_uri=redirect_uri, state="performance-os")
+    if result.get("status") == "ok":
+        logger.info("[fitbit] authorization url generated redirect_uri_present=%s reconnect=%s", bool(redirect_uri), reconnect)
+    else:
+        logger.warning("[fitbit] authorization url failed status=%s message=%s", result.get("status"), str(result.get("message") or "")[:300])
+    return result
+
+
+@router.get("/api/fitbit/callback", name="fitbit_callback")
+@router.get("/api/integrations/fitbit/callback")
+def fitbit_callback(
+    request: Request,
+    code: str | None = Query(default=None),
+    error: str | None = Query(default=None),
+) -> Response:
+    if not code and not error:
+        return JSONResponse({"status": "ok", "provider": "fitbit", "message": "callback reachable"})
+    if error:
+        message = f"Fitbit authorization failed: {error}"
+        logger.warning("[fitbit] callback error: %s", str(error)[:500])
+        _save_fitbit_sync_state({"needs_reconnect": True, "last_status": "error", "last_message": message, "last_error": message, "last_synced_at": utc_now_iso()})
+        return RedirectResponse(_frontend_return_url(request, "fitbit", "error", message), status_code=303)
+    try:
+        from src.integrations.fitbit_client import exchange_code_for_token
+
+        logger.info("[fitbit] callback received authorization code")
+        result = exchange_code_for_token(str(code or ""), _settings_document(), redirect_uri=_fitbit_redirect_uri(request))
+        if result.get("status") != "ok" or not result.get("tokens", {}).get("access_token"):
+            raise RuntimeError(str(result.get("message") or "Fitbit did not return an access token."))
+        if not result.get("tokens", {}).get("refresh_token"):
+            raise RuntimeError("Fitbit did not return a refresh token. Reconnect and approve offline access.")
+        logger.info("[fitbit] token exchange succeeded refresh_present=%s", bool(result.get("tokens", {}).get("refresh_token")))
+        _save_fitbit_tokens(result["tokens"], connected_at=utc_now_iso())
+        logger.info("[fitbit] callback completed and tokens persisted")
+    except Exception as exc:
+        message = str(exc) or "Fitbit OAuth callback failed."
+        logger.warning("[fitbit] callback failed: %s", message[:500])
+        _save_fitbit_sync_state({"needs_reconnect": True, "last_status": "error", "last_message": message, "last_error": message, "last_synced_at": utc_now_iso()})
+        return RedirectResponse(_frontend_return_url(request, "fitbit", "error", message), status_code=303)
+    return RedirectResponse(_frontend_return_url(request, "fitbit", "connected", "Fitbit connected."), status_code=303)
+
+
+@router.get("/api/fitbit/status")
+def fitbit_status() -> dict[str, Any]:
+    status, metadata = _fitbit_status(_settings_document())
+    return {
+        "status": status,
+        "metadata": metadata,
+        "sync": {
+            "last_synced_at": metadata.get("last_successful_sync", "") or metadata.get("last_synced_at", ""),
+            "last_error": metadata.get("last_error", ""),
+            "last_status": metadata.get("last_status", ""),
+        },
+    }
+
+
+@router.post("/api/fitbit/sync")
+def sync_fitbit(payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    return fitbit_force_sync(payload)
+
+
+@router.post("/api/fitbit/disconnect")
+def disconnect_fitbit() -> dict[str, Any]:
+    _clear_fitbit_connection(mark_error=False, reason="Fitbit disconnected from Settings.")
+    return _integration_payload(external_checks=False)
+
+
+@router.get("/api/fitbit/disconnect")
+def disconnect_fitbit_get() -> dict[str, Any]:
+    _clear_fitbit_connection(mark_error=False, reason="Fitbit disconnected from Settings.")
+    return _integration_payload(external_checks=False)
+
+
 @router.get("/api/debug/fitbit")
 def fitbit_debug_status() -> dict[str, Any]:
     return _fitbit_debug_payload()
@@ -980,7 +1234,6 @@ def fitbit_force_sync(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     payload = payload or {}
     settings = _settings_document()
     status, meta = _fitbit_status(settings)
-    tokens = _fitbit_tokens(settings)
     sync_run_id = f"fitbit_debug_sync:{uuid4()}"
     started_at = utc_now_iso()
     try:
@@ -1002,14 +1255,18 @@ def fitbit_force_sync(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     missing_scopes = list(meta.get("missing_scopes") or [])
     if missing_scopes:
         logs.append(f"missing permissions/scopes: {', '.join(missing_scopes)}")
-    access_token = _fitbit_text(tokens.get("access_token"))
-    if not access_token:
-        message = "No Fitbit access token is available. Connect Fitbit OAuth before force sync can fetch live data."
+    try:
+        access_token = _fitbit_access_token(settings)
+        logs.append("token refresh/check: success")
+    except Exception as exc:
+        message = str(exc) or "No Fitbit access token is available. Connect Fitbit OAuth before force sync can fetch live data."
         pipeline = {
             "fetched": {"status": "failed", "message": "missing_access_token"},
             "parsed": {"status": "skipped", "message": "No Fitbit response to parse."},
             "stored": {"status": "skipped", "message": "No parsed Fitbit rows to store."},
         }
+        logger.warning("[fitbit] sync blocked before fetch run_id=%s error=%s", sync_run_id, message[:500])
+        logs.append(f"token refresh/check: failed ({type(exc).__name__})")
         logs.append("response status: missing_access_token")
         logs.append("parsing skipped: missing access token")
         _save_fitbit_sync_state(
@@ -1032,6 +1289,8 @@ def fitbit_force_sync(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     fetched = fetch_daily_metrics(access_token, start_date=start_date, end_date=end_date)
     response_status = _fitbit_text(fetched.get("status")) or "unknown"
     logs.append(f"response status: {response_status}")
+    for warning in list(fetched.get("warnings") or [])[:5]:
+        logs.append(f"missing metric warning: {warning}")
     if response_status != "ok":
         message = _fitbit_text(fetched.get("message")) or "Fitbit force sync failed."
         pipeline = {
@@ -1093,8 +1352,12 @@ def fitbit_force_sync(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         row_date = _fitbit_text(row.get("date"))[:10]
         if not row_date:
             continue
+        cleaned_row = {key: _fitbit_json_value(value) for key, value in row.items()}
+        if not any(_fitbit_text(cleaned_row.get(key)) for key in FITBIT_WEARABLE_VALUE_FIELDS):
+            logs.append(f"stored skipped: no parsed metric values for {row_date}")
+            continue
         payload_row = {
-            **row,
+            **cleaned_row,
             "metric_id": _fitbit_text(row.get("metric_id")) or f"fitbit:{row_date}",
             "source": "fitbit",
             "created_at": _fitbit_text(row.get("created_at")) or now,

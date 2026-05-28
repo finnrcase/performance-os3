@@ -4,6 +4,7 @@ from backend_new.routes.integrations import _google_health_status
 def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
     monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_ID", "client")
     monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("GOOGLE_HEALTH_REDIRECT_URI", "https://api.example.com/api/google-health/callback")
 
     status, metadata = _google_health_status(
         {
@@ -30,6 +31,7 @@ def test_google_health_status_connected_with_saved_refresh_token(monkeypatch):
 def test_google_health_status_reconnect_required_after_failed_sync(monkeypatch):
     monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_ID", "client")
     monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("GOOGLE_HEALTH_REDIRECT_URI", "https://api.example.com/api/google-health/callback")
 
     status, metadata = _google_health_status(
         {

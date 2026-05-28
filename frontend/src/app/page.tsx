@@ -992,6 +992,7 @@ type SettingsHealthCard = {
   action?: string;
   metadata?: {
     connected?: boolean;
+    configured?: boolean;
     athlete_id?: string;
     userid?: string;
     token_status?: string;
@@ -999,6 +1000,7 @@ type SettingsHealthCard = {
     last_imported_count?: number;
     last_updated_count?: number;
     last_fetched_count?: number;
+    last_stored_count?: number;
     imported_metrics?: number;
     fetched_days?: number;
     latest_activity_date?: string;
@@ -1826,6 +1828,7 @@ const integrationLabels: Record<string, string> = {
   strava_client_secret: "Strava client secret",
   fitbit_client_id: "Fitbit client ID",
   fitbit_client_secret: "Fitbit client secret",
+  fitbit_redirect_uri: "Fitbit redirect URI",
   google_health_client_id: "Google Health client ID",
   google_health_client_secret: "Google Health client secret",
   google_health_redirect_uri: "Google Health redirect URI",
@@ -10729,6 +10732,9 @@ function IntegrationHealthGrid({
   onConnectWithings,
   onConnectGoogleHealth,
   onSyncGoogleHealth,
+  onConnectFitbit,
+  onSyncFitbit,
+  fitbitSyncing,
   googleHealthSyncing,
   onSyncWithings,
 }: Readonly<{
@@ -10739,6 +10745,9 @@ function IntegrationHealthGrid({
   onConnectWithings: () => void;
   onConnectGoogleHealth: () => void;
   onSyncGoogleHealth: () => void;
+  onConnectFitbit: () => void;
+  onSyncFitbit: () => void;
+  fitbitSyncing?: boolean;
   googleHealthSyncing?: boolean;
   onSyncWithings: () => void;
 }>) {
@@ -10749,9 +10758,12 @@ function IntegrationHealthGrid({
     if (card.action === "strava_reconnect") return { label: "Reconnect Strava", onClick: () => onConnectStrava(true) };
     if (card.action === "withings_connect") return { label: "Connect", onClick: onConnectWithings };
     if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
-    if (card.action === "google_health_connect") return { label: "Connect", onClick: onConnectGoogleHealth };
+    if (card.action === "google_health_connect") return { label: card.metadata?.configured === false ? "Setup needed" : "Connect", onClick: onConnectGoogleHealth, disabled: card.metadata?.configured === false };
     if (card.action === "google_health_reconnect") return { label: "Reconnect", onClick: onConnectGoogleHealth };
     if (card.action === "google_health_sync") return { label: googleHealthSyncing ? "Syncing..." : "Sync", onClick: onSyncGoogleHealth, disabled: googleHealthSyncing };
+    if (card.action === "fitbit_connect") return { label: card.metadata?.configured === false ? "Setup needed" : "Connect", onClick: onConnectFitbit, disabled: card.metadata?.configured === false };
+    if (card.action === "fitbit_reconnect") return { label: "Reconnect", onClick: onConnectFitbit };
+    if (card.action === "fitbit_sync" || card.action === "fitbit_debug_sync") return { label: fitbitSyncing ? "Syncing..." : "Sync", onClick: onSyncFitbit, disabled: fitbitSyncing };
     return null;
   };
   return (
@@ -10804,6 +10816,16 @@ function IntegrationHealthGrid({
                   {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status}</span></p> : null}
                   {card.metadata.latest_record ? <p>Latest daily metric: <span className="text-zinc-300">{card.metadata.latest_record}</span></p> : null}
                   {card.metadata.last_warning ? <p className="text-amber-100">Last warning: {card.metadata.last_warning}</p> : null}
+                  {card.metadata.last_error ? <p className="text-amber-100">Last error: {card.metadata.last_error}</p> : null}
+                </div>
+              ) : null}
+              {card.id === "fitbit" && card.metadata ? (
+                <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
+                  <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
+                  <p>Scopes: <span className="text-zinc-300">{card.metadata.scopes || "Not granted"}</span></p>
+                  <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Stored: <span className="text-zinc-300">{card.metadata.imported_metrics ?? card.metadata.last_stored_count ?? 0}</span></p>
+                  {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status}</span></p> : null}
+                  {card.metadata.latest_record ? <p>Latest daily metric: <span className="text-zinc-300">{card.metadata.latest_record}</span></p> : null}
                   {card.metadata.last_error ? <p className="text-amber-100">Last error: {card.metadata.last_error}</p> : null}
                 </div>
               ) : null}
@@ -11551,6 +11573,9 @@ function SettingsPage({
   onTestApiConnections,
   onRefreshFitbitDebug,
   onForceFitbitSync,
+  onConnectFitbit,
+  onSyncFitbit,
+  onDisconnectFitbit,
   onConnectStrava,
   onConnectWithings,
   onConnectGoogleHealth,
@@ -11578,6 +11603,9 @@ function SettingsPage({
   onTestApiConnections: () => void;
   onRefreshFitbitDebug: () => void;
   onForceFitbitSync: () => void;
+  onConnectFitbit: () => void;
+  onSyncFitbit: () => void;
+  onDisconnectFitbit: () => void;
   onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
   onConnectGoogleHealth: () => void;
@@ -11599,9 +11627,15 @@ function SettingsPage({
   const withingsStatus = settings?.statuses?.withings ?? settingsHealthCard(settings, "withings")?.status ?? "Not configured";
   const googleHealthStatus = settings?.statuses?.google_health ?? settingsHealthCard(settings, "google_health")?.label ?? "Not configured";
   const googleHealthConnected = googleHealthStatus === "Connected";
+  const googleHealthConfigured = Boolean(settingsService(settings, "google_health")?.configured ?? settingsHealthCard(settings, "google_health")?.metadata?.configured);
   const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; details?: { last_error?: string } } | undefined;
   const googleHealthError = String(settingsService(settings, "google_health")?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
   const googleHealthWarning = String(settingsService(settings, "google_health")?.last_warning || settingsHealthCard(settings, "google_health")?.metadata?.last_warning || "");
+  const fitbitStatus = settings?.statuses?.fitbit ?? settingsHealthCard(settings, "fitbit")?.label ?? "Not configured";
+  const fitbitConnected = fitbitStatus === "Connected";
+  const fitbitConfigured = Boolean(settingsService(settings, "fitbit")?.configured ?? settingsHealthCard(settings, "fitbit")?.metadata?.configured);
+  const fitbitDiagnostic = settings?.fitbit as unknown as { last_error?: string; details?: { last_error?: string } } | undefined;
+  const fitbitError = String(settingsService(settings, "fitbit")?.last_error || fitbitDiagnostic?.last_error || fitbitDiagnostic?.details?.last_error || "");
   const openAiStatus = settings?.statuses?.openai_api_key ?? settingsService(settings, "openai")?.status ?? "Not configured";
   const appleHealthStatus = settings?.statuses?.apple_health_export_file ?? "Local upload";
   return (
@@ -11635,13 +11669,24 @@ function SettingsPage({
           />
           <SettingsConnectionCard
             title="Google Health"
-            description={googleHealthError ? `Last sync error: ${googleHealthError}` : googleHealthWarning ? `Last sync warning: ${googleHealthWarning}` : settingsService(settings, "google_health")?.message ?? "Daily wearable metrics sync for readiness signals."}
+            description={!googleHealthConfigured ? "Google Health connection is not configured yet. Add backend OAuth env vars, then redeploy the API." : googleHealthError ? `Last sync error: ${googleHealthError}` : googleHealthWarning ? `Last sync warning: ${googleHealthWarning}` : settingsService(settings, "google_health")?.message ?? "Daily wearable metrics sync for readiness signals."}
             status={googleHealthStatus}
             lastSync={settingsLastSync(settings, "google_health")}
             actions={[
-              { label: googleHealthConnected ? "Reconnect Google Health" : "Connect Google Health", onClick: onConnectGoogleHealth, variant: "primary" },
+              { label: googleHealthConnected ? "Reconnect Google Health" : "Connect Google Health", onClick: onConnectGoogleHealth, disabled: !googleHealthConfigured, variant: "primary" },
               { label: googleHealthSyncing ? "Syncing..." : "Sync Now", onClick: onSyncGoogleHealth, disabled: !googleHealthConnected || googleHealthSyncing, variant: "secondary" },
               { label: "Disconnect", onClick: onDisconnectGoogleHealth, disabled: !googleHealthConnected || googleHealthSyncing, variant: "danger" },
+            ]}
+          />
+          <SettingsConnectionCard
+            title="Fitbit"
+            description={!fitbitConfigured ? "Fitbit connection is not configured yet. Add backend OAuth env vars, then redeploy the API." : fitbitError ? `Last sync error: ${fitbitError}` : settingsService(settings, "fitbit")?.message ?? "OAuth wearable sync for sleep, heart rate, activity, and calories."}
+            status={fitbitStatus}
+            lastSync={settingsLastSync(settings, "fitbit")}
+            actions={[
+              { label: fitbitConnected ? "Reconnect Fitbit" : "Connect Fitbit", onClick: onConnectFitbit, disabled: !fitbitConfigured, variant: "primary" },
+              { label: fitbitSyncing ? "Syncing..." : "Sync Now", onClick: onSyncFitbit, disabled: !fitbitConnected || fitbitSyncing, variant: "secondary" },
+              { label: "Disconnect", onClick: onDisconnectFitbit, disabled: !fitbitConnected || fitbitSyncing, variant: "danger" },
             ]}
           />
           <SettingsConnectionCard
@@ -11690,6 +11735,7 @@ function SettingsPage({
             { label: "Sync Hevy", detail: "Refresh workout history and training summaries.", onClick: onSyncHevy, disabled: false },
             { label: "Manual Strava Import", detail: "Import recent run/cardio activities.", onClick: onImportStrava, disabled: !stravaConnected },
             { label: "Sync Google Health", detail: "Pull daily wearable metrics for readiness signals.", onClick: onSyncGoogleHealth, disabled: !googleHealthConnected },
+            { label: "Sync Fitbit", detail: "Pull Fitbit sleep, heart rate, activity, and calorie metrics.", onClick: onSyncFitbit, disabled: !fitbitConnected || fitbitSyncing },
             { label: "Sync Weight Now", detail: "Pull the latest Withings scale measurement.", onClick: onSyncWithings, disabled: !withingsConnected },
             { label: "Sync Withings History", detail: "Backfill historical weight and body composition.", onClick: onSyncWithingsHistory, disabled: !withingsConnected },
           ].map((action) => (
@@ -11756,6 +11802,9 @@ function SettingsPage({
               onConnectWithings={onConnectWithings}
               onConnectGoogleHealth={onConnectGoogleHealth}
               onSyncGoogleHealth={onSyncGoogleHealth}
+              onConnectFitbit={onConnectFitbit}
+              onSyncFitbit={onSyncFitbit}
+              fitbitSyncing={fitbitSyncing}
               googleHealthSyncing={googleHealthSyncing}
               onSyncWithings={onSyncWithings}
             />
@@ -12165,14 +12214,14 @@ function HomeContent() {
 
   const forceFitbitSync = useCallback(async () => {
     if (fitbitSyncing) return;
-    const path = "/api/debug/fitbit/sync";
+    const path = "/api/fitbit/sync";
     const started = performance.now();
     setFitbitSyncing(true);
     setApiError(null);
-    setMessage("Fitbit debug sync started.");
+    setMessage("Fitbit sync started.");
     recordStartupDebug({
       key: "fitbit_debug_sync",
-      label: "Fitbit debug sync",
+      label: "Fitbit sync",
       path,
       required: false,
       status: "pending",
@@ -12186,13 +12235,13 @@ function HomeContent() {
       setFitbitDebug(result);
       recordStartupDebug({
         key: "fitbit_debug_sync",
-        label: "Fitbit debug sync",
+        label: "Fitbit sync",
         path,
         required: false,
         status: result.status === "error" ? "error" : "ok",
         httpStatus: 200,
         durationMs,
-        errorMessage: result.status === "error" ? result.message || result.sync?.last_error || "Fitbit debug sync failed." : undefined,
+        errorMessage: result.status === "error" ? result.message || result.sync?.last_error || "Fitbit sync failed." : undefined,
         responseText: JSON.stringify({
           status: result.status,
           connection_status: result.connection_status,
@@ -12205,19 +12254,19 @@ function HomeContent() {
         timestamp: new Date().toISOString(),
       });
       if (result.status === "error") {
-        setMessage(result.message || result.sync?.last_error || "Fitbit debug sync finished with errors.");
+        setMessage(result.message || result.sync?.last_error || "Fitbit sync finished with errors.");
       } else {
-        setMessage(result.message || "Fitbit debug sync complete.");
+        setMessage(result.message || "Fitbit sync complete.");
       }
       void apiGet<SettingsData>("/api/integrations/status?external_checks=false", SETTINGS_API_TIMEOUT_MS)
         .then(applySettingsData)
         .catch(() => undefined);
     } catch (error) {
       const durationMs = Math.round(performance.now() - started);
-      const message = error instanceof Error ? error.message : "Fitbit debug sync failed.";
+      const message = error instanceof Error ? error.message : "Fitbit sync failed.";
       recordStartupDebug({
         key: "fitbit_debug_sync",
-        label: "Fitbit debug sync",
+        label: "Fitbit sync",
         path,
         required: false,
         status: "error",
@@ -14380,6 +14429,38 @@ function HomeContent() {
             "Strava import complete.",
           );
         }}
+        onConnectFitbit={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/fitbit/connect?reconnect=true");
+            if (result.status === "not_configured") {
+              setMessage(result.message || "Fitbit connection is not configured yet.");
+              return;
+            }
+            if (result.status !== "ok" || !result.auth_url) {
+              throw new Error(result.message ?? "Unable to generate Fitbit authorization URL.");
+            }
+            window.location.href = result.auth_url;
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to connect Fitbit.");
+          }
+        }}
+        onSyncFitbit={() => {
+          void forceFitbitSync();
+        }}
+        onDisconnectFitbit={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const updated = await apiSend<SettingsData>("/api/fitbit/disconnect", "POST", {});
+            applySettingsData(updated);
+            await refreshFitbitDebug();
+            setMessage("Fitbit disconnected. Reconnect from Settings when ready.");
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to disconnect Fitbit.");
+          }
+        }}
         onConnectStrava={async (reconnect = false) => {
           setApiError(null);
           setMessage(null);
@@ -14411,6 +14492,10 @@ function HomeContent() {
           setMessage(null);
           try {
             const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/google-health/connect");
+            if (result.status === "not_configured") {
+              setMessage(result.message || "Google Health connection is not configured yet.");
+              return;
+            }
             if (result.status !== "ok" || !result.auth_url) {
               throw new Error(result.message ?? "Unable to generate Google Health authorization URL.");
             }

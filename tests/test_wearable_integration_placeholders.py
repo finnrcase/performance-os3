@@ -5,6 +5,11 @@ from src.integrations import fitbit_client, google_health_client
 from src.wearables import WEARABLE_METRIC_COLUMNS
 
 
+def _clear_fitbit_env(monkeypatch):
+    for name in ("FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET", "FITBIT_REDIRECT_URI", "FITBIT_SCOPES"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_google_health_settings_fields_are_present():
     settings = default_settings()
 
@@ -15,7 +20,8 @@ def test_google_health_settings_fields_are_present():
     assert integration_status("google_health_client_id", settings) == "Not configured"
 
 
-def test_fitbit_placeholder_functions_are_safe_without_credentials():
+def test_fitbit_functions_are_safe_without_credentials(monkeypatch):
+    _clear_fitbit_env(monkeypatch)
     settings = default_settings()
 
     assert fitbit_client.is_configured(settings) is False
@@ -35,7 +41,8 @@ def test_google_health_functions_are_safe_without_credentials():
     assert google_health_client.fetch_daily_metrics("")["status"] == "missing_access_token"
 
 
-def test_placeholder_auth_urls_when_configured_do_not_require_secrets_in_url():
+def test_auth_urls_when_configured_do_not_require_secrets_in_url(monkeypatch):
+    _clear_fitbit_env(monkeypatch)
     settings = default_settings()
     settings["integrations"].update(
         {
@@ -50,12 +57,99 @@ def test_placeholder_auth_urls_when_configured_do_not_require_secrets_in_url():
     fitbit = fitbit_client.get_auth_url(settings, redirect_uri="http://localhost/fitbit", state="abc")
     google = google_health_client.get_auth_url(settings, redirect_uri="http://localhost/google", state="xyz")
 
-    assert fitbit["status"] == "placeholder"
+    assert fitbit["status"] == "ok"
     assert "fitbit-id" in fitbit["auth_url"]
     assert "fitbit-secret" not in fitbit["auth_url"]
     assert google["status"] == "ok"
     assert "google-id" in google["auth_url"]
     assert "google-secret" not in google["auth_url"]
+
+
+def test_fitbit_token_exchange_and_refresh_parse_token_payloads(monkeypatch):
+    settings = default_settings()
+    settings["integrations"].update(
+        {
+            "fitbit_client_id": "fitbit-id",
+            "fitbit_client_secret": "fitbit-secret",
+            "fitbit_redirect_uri": "http://localhost/fitbit",
+        }
+    )
+
+    def fake_post_form(_url, form, _settings):
+        assert form["grant_type"] in {"authorization_code", "refresh_token"}
+        return {
+            "access_token": "access",
+            "refresh_token": "refresh2" if form["grant_type"] == "refresh_token" else "refresh",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+            "user_id": "user-1",
+            "scope": "activity heartrate profile sleep",
+        }
+
+    monkeypatch.setattr(fitbit_client, "_post_form", fake_post_form)
+
+    exchanged = fitbit_client.exchange_code_for_token("code", settings, redirect_uri="http://localhost/fitbit")
+    refreshed = fitbit_client.refresh_access_token("refresh", settings)
+
+    assert exchanged["status"] == "ok"
+    assert exchanged["tokens"]["refresh_token"] == "refresh"
+    assert exchanged["tokens"]["scopes"] == "activity heartrate profile sleep"
+    assert refreshed["status"] == "ok"
+    assert refreshed["tokens"]["refresh_token"] == "refresh2"
+
+
+def test_fitbit_fetch_daily_metrics_parses_sleep_heart_and_activity(monkeypatch):
+    def fake_get_json(path, _access_token):
+        if "/activities/date/" in path:
+            return {
+                "summary": {
+                    "steps": 9345,
+                    "caloriesOut": 2637,
+                    "activityCalories": 850,
+                    "caloriesBMR": 1787,
+                    "lightlyActiveMinutes": 35,
+                    "fairlyActiveMinutes": 20,
+                    "veryActiveMinutes": 12,
+                    "distances": [{"activity": "total", "distance": 4.2}],
+                }
+            }
+        if "/activities/heart/" in path:
+            return {"activities-heart": [{"value": {"restingHeartRate": 52, "heartRateZones": [{"max": 120}, {"max": 185}]}}]}
+        if "/sleep/date/" in path:
+            return {
+                "summary": {
+                    "totalMinutesAsleep": 430,
+                    "totalTimeInBed": 480,
+                    "stages": {"rem": 92, "deep": 68, "light": 270, "wake": 50},
+                },
+                "sleep": [{"efficiency": 89}],
+            }
+        if "/hrv/" in path:
+            return {"hrv": [{"value": {"dailyRmssd": 61}}]}
+        if "/spo2/" in path:
+            return {"value": {"avg": 97}}
+        if "/temp/skin/" in path:
+            return {"tempSkin": [{"value": {"nightlyRelative": 0.4}}]}
+        if "/profile" in path:
+            return {"user": {"encodedId": "user-1"}}
+        return {}
+
+    monkeypatch.setattr(fitbit_client, "_get_json", fake_get_json)
+
+    fetched = fitbit_client.fetch_daily_metrics("token", start_date="2026-05-27", end_date="2026-05-27")
+    normalized = fitbit_client.normalize_daily_metrics(fetched["items"])
+
+    assert fetched["status"] == "ok"
+    assert normalized.iloc[0]["source"] == "fitbit"
+    assert int(normalized.iloc[0]["steps"]) == 9345
+    assert int(normalized.iloc[0]["total_sleep_minutes"]) == 430
+    assert int(normalized.iloc[0]["rem_sleep_minutes"]) == 92
+    assert int(normalized.iloc[0]["deep_sleep_minutes"]) == 68
+    assert int(normalized.iloc[0]["light_sleep_minutes"]) == 270
+    assert int(normalized.iloc[0]["resting_hr"]) == 52
+    assert int(normalized.iloc[0]["total_calories_burned"]) == 2637
+    assert int(normalized.iloc[0]["active_minutes"]) == 67
+    assert int(normalized.iloc[0]["hrv"]) == 61
 
 
 def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):

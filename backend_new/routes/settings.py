@@ -18,6 +18,7 @@ INTEGRATION_FIELDS = [
     "strava_redirect_uri",
     "fitbit_client_id",
     "fitbit_client_secret",
+    "fitbit_redirect_uri",
     "google_health_client_id",
     "google_health_client_secret",
     "google_health_redirect_uri",
@@ -36,6 +37,7 @@ ENV_BY_FIELD = {
     "withings_client_secret": "WITHINGS_CLIENT_SECRET",
     "fitbit_client_id": "FITBIT_CLIENT_ID",
     "fitbit_client_secret": "FITBIT_CLIENT_SECRET",
+    "fitbit_redirect_uri": "FITBIT_REDIRECT_URI",
     "google_health_client_id": "GOOGLE_HEALTH_CLIENT_ID",
     "google_health_client_secret": "GOOGLE_HEALTH_CLIENT_SECRET",
     "google_health_redirect_uri": "GOOGLE_HEALTH_REDIRECT_URI",
@@ -138,6 +140,8 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
 
 
 def _google_health_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    from src.integrations.google_health_client import scopes as google_health_scopes
+
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
     tokens = metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {}
     sync = metadata.get("google_health_sync") if isinstance(metadata.get("google_health_sync"), dict) else {}
@@ -148,9 +152,11 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
         _configured_from_env("google_health_client_id")
         and _configured_from_env("google_health_client_secret")
     )
+    redirect_configured = bool(integrations.get("google_health_redirect_uri") or _configured_from_env("google_health_redirect_uri"))
+    configured = bool(has_credentials and redirect_configured)
     refresh_token = str(tokens.get("refresh_token") or "").strip()
     access_token = str(tokens.get("access_token") or "").strip()
-    if not has_credentials:
+    if not configured:
         status = "Not configured"
     elif sync.get("needs_reconnect"):
         status = "Reconnect required"
@@ -160,10 +166,21 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
         status = "Disconnected"
     return status, {
         "connected": status == "Connected",
-        "configured": bool(has_credentials),
+        "configured": configured,
         "token_status": "reconnect_required" if sync.get("needs_reconnect") else "valid" if refresh_token else "missing",
         "access_token_present": bool(access_token),
         "refresh_token_present": bool(refresh_token),
+        "required_env_vars": ["GOOGLE_HEALTH_CLIENT_ID", "GOOGLE_HEALTH_CLIENT_SECRET", "GOOGLE_HEALTH_REDIRECT_URI"],
+        "missing_env_vars": [
+            name
+            for name, ready in [
+                ("GOOGLE_HEALTH_CLIENT_ID", bool(integrations.get("google_health_client_id") or _configured_from_env("google_health_client_id"))),
+                ("GOOGLE_HEALTH_CLIENT_SECRET", bool(integrations.get("google_health_client_secret") or _configured_from_env("google_health_client_secret"))),
+                ("GOOGLE_HEALTH_REDIRECT_URI", redirect_configured),
+            ]
+            if not ready
+        ],
+        "scopes": " ".join(google_health_scopes()) if configured else "",
         "last_synced_at": sync.get("last_synced_at", ""),
         "latest_record": sync.get("latest_record", ""),
         "last_error": sync.get("last_error", ""),
@@ -174,6 +191,8 @@ def _google_health_connection(settings: dict[str, Any], integrations: dict[str, 
 
 
 def _fitbit_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    from src.integrations.fitbit_client import scopes as fitbit_scopes
+
     metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
     tokens = metadata.get("fitbit_tokens") if isinstance(metadata.get("fitbit_tokens"), dict) else {}
     sync = metadata.get("fitbit_sync") if isinstance(metadata.get("fitbit_sync"), dict) else {}
@@ -184,6 +203,8 @@ def _fitbit_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
         _configured_from_env("fitbit_client_id")
         and _configured_from_env("fitbit_client_secret")
     )
+    redirect_configured = bool(integrations.get("fitbit_redirect_uri") or _configured_from_env("fitbit_redirect_uri"))
+    configured = bool(has_credentials and redirect_configured)
     access_token = os.getenv("FITBIT_ACCESS_TOKEN", "").strip() or str(integrations.get("fitbit_access_token") or tokens.get("access_token") or "").strip()
     refresh_token = os.getenv("FITBIT_REFRESH_TOKEN", "").strip() or str(integrations.get("fitbit_refresh_token") or tokens.get("refresh_token") or "").strip()
     scopes = os.getenv("FITBIT_SCOPES", "").strip() or str(integrations.get("fitbit_scopes") or tokens.get("scopes") or "").strip()
@@ -192,7 +213,7 @@ def _fitbit_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
     except (TypeError, ValueError):
         expires_at = 0
     access_expired = bool(access_token and expires_at and expires_at <= int(time.time()))
-    if not has_credentials:
+    if not configured:
         status = "Not configured"
     elif sync.get("needs_reconnect"):
         status = "Reconnect required"
@@ -209,11 +230,21 @@ def _fitbit_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
     )
     return status, {
         "connected": status == "Connected",
-        "configured": bool(has_credentials),
+        "configured": configured,
         "token_status": token_status,
         "access_token_present": bool(access_token),
         "refresh_token_present": bool(refresh_token),
-        "scopes": scopes,
+        "scopes": scopes or " ".join(fitbit_scopes()) if configured else "",
+        "required_env_vars": ["FITBIT_CLIENT_ID", "FITBIT_CLIENT_SECRET", "FITBIT_REDIRECT_URI"],
+        "missing_env_vars": [
+            name
+            for name, ready in [
+                ("FITBIT_CLIENT_ID", bool(integrations.get("fitbit_client_id") or _configured_from_env("fitbit_client_id"))),
+                ("FITBIT_CLIENT_SECRET", bool(integrations.get("fitbit_client_secret") or _configured_from_env("fitbit_client_secret"))),
+                ("FITBIT_REDIRECT_URI", redirect_configured),
+            ]
+            if not ready
+        ],
         "expires_at": expires_at or None,
         "last_synced_at": sync.get("last_successful_sync", "") or sync.get("last_synced_at", ""),
         "latest_record": sync.get("latest_record", ""),
@@ -349,7 +380,7 @@ def settings_payload() -> dict[str, Any]:
         "fitbit": {
             "configured": fitbit_service["configured"],
             "status": "connected" if fitbit_status == "Connected" else "needs_reconnect" if fitbit_status == "Reconnect required" else "disconnected" if fitbit_status == "Disconnected" else "not_configured",
-            "message": "Fitbit debug sync is available from Settings Advanced / Debug.",
+            "message": "Fitbit OAuth sync is available from Settings. Startup never calls Fitbit.",
             **fitbit_service,
         },
         "google_health": {
@@ -389,7 +420,7 @@ def settings_payload() -> dict[str, Any]:
             "message": services["fitbit"]["message"],
             "last_synced_at": fitbit_service["last_synced_at"],
             "latest_record": fitbit_service["latest_record"],
-            "action": "fitbit_debug_sync",
+            "action": "fitbit_sync" if fitbit_status == "Connected" else "fitbit_reconnect" if fitbit_status == "Reconnect required" else "fitbit_connect",
             "metadata": {
                 "connection": fitbit_status,
                 "configured": fitbit_service["configured"],
