@@ -6895,6 +6895,80 @@ function BodyCompositionChart({ history, tab }: Readonly<{ history: WeightChartP
   );
 }
 
+function AnalyticsStatTile({
+  label,
+  value,
+  detail,
+  status,
+  icon: Icon,
+}: Readonly<{
+  label: string;
+  value: string;
+  detail: string;
+  status?: string;
+  icon: React.ElementType;
+}>) {
+  return (
+    <div className="min-h-[124px] rounded-lg border border-white/10 bg-white/[0.035] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+          <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+        </div>
+        <div className={cx("rounded-lg border p-2", dashboardHealthTone(status))}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-zinc-400">{detail}</p>
+    </div>
+  );
+}
+
+function AnalyticsChartBlock({
+  title,
+  children,
+  empty,
+}: Readonly<{
+  title: string;
+  children: React.ReactNode;
+  empty?: boolean;
+}>) {
+  return (
+    <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
+      <p className="text-sm font-semibold text-white">{title}</p>
+      {empty ? (
+        <div className="mt-3 flex h-52 items-center rounded-lg border border-dashed border-white/10 bg-black/10 p-4 text-sm leading-6 text-zinc-400">
+          More passive wearable history is needed before this chart can render.
+        </div>
+      ) : children}
+    </div>
+  );
+}
+
+function formatAnalyticsNumber(value: unknown, unit = "", digits = 0) {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return "--";
+  return `${parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
+}
+
+function formatSignedAnalyticsNumber(value: unknown, unit = "", digits = 0) {
+  const parsed = finiteNumberOrNull(value);
+  if (parsed === null) return "--";
+  const formatted = parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+  return `${parsed > 0 ? "+" : ""}${formatted}${unit}`;
+}
+
+function wearableSleepHours(metric: WearableMetricEntry | null | undefined) {
+  const directHours = finiteNumberOrNull(metric?.sleep_hours);
+  if (directHours !== null) return directHours;
+  const minutes = finiteNumberOrNull(metric?.total_sleep_minutes);
+  return minutes !== null ? minutes / 60 : null;
+}
+
+function sortWearableMetrics(entries: WearableMetricEntry[]) {
+  return [...entries].sort((a, b) => `${a.date} ${a.created_at ?? ""}`.localeCompare(`${b.date} ${b.created_at ?? ""}`));
+}
+
 function RecoveryPage({
   bodyMetrics,
   recoveryLogs,
@@ -6903,12 +6977,9 @@ function RecoveryPage({
   wearableSignals,
   trainingReadiness,
   adaptiveRecommendation,
+  googleHealth,
+  dashboardRecovery,
   withingsLastSyncedAt,
-  forms,
-  setForms,
-  onBodySubmit,
-  onRecoverySubmit,
-  onWearableSubmit,
   onSyncWeightNow,
   onSyncWithingsHistory,
 }: Readonly<{
@@ -6919,6 +6990,8 @@ function RecoveryPage({
   wearableSignals: WearableSignals | null;
   trainingReadiness: TrainingReadinessSignals | null;
   adaptiveRecommendation?: AdaptiveNutritionRecommendation | null;
+  googleHealth?: GoogleHealthDashboardSignals | null;
+  dashboardRecovery?: DashboardData["recovery"] | null;
   withingsLastSyncedAt?: string;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
@@ -6931,353 +7004,237 @@ function RecoveryPage({
   const [bodyCompositionTab, setBodyCompositionTab] = useState<BodyCompositionTab>("weight");
   const weightHistory = useMemo(() => cleanWeightHistory(bodyMetrics), [bodyMetrics]);
   const weightTrend = useMemo(() => buildWeightTrend(weightHistory), [weightHistory]);
-  const highestWeight = weightHistory.length ? Math.max(...weightHistory.map((entry) => entry.bodyweight)) : null;
-  const lowestWeight = weightHistory.length ? Math.min(...weightHistory.map((entry) => entry.bodyweight)) : null;
-  const firstWeight = weightHistory[0] ?? null;
-  const totalWeightChange = firstWeight && weightTrend.latest ? weightTrend.latest.bodyweight - firstWeight.bodyweight : null;
-  const latestBodyFat = [...weightHistory].reverse().find((entry) => entry.bodyFat !== null)?.bodyFat ?? null;
   const withingsHistory = useMemo(() => weightHistory.filter((entry) => entry.source.toLowerCase().includes("withings")), [weightHistory]);
   const latestWithings = withingsHistory.at(-1) ?? null;
   const latestWithingsBodyFat = [...withingsHistory].reverse().find((entry) => entry.bodyFat !== null) ?? null;
   const latestWithingsLeanMass = [...withingsHistory].reverse().find((entry) => entry.leanMass !== null) ?? null;
   const latestWithingsFatMass = [...withingsHistory].reverse().find((entry) => entry.fatMass !== null) ?? null;
   const latestWithingsMuscleMass = [...withingsHistory].reverse().find((entry) => entry.muscleMass !== null) ?? null;
-  const hasWithingsComposition = withingsHistory.some((entry) => (
-    entry.bodyFat !== null
-    || entry.leanMass !== null
-    || entry.fatMass !== null
-    || entry.muscleMass !== null
-  ));
-  const withingsCards = [
-    { label: "Body Fat %", value: formatMetricValue(latestWithingsBodyFat?.bodyFat, "%", 1), detail: latestWithingsBodyFat ? `Withings body composition · ${latestWithingsBodyFat.date}` : "No Withings body fat yet" },
-    { label: "Lean Mass", value: metricCardValue(latestWithingsLeanMass, "leanMass"), detail: latestWithingsLeanMass ? `Fat-free scale estimate · ${latestWithingsLeanMass.date}` : "No Withings lean mass yet" },
-    { label: "Fat Mass", value: metricCardValue(latestWithingsFatMass, "fatMass"), detail: latestWithingsFatMass ? `Scale-derived fat mass · ${latestWithingsFatMass.date}` : "No Withings fat mass yet" },
-    { label: "Muscle Mass", value: metricCardValue(latestWithingsMuscleMass, "muscleMass"), detail: latestWithingsMuscleMass ? `Withings muscle mass · ${latestWithingsMuscleMass.date}` : "No Withings muscle mass yet" },
-  ];
   const withingsStatusText = [
     withingsLastSyncedAt ? relativeSyncTime(withingsLastSyncedAt) : "Last sync unknown",
     latestWithings?.date ? `Latest measurement: ${latestWithings.date}` : "Latest measurement: --",
   ].join(" · ");
-  const trendColor = weightTrend.trendLabel === "gaining"
-    ? "text-emerald-200"
-    : weightTrend.trendLabel === "losing"
-      ? "text-sky-200"
-      : weightTrend.trendLabel === "stable"
-        ? "text-zinc-100"
-        : "text-amber-200";
-  const sleepChartData = useMemo(() => {
-    return sleepEntries
-      .slice(-30)
-      .map((entry) => {
-        const bedtime = sleepClockHour(entry.sleepStart);
-        const wake = sleepClockHour(entry.sleepEnd);
-        return {
-          date: entry.date,
-          hours: Number(((entry.durationMinutes ?? 0) / 60).toFixed(2)),
-          target: 8,
-          efficiency: entry.efficiencyPercent ?? null,
-          bedtime,
-          wake,
-        };
-      })
-      .filter((entry) => entry.hours > 0);
-  }, [sleepEntries]);
-  const sleepWindow = sleepChartData.slice(-7);
-  const lastSleep = sleepEntries.length ? sleepEntries[sleepEntries.length - 1] : null;
-  const sevenDaySleepAverage = sleepWindow.length ? sleepWindow.reduce((sum, entry) => sum + entry.hours, 0) / sleepWindow.length : null;
-  const efficiencyEntries = sleepWindow.filter((entry) => entry.efficiency !== null);
-  const averageEfficiency = efficiencyEntries.length ? efficiencyEntries.reduce((sum, entry) => sum + (Number(entry.efficiency) || 0), 0) / efficiencyEntries.length : null;
-  const consistencyValues = sleepWindow.flatMap((entry) => [entry.bedtime, entry.wake].filter((value): value is number => value !== null));
-  const consistencySpread = consistencyValues.length >= 4 ? Math.max(...consistencyValues) - Math.min(...consistencyValues) : null;
-  const consistencyLabel = consistencySpread === null ? "Learning" : consistencySpread <= 1 ? "Good" : consistencySpread <= 2 ? "Normal" : "Irregular";
-  const sleepQualityScore = sleepWindow.length
-    ? Math.round(Math.min(100, ((Math.min(sevenDaySleepAverage ?? 0, 8) / 8) * 70) + (((averageEfficiency ?? 80) / 100) * 30)))
-    : null;
-  const adaptiveSignals = recordOrEmpty(adaptiveRecommendation?.signals);
-  const adaptiveRecoverySignal = recordOrEmpty(adaptiveSignals.recovery);
-  const adaptiveRecoveryStatus = stringOrFallback(adaptiveRecoverySignal.status);
-  const adaptiveRecoveryImplication = stringOrFallback(adaptiveRecoverySignal.nutrition_implication);
-  const recoveryImpact = sleepQualityScore === null
-    ? "Sleep tracking will appear here once Fitbit / Google Fit is connected."
-    : sleepQualityScore >= 82
-      ? "Positive - sleep is supporting recovery."
-      : sleepQualityScore >= 68
-        ? "Neutral - sleep is adequate but still worth watching."
-        : "Negative - sleep may be limiting readiness.";
-  const sortedWearableMetrics = [...wearableMetrics].sort((a, b) => `${a.date} ${a.created_at ?? ""}`.localeCompare(`${b.date} ${b.created_at ?? ""}`));
+  const sortedWearableMetrics = useMemo(() => sortWearableMetrics(wearableMetrics), [wearableMetrics]);
   const latestWearable = sortedWearableMetrics.at(-1) ?? null;
+  const latestSleep = sleepEntries.at(-1) ?? null;
+  const googleHealthReady = googleHealth?.status === "ok";
+  const sleepQuality = googleHealth?.sleep_quality;
+  const recoveryReadiness = googleHealth?.recovery_readiness;
+  const sicknessWarning = googleHealth?.sickness_warning;
+  const restingHrSignal = googleHealth?.resting_hr_vs_baseline;
+  const hrvSignal = googleHealth?.hrv;
+  const calorieBurnSignal = googleHealth?.calories_burned_vs_intake;
+  const calorieAdjustmentSignal = googleHealth?.suggested_calorie_adjustment;
+  const activityLoadSignal = googleHealth?.activity_load;
+  const healthVitals = googleHealth?.health;
+  const bodyCompositionSignal = adaptiveRecommendation?.signals?.bodyComposition;
+  const weightSignal = adaptiveRecommendation?.signals?.weight;
+  const projectedMonthlyGain = finiteNumberOrNull(bodyCompositionSignal?.weight_gain_rate_lb_per_week) !== null
+    ? Number(bodyCompositionSignal?.weight_gain_rate_lb_per_week) * 4.345
+    : weightTrend.changeVsSevenDaysAgo !== null
+      ? Number(weightTrend.changeVsSevenDaysAgo) * 4.345
+      : null;
+  const leanGainRate = finiteNumberOrNull(bodyCompositionSignal?.lean_mass_trend_28)
+    ?? finiteNumberOrNull(bodyCompositionSignal?.lean_mass_trend_14)
+    ?? finiteNumberOrNull(bodyCompositionSignal?.lean_mass_trend_7);
+  const maintenanceCalories = finiteNumberOrNull(adaptiveRecommendation?.recommendedTargets?.maintenance_calories)
+    ?? finiteNumberOrNull(adaptiveRecommendation?.baselineRecommendedTargets?.maintenance_calories)
+    ?? finiteNumberOrNull(calorieAdjustmentSignal?.baseline_target)
+    ?? finiteNumberOrNull(adaptiveRecommendation?.currentTarget?.calories);
+  const suggestedCalorieAdjustment = finiteNumberOrNull(adaptiveRecommendation?.calorieAdjustment)
+    ?? finiteNumberOrNull(weightSignal?.calorie_adjustment)
+    ?? finiteNumberOrNull(calorieAdjustmentSignal?.adjustment);
+  const weightConfidence = stringOrFallback(weightSignal?.confidence, recommendationConfidenceLabel(adaptiveRecommendation?.confidence, "learning"));
+  const trendStatus = weightTrend.trendLabel === "gaining" ? "good" : weightTrend.trendLabel === "losing" ? "watch" : weightTrend.trendLabel === "stable" ? "normal" : "insufficient_data";
+  const currentSleepHours = finiteNumberOrNull(sleepQuality?.duration_hours)
+    ?? wearableSleepHours(latestWearable)
+    ?? (finiteNumberOrNull(latestSleep?.durationMinutes) !== null ? Number(latestSleep?.durationMinutes) / 60 : null);
+  const sleepScore = finiteNumberOrNull(sleepQuality?.score) ?? finiteNumberOrNull(latestWearable?.sleep_score);
+  const sleepDurationMinutes = currentSleepHours !== null ? currentSleepHours * 60 : null;
+  const remMinutes = finiteNumberOrNull(sleepQuality?.rem_minutes) ?? finiteNumberOrNull(latestWearable?.rem_sleep_minutes) ?? finiteNumberOrNull(latestSleep?.remSleepMinutes);
+  const deepMinutes = finiteNumberOrNull(sleepQuality?.deep_minutes) ?? finiteNumberOrNull(latestWearable?.deep_sleep_minutes) ?? finiteNumberOrNull(latestSleep?.deepSleepMinutes);
+  const lightMinutes = finiteNumberOrNull(sleepQuality?.light_minutes) ?? finiteNumberOrNull(latestWearable?.light_sleep_minutes) ?? finiteNumberOrNull(latestSleep?.lightSleepMinutes);
+  const awakeMinutes = finiteNumberOrNull(sleepQuality?.awake_minutes) ?? finiteNumberOrNull(latestWearable?.awake_minutes) ?? finiteNumberOrNull(latestSleep?.awakeMinutes);
+  const sleepEfficiency = finiteNumberOrNull(sleepQuality?.efficiency) ?? finiteNumberOrNull(latestWearable?.sleep_efficiency) ?? finiteNumberOrNull(latestSleep?.efficiencyPercent);
+  const recoveryReadinessScore = finiteNumberOrNull(recoveryReadiness?.score) ?? finiteNumberOrNull(dashboardRecovery?.latest_score);
+  const restingHr = finiteNumberOrNull(restingHrSignal?.resting_hr) ?? finiteNumberOrNull(latestWearable?.resting_hr) ?? finiteNumberOrNull(latestSleep?.restingHeartRate);
+  const restingHrBaseline = finiteNumberOrNull(restingHrSignal?.baseline) ?? finiteNumberOrNull(latestWearable?.resting_hr_baseline);
+  const restingHrDeviation = finiteNumberOrNull(restingHrSignal?.deviation) ?? finiteNumberOrNull(latestWearable?.resting_hr_deviation);
+  const hrvValue = finiteNumberOrNull(hrvSignal?.hrv) ?? finiteNumberOrNull(latestWearable?.hrv) ?? finiteNumberOrNull(latestSleep?.hrv);
+  const hrvBaseline = finiteNumberOrNull(hrvSignal?.baseline);
+  const activeMinutes = finiteNumberOrNull(activityLoadSignal?.active_minutes) ?? finiteNumberOrNull(latestWearable?.active_minutes);
+  const activeZoneMinutes = finiteNumberOrNull(activityLoadSignal?.active_zone_minutes) ?? finiteNumberOrNull(latestWearable?.active_zone_minutes);
+  const steps = finiteNumberOrNull(activityLoadSignal?.steps) ?? finiteNumberOrNull(latestWearable?.steps);
+  const caloriesBurned = finiteNumberOrNull(calorieBurnSignal?.calories_burned)
+    ?? finiteNumberOrNull(latestWearable?.total_calories_burned)
+    ?? finiteNumberOrNull(latestWearable?.calories_burned);
+  const breathingRate = finiteNumberOrNull(healthVitals?.breathing_rate) ?? finiteNumberOrNull(latestWearable?.breathing_rate);
+  const spo2 = finiteNumberOrNull(healthVitals?.spo2) ?? finiteNumberOrNull(latestWearable?.spo2);
+  const skinTemperature = finiteNumberOrNull(healthVitals?.skin_temperature) ?? finiteNumberOrNull(latestWearable?.skin_temperature);
+  const bodyTemperature = finiteNumberOrNull(healthVitals?.body_temperature) ?? finiteNumberOrNull(latestWearable?.body_temperature);
+  const localSicknessSignals = [
+    restingHrDeviation !== null && restingHrDeviation >= 5 ? "Resting HR elevated" : "",
+    hrvSignal?.status === "suppressed" ? "HRV suppressed" : "",
+    sleepScore !== null && sleepScore < 68 ? "Poor sleep quality" : "",
+    currentSleepHours !== null && currentSleepHours < 6.5 ? "Short sleep duration" : "",
+    breathingRate !== null && breathingRate >= 22 ? "Breathing rate elevated" : "",
+    spo2 !== null && spo2 < 94 ? "SpO2 below normal" : "",
+    skinTemperature !== null && Math.abs(skinTemperature) >= 1 && Math.abs(skinTemperature) <= 5 ? "Skin temperature elevated" : "",
+    bodyTemperature !== null && bodyTemperature >= 37.8 ? "Body temperature elevated" : "",
+    activeMinutes !== null && activeMinutes >= 90 ? "High activity load" : "",
+  ].filter(Boolean);
+  const sicknessSignals = stringList(sicknessWarning?.abnormal_signals, localSicknessSignals);
+  const sicknessStatus = sicknessWarning?.status
+    ?? trainingReadiness?.sickness_warning?.status
+    ?? (localSicknessSignals.length >= 2 ? "warning" : localSicknessSignals.length === 1 ? "watch" : "clear");
+  const sicknessLabel = sicknessWarning?.label
+    ?? trainingReadiness?.sickness_warning?.label
+    ?? (sicknessStatus === "warning" ? "Elevated Recovery Risk" : sicknessStatus === "watch" ? "Watch" : "Clear");
+  const recoveryConfidence = googleHealthReady
+    ? (googleHealth?.debug?.partial_data ? "partial wearable" : "measured wearable")
+    : latestWearable
+      ? "partial wearable"
+      : recoveryLogs.length || sleepEntries.length
+        ? "manual/inferred"
+        : "insufficient data";
   const wearableFlags = Array.isArray(wearableSignals?.flags) ? wearableSignals.flags : [];
-  const readinessMessages = Array.isArray(trainingReadiness?.signals) ? trainingReadiness.signals : [];
-  const sicknessReadiness = trainingReadiness?.sickness_warning;
-  const wearableNumber = (value: unknown, suffix = "") => {
-    const number = finiteNumberOrNull(value);
-    return number === null ? "--" : `${Number.isInteger(number) ? number.toLocaleString() : number.toFixed(1)}${suffix}`;
-  };
-  const trendText = (trend?: string) => {
-    if (!trend || trend === "insufficient_data") return "Need more data";
-    return trend.replaceAll("_", " ");
-  };
+  const sleepDurationData = useMemo(() => {
+    const wearableSleep = sortedWearableMetrics
+      .map((metric) => ({ date: metric.date, hours: wearableSleepHours(metric), target: 8 }))
+      .filter((entry): entry is { date: string; hours: number; target: number } => entry.hours !== null && entry.hours > 0);
+    if (wearableSleep.length) return wearableSleep.slice(-30);
+    return sleepEntries
+      .map((entry) => ({ date: entry.date, hours: Number(((entry.durationMinutes ?? 0) / 60).toFixed(2)), target: 8 }))
+      .filter((entry) => entry.hours > 0)
+      .slice(-30);
+  }, [sleepEntries, sortedWearableMetrics]);
+  const sleepStageData = useMemo(() => {
+    const wearableStages = sortedWearableMetrics
+      .map((metric) => ({
+        date: metric.date,
+        deep: finiteNumberOrNull(metric.deep_sleep_minutes),
+        rem: finiteNumberOrNull(metric.rem_sleep_minutes),
+        light: finiteNumberOrNull(metric.light_sleep_minutes),
+        awake: finiteNumberOrNull(metric.awake_minutes),
+      }))
+      .filter((entry) => [entry.deep, entry.rem, entry.light, entry.awake].some((value) => value !== null))
+      .map((entry) => ({
+        date: entry.date,
+        deep: Number(((entry.deep ?? 0) / 60).toFixed(2)),
+        rem: Number(((entry.rem ?? 0) / 60).toFixed(2)),
+        light: Number(((entry.light ?? 0) / 60).toFixed(2)),
+        awake: Number(((entry.awake ?? 0) / 60).toFixed(2)),
+      }));
+    if (wearableStages.length) return wearableStages.slice(-30);
+    return sleepEntries
+      .map((entry) => ({
+        date: entry.date,
+        deep: Number(((entry.deepSleepMinutes ?? 0) / 60).toFixed(2)),
+        rem: Number(((entry.remSleepMinutes ?? 0) / 60).toFixed(2)),
+        light: Number(((entry.lightSleepMinutes ?? 0) / 60).toFixed(2)),
+        awake: Number(((entry.awakeMinutes ?? 0) / 60).toFixed(2)),
+      }))
+      .filter((entry) => entry.deep + entry.rem + entry.light + entry.awake > 0)
+      .slice(-30);
+  }, [sleepEntries, sortedWearableMetrics]);
+  const heartTrendData = useMemo(() => {
+    const wearableHeart = sortedWearableMetrics
+      .map((metric) => ({ date: metric.date, restingHr: finiteNumberOrNull(metric.resting_hr), hrv: finiteNumberOrNull(metric.hrv) }))
+      .filter((entry) => entry.restingHr !== null || entry.hrv !== null);
+    if (wearableHeart.length) return wearableHeart.slice(-30);
+    return sleepEntries
+      .map((entry) => ({ date: entry.date, restingHr: finiteNumberOrNull(entry.restingHeartRate), hrv: finiteNumberOrNull(entry.hrv) }))
+      .filter((entry) => entry.restingHr !== null || entry.hrv !== null)
+      .slice(-30);
+  }, [sleepEntries, sortedWearableMetrics]);
+  const activityTrendData = useMemo(() => sortedWearableMetrics
+    .map((metric) => ({
+      date: metric.date,
+      activeMinutes: finiteNumberOrNull(metric.active_minutes),
+      activeZoneMinutes: finiteNumberOrNull(metric.active_zone_minutes),
+      steps: finiteNumberOrNull(metric.steps),
+      caloriesBurned: finiteNumberOrNull(metric.total_calories_burned) ?? finiteNumberOrNull(metric.calories_burned),
+    }))
+    .filter((entry) => entry.activeMinutes !== null || entry.activeZoneMinutes !== null || entry.steps !== null || entry.caloriesBurned !== null)
+    .slice(-30), [sortedWearableMetrics]);
+  const readinessTrendData = useMemo(() => (dashboardRecovery?.trend ?? [])
+    .slice(-30)
+    .map((entry) => ({ date: entry.date, recoveryScore: finiteNumberOrNull(entry.recovery_score) }))
+    .filter((entry) => entry.recoveryScore !== null), [dashboardRecovery]);
+  const weightSummaryCards = [
+    { label: "Current bodyweight", value: formatWeight(weightTrend.latest?.bodyweight), detail: weightTrend.latest?.date ? `${sourceLabel(weightTrend.latest.source)} · ${weightTrend.latest.date}` : "Waiting on smart scale data.", status: weightTrend.latest ? "normal" : "insufficient_data", icon: Weight },
+    { label: "7-day rolling average", value: formatWeight(weightTrend.sevenDayAverage), detail: `${weightTrend.recent.length}/7 recent weigh-in days available.`, status: weightTrend.recent.length >= 5 ? "good" : "watch", icon: BarChart3 },
+    { label: "Weekly trend", value: weightTrend.trendLabel.replaceAll("_", " "), detail: `${formatWeightDelta(weightTrend.changeVsSevenDaysAgo)} vs 7 days ago · ${formatPercentDelta(weightTrend.percentChange)}`, status: trendStatus, icon: Gauge },
+    { label: "Estimated maintenance", value: maintenanceCalories !== null ? `${Math.round(maintenanceCalories).toLocaleString()} kcal` : "--", detail: "Adaptive baseline from bodyweight trend and target settings.", status: maintenanceCalories !== null ? "normal" : "watch", icon: Target },
+    { label: "Suggested calorie adjustment", value: formatSignedAnalyticsNumber(suggestedCalorieAdjustment, " kcal"), detail: "Saved targets only change when trend confidence supports it.", status: suggestedCalorieAdjustment === null || suggestedCalorieAdjustment === 0 ? "hold" : "suggest_adjustment", icon: Apple },
+    { label: "Trend confidence", value: weightConfidence, detail: weightTrend.dataQualityReason || "Driven by canonical daily weigh-ins.", status: weightConfidence === "high" ? "good" : weightConfidence === "medium" ? "watch" : "insufficient_data", icon: Sparkles },
+    { label: "Lean gain rate", value: formatSignedAnalyticsNumber(leanGainRate, " lb", 2), detail: "Estimated from body composition trend when available.", status: leanGainRate !== null ? "normal" : "insufficient_data", icon: HeartPulse },
+    { label: "Projected monthly gain", value: formatSignedAnalyticsNumber(projectedMonthlyGain, " lb", 1), detail: "Projected from current weekly bodyweight velocity.", status: projectedMonthlyGain !== null ? "normal" : "insufficient_data", icon: BarChart3 },
+  ];
+  const recoverySummaryCards = [
+    { label: "Recovery Readiness", value: recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
+    { label: "Sleep Quality", value: sleepScore !== null ? `${Math.round(sleepScore)}/100` : "--", detail: `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`, status: sleepQuality?.status, icon: HeartPulse },
+    { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: HeartPulse },
+    { label: "Resting HR vs baseline", value: `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHrSignal?.status, icon: HeartPulse },
+    { label: "HRV vs baseline", value: `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvSignal?.status, icon: Gauge },
+    { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status, icon: BarChart3 },
+    { label: "Sickness warning", value: sicknessLabel, detail: sicknessWarning?.message || trainingReadiness?.sickness_warning?.message || "Conservative, non-diagnostic recovery stress signal.", status: sicknessStatus, icon: AlertTriangle },
+    { label: "Recovery confidence", value: recoveryConfidence, detail: latestWearable?.date || googleHealth?.date ? `Latest wearable date ${googleHealth?.date || latestWearable?.date}` : "Connect Google Health / Fitbit for passive scoring.", status: recoveryConfidence.includes("measured") ? "good" : recoveryConfidence.includes("partial") ? "watch" : "insufficient_data", icon: Sparkles },
+  ];
+
   return (
-    <div className="space-y-4">
-      <Card>
+    <div className="grid gap-4 xl:grid-cols-2">
+      <Card className="space-y-5">
         <SectionHeader
-          eyebrow="Bodyweight"
-          title="Weight Overview"
+          eyebrow="Weight / Body Composition"
+          title="Passive Body Trend"
           action={(
-            <div className="flex flex-col items-end gap-2">
-              <div className="flex flex-wrap justify-end gap-2">
-                <button onClick={onSyncWeightNow} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-                  Sync Weight Now
+            <div className="flex flex-col items-start gap-2 sm:items-end">
+              <div className="flex flex-wrap gap-2 sm:justify-end">
+                <button onClick={onSyncWeightNow} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                  <RefreshCw className="h-4 w-4" />
+                  Sync Weight
                 </button>
                 <button onClick={onSyncWithingsHistory} className="h-10 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
-                  Sync Withings History
+                  Sync History
                 </button>
               </div>
-              <p className="max-w-sm text-right text-xs leading-5 text-zinc-500">{withingsStatusText}</p>
+              <p className="max-w-sm text-left text-xs leading-5 text-zinc-500 sm:text-right">{withingsStatusText}</p>
             </div>
           )}
         />
-        {weightHistory.length ? (
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Latest</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(weightTrend.latest?.bodyweight)}</p>
-              <p className="mt-1 text-xs text-zinc-500">{weightTrend.latest?.date}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Highest</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(highestWeight)}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Lowest</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{formatWeight(lowestWeight)}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Total change</p>
-              <p className={cx("mt-2 text-2xl font-semibold", Number(totalWeightChange) > 0 ? "text-emerald-200" : Number(totalWeightChange) < 0 ? "text-sky-200" : "text-white")}>{formatWeightDelta(totalWeightChange)}</p>
-            </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Body fat</p>
-              <p className="mt-2 text-2xl font-semibold text-white">{latestBodyFat !== null ? `${latestBodyFat.toFixed(1)}%` : "--"}</p>
-            </div>
-          </div>
-        ) : (
-          <EmptyState title="No bodyweight data yet" description="Log bodyweight manually or import Withings measurements to start the trend." action="Use form below" onAction={() => undefined} />
-        )}
-      </Card>
-
-      <Card>
-        <SectionHeader eyebrow="Withings" title="Body Composition Snapshot" />
-        {withingsHistory.length ? (
-          <div className="space-y-4">
-            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              {withingsCards.map((card) => (
-                <div key={card.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
-                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{card.label}</p>
-                  <p className="mt-2 text-2xl font-semibold text-white">{card.value}</p>
-                  <p className="mt-1 text-xs leading-5 text-zinc-500">{card.detail}</p>
-                </div>
-              ))}
-            </div>
-            {!hasWithingsComposition ? (
-              <div className="rounded-lg border border-amber-300/20 bg-amber-300/[0.07] p-4 text-sm text-amber-50">
-                No Withings body composition data yet
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <EmptyState title="No Withings body composition data yet" description="Connect and sync Withings to show body fat, lean mass, fat mass, and muscle mass." action="Open Settings" onAction={() => undefined} />
-        )}
-      </Card>
-
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
-        <Card>
-          <SectionHeader
-            eyebrow="Wearables"
-            title="Wearables"
-            action={latestWearable ? (
-              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
-                Latest {latestWearable.date}
-              </span>
-            ) : null}
-          />
-          <div className="space-y-4">
-            {latestWearable ? (
-              <div className="grid gap-3 sm:grid-cols-4">
-                <MetricCard title="Sleep" value={wearableNumber(latestWearable.sleep_hours, "h")} detail={trendText(wearableSignals?.sleep?.trend)} icon={HeartPulse} accent="border-sky-300/20 bg-sky-300/10 text-sky-200" />
-                <MetricCard title="Resting HR" value={wearableNumber(latestWearable.resting_hr, " bpm")} detail={trendText(wearableSignals?.resting_hr?.trend)} icon={HeartPulse} accent="border-rose-300/20 bg-rose-300/10 text-rose-200" />
-                <MetricCard title="HRV" value={wearableNumber(latestWearable.hrv)} detail={trendText(wearableSignals?.hrv?.trend)} icon={Gauge} accent="border-violet-300/20 bg-violet-300/10 text-violet-200" />
-                <MetricCard title="Steps" value={wearableNumber(latestWearable.steps)} detail={trendText(String(recordOrEmpty(wearableSignals?.activity).trend || ""))} icon={BarChart3} accent="border-emerald-300/20 bg-emerald-300/10 text-emerald-200" />
-              </div>
-            ) : (
-              <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm text-zinc-400">
-                No wearable data logged yet.
-              </p>
-            )}
-            {wearableFlags.length ? (
-              <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm leading-6 text-zinc-300">{wearableFlags[0]}</p>
-            ) : null}
-            <form onSubmit={onWearableSubmit} className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <TextInput label="Date" type="date" value={forms.wearable.date} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, date: value } }))} />
-              <SelectInput label="Source" value={forms.wearable.source} options={["manual", "fitbit", "google_health", "mock"]} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, source: value } }))} />
-              <TextInput label="Sleep hours" type="number" min={0} step="any" value={forms.wearable.sleep_hours} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, sleep_hours: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="Sleep score" type="number" min={0} step="any" value={forms.wearable.sleep_score} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, sleep_score: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="Resting HR" type="number" min={0} step="any" value={forms.wearable.resting_hr} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, resting_hr: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="HRV" type="number" min={0} step="any" value={forms.wearable.hrv} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, hrv: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="Steps" type="number" min={0} step="any" value={forms.wearable.steps} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, steps: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="Active minutes" type="number" min={0} step="any" value={forms.wearable.active_minutes} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, active_minutes: value === "" ? "" : Number(value) } }))} />
-              <TextInput label="Calories burned" type="number" min={0} step="any" value={forms.wearable.calories_burned} onChange={(value) => setForms((state) => ({ ...state, wearable: { ...state.wearable, calories_burned: value === "" ? "" : Number(value) } }))} />
-              <button className="accent-bg h-11 rounded-lg text-sm font-semibold sm:self-end xl:col-span-3">
-                Save Wearable Metric
-              </button>
-            </form>
-          </div>
-        </Card>
-
-        <Card>
-          <SectionHeader eyebrow="Readiness" title="Training Readiness Signals" />
-          {trainingReadiness?.status === "ok" ? (
-            <div className="space-y-3">
-              {[
-                ["Run", trainingReadiness.run_recommendation?.label, trainingReadiness.run_recommendation?.reason],
-                ["Lift", trainingReadiness.lift_recommendation?.label, trainingReadiness.lift_recommendation?.reason],
-                ["Fueling", trainingReadiness.fueling_recommendation?.label, trainingReadiness.fueling_recommendation?.reason],
-                ["Hydration/electrolyte risk", trainingReadiness.hydration_recommendation?.label, trainingReadiness.hydration_recommendation?.reason],
-              ].map(([label, value, reason]) => (
-                <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-                  <p className="mt-1 text-sm font-semibold text-white">{value || "Need more data"}</p>
-                  <p className="mt-1 text-xs leading-5 text-zinc-500">{reason || "Need more wearable history."}</p>
-                </div>
-              ))}
-              {readinessMessages.length ? <p className="text-xs leading-5 text-zinc-500">{readinessMessages[0]}</p> : null}
-              {sicknessReadiness ? (
-                <div className={cx("rounded-lg border p-3", dashboardHealthTone(sicknessReadiness.status))}>
-                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Sickness Warning</p>
-                  <p className="mt-1 text-sm font-semibold text-white">{sicknessReadiness.label || "No sickness pattern detected"}</p>
-                  <p className="mt-1 text-xs leading-5 text-zinc-300">{sicknessReadiness.message || "No multi-signal sickness pattern from available wearable data."}</p>
-                  <p className="mt-1 text-[11px] text-zinc-500">{sicknessReadiness.disclaimer || "This is not a diagnosis."}</p>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
-              {trainingReadiness?.message || "Need more wearable history."}
-            </p>
-          )}
-        </Card>
-
-        <Card>
-          <SectionHeader eyebrow="Fueling" title="Fueling & Deload Signals" />
-          {trainingReadiness?.status === "ok" ? (
-            <div className="space-y-3">
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Fueling</p>
-                <p className="mt-1 text-sm font-semibold text-white">{trainingReadiness.fueling_recommendation?.label || "Normal fueling"}</p>
-                <p className="mt-1 text-xs leading-5 text-zinc-500">{trainingReadiness.fueling_recommendation?.reason || "No low-carb or post-workout protein flag from current data."}</p>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Deload</p>
-                <p className="mt-1 text-sm font-semibold text-white">{trainingReadiness.lift_recommendation?.label || "Push normal"}</p>
-                <p className="mt-1 text-xs leading-5 text-zinc-500">{trainingReadiness.lift_recommendation?.reason || "No major wearable readiness flags for lifting intensity."}</p>
-              </div>
-              {readinessMessages.length ? (
-                <div className="rounded-lg border border-white/10 bg-black/10 p-3">
-                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Signal</p>
-                  <p className="mt-1 text-xs leading-5 text-zinc-400">{readinessMessages[0]}</p>
-                </div>
-              ) : null}
-            </div>
-          ) : (
-            <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
-              {trainingReadiness?.message || "Need more wearable history before fueling and deload signals are available."}
-            </p>
-          )}
-        </Card>
-      </div>
-
-      <Card>
-        <SectionHeader eyebrow="Past 7 Days" title="Weight Trend" />
-        {weightHistory.length ? (
-          <div className="grid gap-4 lg:grid-cols-[1fr_1.4fr]">
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-5">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Trend</p>
-              <p className={cx("mt-3 text-3xl font-semibold capitalize", trendColor)}>{weightTrend.trendLabel}</p>
-              <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                <div>
-                  <p className="text-xs text-zinc-500">7-day average</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.sevenDayAverage)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Weigh-ins</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{weightTrend.recent.length} / 7</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Vs yesterday</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.changeVsYesterday)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Vs 7 days ago</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.changeVsSevenDaysAgo)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">7-day span</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeightDelta(weightTrend.change)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Percent</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatPercentDelta(weightTrend.percentChange)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">14-day average</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.fourteenDayAverage)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">28-day average</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatWeight(weightTrend.twentyEightDayAverage)}</p>
-                </div>
-                <div>
-                  <p className="text-xs text-zinc-500">Body fat change</p>
-                  <p className="mt-1 text-lg font-semibold text-white">{formatPercentDelta(weightTrend.bodyFatChange)}</p>
-                </div>
-              </div>
-              {weightTrend.dataQualityReason ? <p className="mt-4 text-sm text-amber-200">{weightTrend.dataQualityReason}</p> : null}
-            </div>
-            <ChartFrame className="h-64">
-              <ResponsiveContainer width="100%" height="100%">
-                <RechartsLineChart data={weightHistory.slice(-14)}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} tickFormatter={compactDate} />
-                  <YAxis domain={["dataMin - 2", "dataMax + 2"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={42} />
-                  <Tooltip content={<WeightTooltip />} />
-                  <Line type="monotone" dataKey="bodyweight" name="Weight" stroke="#a3e635" strokeWidth={3} dot={{ r: 3, fill: "#a3e635" }} activeDot={{ r: 5 }} />
-                  <Line type="monotone" dataKey="movingAverage7" name="7-day average" stroke="#60a5fa" strokeWidth={2} dot={false} strokeDasharray="5 5" />
-                </RechartsLineChart>
-              </ResponsiveContainer>
-            </ChartFrame>
-          </div>
-        ) : (
-          <EmptyState title="No bodyweight data yet" description="Past-week trend appears after bodyweight entries are logged." action="Use form below" onAction={() => undefined} />
-        )}
-      </Card>
-
-      <Card>
-            <SectionHeader eyebrow="History" title="Body Composition Trends" />
-        {weightHistory.length ? (
-          <div className="space-y-4">
-            <p className="text-xs text-zinc-500">Using lowest weigh-in per day to reduce night-weight noise.</p>
+        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+          {weightSummaryCards.map((card) => <AnalyticsStatTile key={card.label} {...card} />)}
+        </div>
+        <AnalyticsChartBlock title="Bodyweight trend" empty={!weightHistory.length}>
+          <ChartFrame className="mt-3 h-72">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={weightHistory.slice(-45)}>
+                <defs>
+                  <linearGradient id="recoveryWeightFill" x1="0" x2="0" y1="0" y2="1">
+                    <stop offset="0%" stopColor="#a3e635" stopOpacity={0.24} />
+                    <stop offset="100%" stopColor="#a3e635" stopOpacity={0.02} />
+                  </linearGradient>
+                </defs>
+                <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={24} tickFormatter={compactDate} />
+                <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={42} />
+                <Tooltip content={<WeightTooltip />} />
+                <Area type="monotone" dataKey="bodyweight" name="Weight" stroke="#a3e635" strokeWidth={3} fill="url(#recoveryWeightFill)" dot={false} activeDot={{ r: 5 }} />
+                <Line type="monotone" dataKey="movingAverage7" name="7-day rolling average" stroke="#60a5fa" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </ChartFrame>
+        </AnalyticsChartBlock>
+        <AnalyticsChartBlock title="Body composition trend" empty={!weightHistory.length}>
+          <div className="mt-3 space-y-3">
             <div className="flex flex-wrap gap-2">
               {bodyCompositionTabs.map((tab) => (
                 <button
                   key={tab.id}
                   type="button"
                   onClick={() => setBodyCompositionTab(tab.id)}
-                  className={cx(
-                    "rounded-lg border px-3 py-2 text-sm font-semibold transition",
-                    bodyCompositionTab === tab.id
-                      ? "accent-active"
-                      : "border-white/10 bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07]",
-                  )}
+                  className={cx("rounded-lg border px-3 py-2 text-sm font-semibold transition", bodyCompositionTab === tab.id ? "accent-active" : "border-white/10 bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07]")}
                 >
                   {tab.label}
                 </button>
@@ -7285,124 +7242,218 @@ function RecoveryPage({
             </div>
             <BodyCompositionChart history={weightHistory} tab={bodyCompositionTab} />
           </div>
-        ) : (
-          <EmptyState title="No bodyweight data yet" description="The full historical graph updates automatically after manual logs or Withings imports." action="Use form below" onAction={() => undefined} />
-        )}
-      </Card>
-
-      <Card className="xl:col-span-2">
-        <SectionHeader eyebrow="Recovery" title="Sleep" />
-        {sleepChartData.length ? (
-          <div className="space-y-4">
-            <div className="grid gap-3 md:grid-cols-4">
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Last night</p>
-                <p className="mt-2 text-lg font-semibold text-white">{formatSleepDuration(lastSleep?.durationMinutes)}</p>
+        </AnalyticsChartBlock>
+        <div className="space-y-3">
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+                <p className="mt-1 text-sm font-semibold text-white">Bodyweight history</p>
               </div>
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">7-day average</p>
-                <p className="mt-2 text-lg font-semibold text-white">{sevenDaySleepAverage ? formatSleepDuration(sevenDaySleepAverage * 60) : "Need data"}</p>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Sleep quality</p>
-                <p className="mt-2 text-lg font-semibold text-white">{sleepQualityScore ?? "--"}/100</p>
-              </div>
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Consistency</p>
-                <p className="mt-2 text-lg font-semibold text-white">{consistencyLabel}</p>
-              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4">
+              {bodyMetrics.length ? <DataTable rows={bodyMetrics.slice(-10).reverse()} /> : <p className="text-sm text-zinc-400">Smart scale or imported bodyweight history will appear here.</p>}
             </div>
-            <div className="grid gap-4 lg:grid-cols-2">
-              <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
-                <p className="text-sm font-semibold text-white">Sleep duration</p>
-                <ChartFrame className="mt-3 h-56">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <RechartsLineChart data={sleepChartData}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                      <XAxis dataKey="date" hide />
-                      <YAxis domain={[0, 10]} tick={{ fill: "#a1a1aa", fontSize: 12 }} />
-                      <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
-                      <Line dataKey="target" stroke="#71717a" strokeDasharray="4 4" dot={false} strokeWidth={2} />
-                      <Line dataKey="hours" stroke="#60a5fa" dot={false} strokeWidth={3} />
-                    </RechartsLineChart>
-                  </ResponsiveContainer>
-                </ChartFrame>
+          </details>
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Imported Measurements</p>
+                <p className="mt-1 text-sm font-semibold text-white">Body composition snapshot</p>
               </div>
-              <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
-                <p className="text-sm font-semibold text-white">Sleep consistency</p>
-                {sleepChartData.some((entry) => entry.bedtime !== null || entry.wake !== null) ? (
-                  <ChartFrame className="mt-3 h-56">
-                    <ResponsiveContainer width="100%" height="100%">
-                      <RechartsLineChart data={sleepChartData}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                        <XAxis dataKey="date" hide />
-                        <YAxis domain={[0, 24]} tick={{ fill: "#a1a1aa", fontSize: 12 }} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
-                        <Line dataKey="bedtime" stroke="#a78bfa" dot={false} strokeWidth={3} />
-                        <Line dataKey="wake" stroke="#34d399" dot={false} strokeWidth={3} />
-                      </RechartsLineChart>
-                    </ResponsiveContainer>
-                  </ChartFrame>
-                ) : (
-                  <div className="mt-3 flex h-56 items-center rounded-lg border border-dashed border-white/10 bg-black/10 p-4 text-sm leading-6 text-zinc-400">
-                    Bedtime and wake-time trends will appear once Fitbit / Google Fit provides sleep start and end times.
-                  </div>
-                )}
-              </div>
-            </div>
-            <div className="rounded-lg border border-blue-300/15 bg-blue-300/[0.045] p-4">
-              <p className="text-sm font-semibold text-blue-100">Recovery impact</p>
-              <p className="mt-2 text-sm leading-6 text-zinc-300">{recoveryImpact}</p>
-            </div>
-            {adaptiveRecoveryStatus || adaptiveRecoveryImplication ? (
-              <div className="rounded-lg border border-emerald-300/15 bg-emerald-300/[0.045] p-4">
-                <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                  <div>
-                    <p className="text-sm font-semibold text-emerald-100">Nutrition impact</p>
-                    <p className="mt-2 text-sm leading-6 text-zinc-300">{adaptiveRecoveryImplication || "Adaptive data temporarily unavailable."}</p>
-                  </div>
-                  <span className="w-fit rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold capitalize text-emerald-100">
-                    {adaptiveRecoveryStatus || "insufficient data"}
-                  </span>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4 grid gap-3 sm:grid-cols-2">
+              {[
+                ["Body Fat %", formatMetricValue(latestWithingsBodyFat?.bodyFat, "%", 1), latestWithingsBodyFat?.date],
+                ["Lean Mass", metricCardValue(latestWithingsLeanMass, "leanMass"), latestWithingsLeanMass?.date],
+                ["Fat Mass", metricCardValue(latestWithingsFatMass, "fatMass"), latestWithingsFatMass?.date],
+                ["Muscle Mass", metricCardValue(latestWithingsMuscleMass, "muscleMass"), latestWithingsMuscleMass?.date],
+              ].map(([label, value, date]) => (
+                <div key={label} className="rounded-lg border border-white/10 bg-black/15 p-3">
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                  <p className="mt-1 text-lg font-semibold text-white">{value}</p>
+                  <p className="mt-1 text-xs text-zinc-500">{date || "No imported value yet"}</p>
                 </div>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <EmptyState title="Sleep tracking will appear here once Fitbit / Google Fit is connected." description="Manual recovery sleep entries and future wearable sleep stages will power duration, consistency, and quality trends." action="Connect wearable" onAction={() => undefined} />
-        )}
-      </Card>
-
-      <Card>
-        <SectionHeader eyebrow="Body" title="Bodyweight entry" />
-        <form onSubmit={onBodySubmit} className="grid gap-4 sm:grid-cols-2">
-          <TextInput label="Date" type="date" value={forms.body.date} onChange={(value) => setForms((state) => ({ ...state, body: { ...state.body, date: value } }))} />
-          <TextInput label="Bodyweight" type="number" value={forms.body.bodyweight} onChange={(value) => setForms((state) => ({ ...state, body: { ...state.body, bodyweight: Number(value) } }))} />
-          <TextInput label="Waist optional" type="number" value={forms.body.waist ?? ""} onChange={(value) => setForms((state) => ({ ...state, body: { ...state.body, waist: value ? Number(value) : null } }))} />
-          <TextInput label="Body fat % optional" type="number" value={forms.body.estimated_body_fat ?? ""} onChange={(value) => setForms((state) => ({ ...state, body: { ...state.body, estimated_body_fat: value ? Number(value) : null } }))} />
-          <TextInput label="Notes" value={forms.body.notes} onChange={(value) => setForms((state) => ({ ...state, body: { ...state.body, notes: value } }))} />
-          <button className="h-11 rounded-lg bg-blue-300 text-sm font-semibold text-zinc-950">Save bodyweight</button>
-        </form>
-        <div className="mt-4">
-          {bodyMetrics.length ? <DataTable rows={bodyMetrics.slice(-5).reverse()} /> : <EmptyState title="Enter your first bodyweight entry" description="Trend feedback needs at least two saved bodyweight entries." action="Use form above" onAction={() => undefined} />}
+              ))}
+            </div>
+          </details>
         </div>
       </Card>
 
-      <Card>
-        <SectionHeader eyebrow="Recovery" title="Daily check-in" />
-        <form onSubmit={onRecoverySubmit} className="grid gap-4 sm:grid-cols-2">
-          <TextInput label="Date" type="date" value={forms.recovery.date} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, date: value } }))} />
-          <TextInput label="Sleep hours" type="number" value={forms.recovery.sleep_hours} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, sleep_hours: Number(value) } }))} />
-          {(["sleep_quality", "fatigue", "soreness", "stress", "motivation"] as const).map((key) => (
-            <TextInput key={key} label={`${key.replace("_", " ")} (1-10)`} type="number" value={forms.recovery[key]} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, [key]: Number(value) } }))} />
+      <Card className="space-y-5">
+        <SectionHeader
+          eyebrow="Recovery / Sleep / Health Signals"
+          title="Wearable Intelligence"
+          action={latestWearable || googleHealth?.date ? (
+            <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
+              Latest {googleHealth?.date || latestWearable?.date}
+            </span>
+          ) : null}
+        />
+        <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
+          {recoverySummaryCards.map((card) => <AnalyticsStatTile key={card.label} {...card} />)}
+        </div>
+        <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessStatus))}>
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <p className="text-sm font-semibold text-white">{sicknessLabel}</p>
+              <p className="mt-2 text-sm leading-6 text-zinc-300">
+                {sicknessStatus === "warning"
+                  ? "Possible elevated recovery stress. Consider reducing intensity today and prioritize hydration and sleep."
+                  : sicknessStatus === "watch"
+                    ? "One recovery signal is outside baseline. Keep intensity flexible and watch how you feel."
+                    : "No multi-signal sickness pattern from available wearable data."}
+              </p>
+              <p className="mt-1 text-[11px] text-zinc-500">{sicknessWarning?.disclaimer || trainingReadiness?.sickness_warning?.disclaimer || "This is not a medical diagnosis."}</p>
+            </div>
+            <span className="w-fit rounded-full border border-white/10 bg-black/15 px-3 py-1 text-xs font-semibold capitalize text-zinc-100">
+              {sicknessStatus.replaceAll("_", " ")}
+            </span>
+          </div>
+          {sicknessSignals.length ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {sicknessSignals.slice(0, 7).map((signal) => <span key={signal} className="rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs text-zinc-100">{signal}</span>)}
+            </div>
+          ) : null}
+        </div>
+        {wearableFlags.length ? <p className="rounded-lg border border-white/10 bg-white/[0.025] p-3 text-sm leading-6 text-zinc-300">{wearableFlags[0]}</p> : null}
+        <div className="grid gap-4 lg:grid-cols-2">
+          <AnalyticsChartBlock title="Sleep duration trend" empty={!sleepDurationData.length}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={sleepDurationData}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis domain={[0, 10]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Line dataKey="target" stroke="#71717a" strokeDasharray="4 4" dot={false} strokeWidth={2} />
+                  <Line dataKey="hours" stroke="#60a5fa" dot={false} strokeWidth={3} />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+          <AnalyticsChartBlock title="Sleep stages" empty={!sleepStageData.length}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={sleepStageData}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Bar dataKey="deep" stackId="sleep" fill="#60a5fa" radius={[0, 0, 4, 4]} />
+                  <Bar dataKey="rem" stackId="sleep" fill="#a78bfa" />
+                  <Bar dataKey="light" stackId="sleep" fill="#34d399" />
+                  <Bar dataKey="awake" stackId="sleep" fill="#fbbf24" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+          <AnalyticsChartBlock title="Resting HR trend" empty={!heartTrendData.some((entry) => entry.restingHr !== null)}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={heartTrendData}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Line type="monotone" dataKey="restingHr" stroke="#fb7185" dot={false} strokeWidth={3} connectNulls />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+          <AnalyticsChartBlock title="HRV trend" empty={!heartTrendData.some((entry) => entry.hrv !== null)}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <RechartsLineChart data={heartTrendData}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Line type="monotone" dataKey="hrv" stroke="#a78bfa" dot={false} strokeWidth={3} connectNulls />
+                </RechartsLineChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+          <AnalyticsChartBlock title="Readiness trend" empty={!readinessTrendData.length}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={readinessTrendData}>
+                  <defs>
+                    <linearGradient id="readinessTrendFill" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0%" stopColor="#34d399" stopOpacity={0.24} />
+                      <stop offset="100%" stopColor="#34d399" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis domain={[0, 100]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Area type="monotone" dataKey="recoveryScore" stroke="#34d399" strokeWidth={3} fill="url(#readinessTrendFill)" dot={false} />
+                </AreaChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+          <AnalyticsChartBlock title="Activity load trend" empty={!activityTrendData.length}>
+            <ChartFrame className="mt-3 h-52">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={activityTrendData}>
+                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={38} />
+                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <Bar dataKey="activeMinutes" fill="#34d399" radius={[4, 4, 0, 0]} />
+                  <Bar dataKey="activeZoneMinutes" fill="#fbbf24" radius={[4, 4, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </ChartFrame>
+          </AnalyticsChartBlock>
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {[
+            ["REM sleep", formatAnalyticsNumber(remMinutes, "m"), "Restorative sleep signal"],
+            ["Deep sleep", formatAnalyticsNumber(deepMinutes, "m"), "Physical recovery signal"],
+            ["Light sleep", formatAnalyticsNumber(lightMinutes, "m"), "Stage total when available"],
+            ["Awake time", formatAnalyticsNumber(awakeMinutes, "m"), "Sleep fragmentation context"],
+            ["Calories burned", formatAnalyticsNumber(caloriesBurned, " kcal"), "Activity context only"],
+            ["Workout HR", `${formatAnalyticsNumber(latestWearable?.workout_average_hr, " bpm")} avg / ${formatAnalyticsNumber(latestWearable?.workout_max_hr, " bpm")} max`, "Workout intensity if available"],
+            ["Breathing rate", formatAnalyticsNumber(breathingRate, "/min", 1), "Optional health signal"],
+            ["SpO2 / temp", `${formatAnalyticsNumber(spo2, "%")} / ${formatAnalyticsNumber(skinTemperature ?? bodyTemperature, "", 1)}`, "Optional sickness-warning inputs"],
+          ].map(([label, value, detail]) => (
+            <div key={label} className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
+              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+              <p className="mt-1 text-sm font-semibold text-white">{value}</p>
+              <p className="mt-1 text-xs text-zinc-500">{detail}</p>
+            </div>
           ))}
-          <TextInput label="Resting HR optional" type="number" value={forms.recovery.resting_hr ?? ""} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, resting_hr: value ? Number(value) : null } }))} />
-          <TextInput label="HRV optional" type="number" value={forms.recovery.hrv ?? ""} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, hrv: value ? Number(value) : null } }))} />
-          <TextInput label="Notes" value={forms.recovery.notes} onChange={(value) => setForms((state) => ({ ...state, recovery: { ...state.recovery, notes: value } }))} />
-          <button className="h-11 rounded-lg bg-emerald-300 text-sm font-semibold text-zinc-950">Save check-in</button>
-        </form>
-        <div className="mt-4">
-          {recoveryLogs.length ? <DataTable rows={recoveryLogs.slice(-5).reverse()} /> : <EmptyState title="No recovery check-in yet" description="Submit sleep, fatigue, soreness, stress, and motivation to generate readiness trends." action="Use form above" onAction={() => undefined} />}
+        </div>
+        <div className="space-y-3">
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+                <p className="mt-1 text-sm font-semibold text-white">Sleep and wearable rows</p>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4 space-y-4">
+              {wearableMetrics.length ? <DataTable rows={wearableMetrics.slice(-8).reverse()} /> : <p className="text-sm text-zinc-400">Wearable metrics will appear here after Google Health / Fitbit sync.</p>}
+              {sleepEntries.length ? <DataTable rows={sleepEntries.slice(-8).reverse()} /> : null}
+            </div>
+          </details>
+          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Fallback Logs</p>
+                <p className="mt-1 text-sm font-semibold text-white">Manual recovery history</p>
+              </div>
+              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+            </summary>
+            <div className="mt-4">
+              {recoveryLogs.length ? <DataTable rows={recoveryLogs.slice(-8).reverse()} /> : <p className="text-sm text-zinc-400">Manual recovery check-ins are de-emphasized; wearable sync is the primary source.</p>}
+            </div>
+          </details>
         </div>
       </Card>
     </div>
@@ -11925,13 +11976,6 @@ function formatSleepDuration(minutes?: number | null) {
   return `${hours}h ${mins.toString().padStart(2, "0")}m`;
 }
 
-function sleepClockHour(value: string) {
-  if (!value) return null;
-  const date = new Date(value);
-  if (!Number.isFinite(date.getTime())) return null;
-  return date.getHours() + date.getMinutes() / 60;
-}
-
 function initialPageFromUrl(): PageId {
   if (typeof window === "undefined") return "dashboard";
   const page = new URLSearchParams(window.location.search).get("page");
@@ -14201,6 +14245,8 @@ function HomeContent() {
         wearableSignals={wearableSignals}
         trainingReadiness={trainingReadiness}
         adaptiveRecommendation={dashboard?.adaptive_recommendation ?? null}
+        googleHealth={dashboard?.google_health ?? null}
+        dashboardRecovery={dashboard?.recovery ?? null}
         withingsLastSyncedAt={
           settings?.withings?.last_successful_sync
           ?? settings?.services?.withings?.last_synced_at
