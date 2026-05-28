@@ -152,46 +152,53 @@ def test_fitbit_fetch_daily_metrics_parses_sleep_heart_and_activity(monkeypatch)
     assert int(normalized.iloc[0]["hrv"]) == 61
 
 
-def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
-    def fake_get_json(_url, _access_token, **_kwargs):
-        return {
-            "dataSource": [
-                {"dataType": {"name": "com.google.step_count.delta"}},
-                {"dataType": {"name": "com.google.calories.expended"}},
-                {"dataType": {"name": "com.google.active_minutes"}},
-                {"dataType": {"name": "com.google.sleep.segment"}},
-                {"dataType": {"name": "com.google.heart_rate.summary"}},
-            ]
-        }
+def test_google_health_api_v4_response_normalizes_daily_metrics(monkeypatch):
+    day = {"year": 2024, "month": 5, "day": 16}
+    monkeypatch.setenv("GOOGLE_HEALTH_API_BASE_URL", "https://health.googleapis.com")
 
-    def fake_post_json(_url, body, _access_token, **_kwargs):
-        requested = {item["dataTypeName"] for item in body.get("aggregateBy", [])}
-        points = []
-        if "com.google.step_count.delta" in requested:
-            points.append({"dataTypeName": "com.google.step_count.delta", "value": [{"intVal": 9000}]})
-        if "com.google.calories.expended" in requested:
-            points.append({"dataTypeName": "com.google.calories.expended", "value": [{"fpVal": 2450.5}]})
-        if "com.google.active_minutes" in requested:
-            points.append({"dataTypeName": "com.google.active_minutes", "value": [{"intVal": 62}]})
-        if "com.google.sleep.segment" in requested:
-            points.append(
-                {
-                    "dataTypeName": "com.google.sleep.segment",
-                    "startTimeNanos": "0",
-                    "endTimeNanos": "3600000000000",
-                    "value": [{"intVal": 6}],
-                }
-            )
-        if "com.google.heart_rate.summary" in requested:
-            points.append({"dataTypeName": "com.google.heart_rate.summary", "value": [{"fpVal": 62}, {"fpVal": 151}, {"fpVal": 48}]})
-        return {
-            "bucket": [
-                {
-                    "startTimeMillis": 1_715_817_600_000,
-                    "dataset": [{"point": points}],
-                }
-            ]
-        }
+    def fake_get_json(url, _access_token, **_kwargs):
+        if "/pairedDevices" in url:
+            return {"pairedDevices": [{"displayName": "Pixel Watch", "manufacturer": "Google", "model": "PW"}]}
+        if "/dataTypes/sleep/" in url:
+            return {
+                "dataPoints": [
+                    {
+                        "sleep": {
+                            "interval": {"civilEndTime": {"date": day}},
+                            "summary": {
+                                "minutesAsleep": 480,
+                                "minutesAwake": 30,
+                                "stagesSummary": [
+                                    {"type": "REM", "minutes": 60},
+                                    {"type": "DEEP", "minutes": 70},
+                                    {"type": "LIGHT", "minutes": 350},
+                                ],
+                            },
+                        }
+                    }
+                ]
+            }
+        if "/dataTypes/daily-resting-heart-rate/" in url:
+            return {"dataPoints": [{"dailyRestingHeartRate": {"date": day, "beatsPerMinute": 48}}]}
+        if "/dataTypes/daily-heart-rate-variability/" in url:
+            return {"dataPoints": [{"dailyHeartRateVariability": {"date": day, "averageHeartRateVariabilityMilliseconds": 61}}]}
+        return {"dataPoints": []}
+
+    def fake_post_json(url, _body, _access_token, **_kwargs):
+        assert "health.googleapis.com" in url
+        if "/dataTypes/steps/" in url:
+            value = {"steps": {"countSum": "9000"}}
+        elif "/dataTypes/total-calories/" in url:
+            value = {"totalCalories": {"kcalSum": 2450.5}}
+        elif "/dataTypes/active-minutes/" in url:
+            value = {"activeMinutes": {"activeMinutesRollupByActivityLevel": [{"activeMinutesSum": 62}]}}
+        elif "/dataTypes/active-zone-minutes/" in url:
+            value = {"activeZoneMinutes": {"sumInCardioHeartZone": 12, "sumInPeakHeartZone": 5, "sumInFatBurnHeartZone": 10}}
+        elif "/dataTypes/heart-rate/" in url:
+            value = {"heartRate": {"beatsPerMinuteAvg": 62, "beatsPerMinuteMax": 151, "beatsPerMinuteMin": 48}}
+        else:
+            value = {}
+        return {"rollupDataPoints": [{"civilStartTime": {"date": day}, **value}]}
 
     monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
     monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
@@ -200,10 +207,12 @@ def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
     normalized = google_health_client.normalize_daily_metrics(fetched["items"])
 
     assert fetched["status"] == "ok"
+    assert fetched["api_path"] == "google_health_v4"
+    assert fetched["deprecated_fitness_api_unused"] is True
     assert normalized.iloc[0]["source"] == "google_health"
     assert int(normalized.iloc[0]["steps"]) == 9000
     assert int(normalized.iloc[0]["active_minutes"]) == 62
-    assert normalized.iloc[0]["sleep_hours"] == 1
+    assert normalized.iloc[0]["sleep_hours"] == 8
     assert int(normalized.iloc[0]["rem_sleep_minutes"]) == 60
     assert int(normalized.iloc[0]["resting_hr"]) == 48
     assert fetched["records"]["sleep"][0]["rem_sleep_minutes"] == 60
@@ -213,32 +222,40 @@ def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
 
 
 def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
-    requested_batches = []
+    requested_urls = []
+    day = {"year": 2024, "month": 5, "day": 16}
+    monkeypatch.setenv("GOOGLE_HEALTH_API_BASE_URL", "https://health.googleapis.com")
 
-    def fake_get_json(_url, _access_token, **_kwargs):
-        return {"dataSource": [{"dataType": {"name": "com.google.step_count.delta"}}]}
+    def fake_get_json(url, _access_token, **_kwargs):
+        requested_urls.append(url)
+        if "/pairedDevices" in url:
+            return {"pairedDevices": []}
+        if "/dataTypes/sleep/" in url:
+            return {
+                "dataPoints": [
+                    {
+                        "sleep": {
+                            "interval": {"civilEndTime": {"date": day}},
+                            "summary": {"minutesAsleep": 420, "minutesAwake": 30, "stagesSummary": []},
+                        }
+                    }
+                ]
+            }
+        return {"dataPoints": []}
 
-    def fake_post_json(_url, body, _access_token, **_kwargs):
-        requested = {item["dataTypeName"] for item in body.get("aggregateBy", [])}
-        requested_batches.append(requested)
-        assert "com.google.heart_rate.summary" not in requested
-        points = []
-        if "com.google.step_count.delta" in requested:
-            points.append({"dataTypeName": "com.google.step_count.delta", "value": [{"intVal": 8000}]})
-        if "com.google.calories.expended" in requested:
-            points.append({"dataTypeName": "com.google.calories.expended", "value": [{"fpVal": 2400}]})
-        if "com.google.active_minutes" in requested:
-            points.append({"dataTypeName": "com.google.active_minutes", "value": [{"intVal": 45}]})
-        if "com.google.sleep.segment" in requested:
-            points.append(
-                {
-                    "dataTypeName": "com.google.sleep.segment",
-                    "startTimeNanos": "0",
-                    "endTimeNanos": "28800000000000",
-                    "value": [{"intVal": 4}],
-                }
-            )
-        return {"bucket": [{"startTimeMillis": 1_715_817_600_000, "dataset": [{"point": points}]}]}
+    def fake_post_json(url, _body, _access_token, **_kwargs):
+        requested_urls.append(url)
+        if "/dataTypes/steps/" in url:
+            value = {"steps": {"countSum": "8000"}}
+        elif "/dataTypes/total-calories/" in url:
+            value = {"totalCalories": {"kcalSum": 2400}}
+        elif "/dataTypes/active-minutes/" in url:
+            value = {"activeMinutes": {"activeMinutesRollupByActivityLevel": [{"activeMinutesSum": 45}]}}
+        elif "/dataTypes/heart-rate/" in url:
+            value = {}
+        else:
+            value = {}
+        return {"rollupDataPoints": [{"civilStartTime": {"date": day}, **value}]}
 
     monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
     monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
@@ -251,15 +268,19 @@ def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
     assert fetched["required_metric_failures"] == []
     assert len(normalized) == 1
     assert normalized.iloc[0]["resting_hr"] is None
-    assert requested_batches
+    assert requested_urls
 
 
-def test_google_health_no_available_sources_does_not_return_placeholder_rows(monkeypatch):
-    def fake_get_json(_url, _access_token, **_kwargs):
-        return {"dataSource": []}
+def test_google_health_empty_api_responses_do_not_return_placeholder_rows(monkeypatch):
+    monkeypatch.setenv("GOOGLE_HEALTH_API_BASE_URL", "https://health.googleapis.com")
+
+    def fake_get_json(url, _access_token, **_kwargs):
+        if "/pairedDevices" in url:
+            return {"pairedDevices": []}
+        return {"dataPoints": []}
 
     def fake_post_json(_url, _body, _access_token, **_kwargs):
-        raise AssertionError("Google Health aggregate should not run when source discovery is empty.")
+        return {"rollupDataPoints": []}
 
     monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
     monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
@@ -272,6 +293,7 @@ def test_google_health_no_available_sources_does_not_return_placeholder_rows(mon
     assert normalized.empty
     assert fetched["data_available"] is False
     assert fetched["data_sources"]["data_source_count"] == 0
+    assert fetched["api_path"] == "google_health_v4"
     assert google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE in fetched["warnings"]
     assert fetched["recommended_next_action"] == google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE
 

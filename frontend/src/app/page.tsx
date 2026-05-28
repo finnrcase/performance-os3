@@ -1523,13 +1523,18 @@ type GoogleHealthSourcesDebugPayload = {
   available_data_sources: Array<Record<string, unknown>>;
   available_data_types: string[];
   data_source_count: number;
+  paired_device_count?: number;
   source_status?: string;
   source_error?: string;
+  api_base_url?: string;
   api_path?: string;
   api_path_label?: string;
+  google_fit_unused?: boolean;
+  deprecated_fitness_api_unused?: boolean;
   phone_app_data_note?: string;
   fallback_plan?: string[];
   last_raw_responses?: Record<string, unknown>;
+  populated_fields_by_metric?: Record<string, number>;
   populated_metric_counts_by_day?: Record<string, number>;
   fields_populated_count?: number;
   fields_missing_count?: number;
@@ -11924,6 +11929,7 @@ function GoogleHealthSourcesDebugPanel({
   const sync = debug?.last_sync;
   const rawResponseEntries = Object.entries(debug?.last_raw_responses ?? {});
   const metricCounts = Object.entries(debug?.populated_metric_counts_by_day ?? {}).slice(-7).reverse();
+  const populatedFieldEntries = Object.entries(debug?.populated_fields_by_metric ?? {}).filter(([, count]) => Number(count) > 0);
   const sourcePreview = (debug?.available_data_sources ?? []).slice(0, 6);
   return (
     <Card>
@@ -11949,8 +11955,13 @@ function GoogleHealthSourcesDebugPanel({
               Token: {debug.token_status?.replaceAll("_", " ") || "missing"}
             </span>
             <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", fitbitFreshnessClass(debug.data_source_count > 0 ? "green" : debug.connected ? "yellow" : "red"))}>
-              Sources: {debug.data_source_count}
+              Paired devices: {debug.paired_device_count ?? debug.data_source_count}
             </span>
+            {debug.deprecated_fitness_api_unused ? (
+              <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs font-semibold text-emerald-100">
+                Google Fit unused
+              </span>
+            ) : null}
           </div>
           {debug.recommended_next_action ? (
             <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">{debug.recommended_next_action}</p>
@@ -11962,8 +11973,9 @@ function GoogleHealthSourcesDebugPanel({
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Backend API path</p>
-              <p className="mt-2 text-sm font-semibold text-white">{debug.api_path_label || "Google Fit REST API"}</p>
-              <p className="mt-1 text-xs text-zinc-500">{debug.api_path || "google_fit_rest"}</p>
+              <p className="mt-2 text-sm font-semibold text-white">{debug.api_path_label || "Google Health API v4"}</p>
+              <p className="mt-1 text-xs text-zinc-500">{debug.api_path || "google_health_v4"}</p>
+              {debug.api_base_url ? <p className="mt-1 break-all text-xs text-zinc-500">{debug.api_base_url}</p> : null}
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Granted scopes</p>
@@ -11972,7 +11984,7 @@ function GoogleHealthSourcesDebugPanel({
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Available data types</p>
               <p className="mt-2 text-sm font-semibold text-white">{debug.available_data_types?.length ? debug.available_data_types.length.toLocaleString() : "0"}</p>
-              <p className="mt-1 line-clamp-2 text-xs text-zinc-500">{debug.available_data_types?.slice(0, 5).join(", ") || "No Google Fit data types returned."}</p>
+              <p className="mt-1 line-clamp-2 text-xs text-zinc-500">{debug.available_data_types?.slice(0, 5).join(", ") || "No Google Health API data types recorded."}</p>
             </div>
             <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
               <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Last sync</p>
@@ -11982,18 +11994,18 @@ function GoogleHealthSourcesDebugPanel({
           </div>
           <div className="grid gap-3 lg:grid-cols-2">
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">
-              <p className="text-sm font-semibold text-white">Available sources</p>
+              <p className="text-sm font-semibold text-white">Paired devices</p>
               {sourcePreview.length ? (
                 <div className="mt-2 space-y-2">
                   {sourcePreview.map((source, index) => (
-                    <div key={`${index}-${String(source.data_stream_id ?? source.data_type_name ?? "")}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-2 text-xs leading-5 text-zinc-400">
-                      <p className="font-semibold text-zinc-200">{String(source.data_type_name ?? "Unknown data type")}</p>
-                      <p className="break-all text-zinc-500">{String(source.data_stream_id ?? "")}</p>
+                    <div key={`${index}-${String(source.data_stream_id ?? source.display_name ?? source.data_type_name ?? "")}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-2 text-xs leading-5 text-zinc-400">
+                      <p className="font-semibold text-zinc-200">{String(source.display_name ?? source.name ?? source.data_type_name ?? "Paired device")}</p>
+                      <p className="break-all text-zinc-500">{String(source.data_stream_id ?? source.platform ?? "")}</p>
                     </div>
                   ))}
                 </div>
               ) : (
-                <p className="mt-2 text-xs leading-5 text-zinc-500">No data sources returned by the current Google Fit REST API token.</p>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">No paired devices returned by Google Health API. Sync may still work if Health API returns data points.</p>
               )}
             </div>
             <div className="rounded-lg border border-white/10 bg-black/20 p-3">
@@ -12001,24 +12013,32 @@ function GoogleHealthSourcesDebugPanel({
               {rawResponseEntries.length ? (
                 <div className="mt-2 space-y-2 text-xs leading-5 text-zinc-400">
                   {rawResponseEntries.map(([key, value]) => {
-                    const item = value as { status?: string; bucket_count?: number; point_count?: number; requested_data_types?: string[] };
+                    const item = value as { status?: string; bucket_count?: number; point_count?: number; populated_point_count?: number; endpoint?: string; requested_data_types?: string[] };
                     return (
                       <div key={key} className="rounded-lg border border-white/10 bg-white/[0.035] p-2">
                         <p className="font-semibold text-zinc-200">{key}: {item.status || "unknown"}</p>
-                        <p>Buckets {item.bucket_count ?? 0} · Points {item.point_count ?? 0}</p>
+                        <p>{item.endpoint || "Health API"} · Points {item.point_count ?? 0} · Populated {item.populated_point_count ?? 0}</p>
                         <p className="text-zinc-500">{item.requested_data_types?.join(", ") || "No requested types recorded"}</p>
                       </div>
                     );
                   })}
                 </div>
               ) : (
-                <p className="mt-2 text-xs leading-5 text-zinc-500">No aggregate responses recorded. This usually means source discovery returned zero compatible data types.</p>
+                <p className="mt-2 text-xs leading-5 text-zinc-500">No Health API rollup/list responses recorded yet.</p>
               )}
               {metricCounts.length ? (
                 <div className="mt-3 border-t border-white/10 pt-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Populated metrics by day</p>
                   <div className="mt-2 grid gap-1 text-xs text-zinc-400">
                     {metricCounts.map(([day, count]) => <p key={day}>{day}: <span className="text-zinc-200">{count}</span></p>)}
+                  </div>
+                </div>
+              ) : null}
+              {populatedFieldEntries.length ? (
+                <div className="mt-3 border-t border-white/10 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Populated fields by metric</p>
+                  <div className="mt-2 grid gap-1 text-xs text-zinc-400">
+                    {populatedFieldEntries.slice(0, 8).map(([metric, count]) => <p key={metric}>{metric}: <span className="text-zinc-200">{count}</span></p>)}
                   </div>
                 </div>
               ) : null}

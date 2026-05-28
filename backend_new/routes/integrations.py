@@ -321,7 +321,7 @@ def _google_health_credentials(settings: dict[str, Any] | None = None) -> tuple[
 
 
 def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]]:
-    from src.integrations.google_health_client import client_credentials, redirect_uri, saved_token_state, scopes
+    from src.integrations.google_health_client import GOOGLE_HEALTH_API_LABEL, GOOGLE_HEALTH_API_PATH, client_credentials, redirect_uri, saved_token_state, scopes
 
     client_id, client_secret = client_credentials(settings)
     redirect_configured = bool(redirect_uri(settings))
@@ -383,10 +383,13 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "data_sources": sync.get("data_sources", {}),
         "available_data_types": sync.get("available_data_types", []),
         "requested_data_types": sync.get("requested_data_types", []),
-        "api_path": sync.get("api_path", "google_fit_rest"),
-        "api_path_label": sync.get("api_path_label", "Google Fit REST API"),
+        "api_path": sync.get("api_path", GOOGLE_HEALTH_API_PATH),
+        "api_path_label": sync.get("api_path_label", GOOGLE_HEALTH_API_LABEL),
+        "api_base_url": sync.get("api_base_url", "https://health.googleapis.com"),
+        "google_fit_unused": bool(sync.get("google_fit_unused", True)),
+        "deprecated_fitness_api_unused": bool(sync.get("deprecated_fitness_api_unused", True)),
         "phone_app_data_note": sync.get("phone_app_data_note", ""),
-        "fallback_plan": sync.get("fallback_plan", []),
+        "fallback_plan": sync.get("fallback_plan", ["google_health_api_v4"]),
         "recommended_next_action": sync.get("recommended_next_action", ""),
         "needs_reconnect": needs_reconnect,
     }
@@ -1167,8 +1170,11 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "optional_metric_warnings": google_health_meta.get("optional_metric_warnings", []),
             "required_metric_failures": google_health_meta.get("required_metric_failures", []),
             "recommended_next_action": google_health_meta.get("recommended_next_action", ""),
-            "api_path": google_health_meta.get("api_path", "google_fit_rest"),
-            "api_path_label": google_health_meta.get("api_path_label", "Google Fit REST API"),
+            "api_path": google_health_meta.get("api_path", "google_health_v4"),
+            "api_path_label": google_health_meta.get("api_path_label", "Google Health API v4"),
+            "api_base_url": google_health_meta.get("api_base_url", "https://health.googleapis.com"),
+            "google_fit_unused": google_health_meta.get("google_fit_unused", True),
+            "deprecated_fitness_api_unused": google_health_meta.get("deprecated_fitness_api_unused", True),
             "phone_app_data_note": google_health_meta.get("phone_app_data_note", ""),
             "available_data_types": google_health_meta.get("available_data_types", []),
             "empty_date_rows_count": google_health_meta.get("empty_date_rows_count", 0),
@@ -1859,7 +1865,16 @@ def debug_google_health(request: Request) -> dict[str, Any]:
 
 @router.get("/api/debug/google-health/sources")
 def debug_google_health_sources() -> dict[str, Any]:
-    from src.integrations.google_health_client import GOOGLE_HEALTH_NO_SOURCES_MESSAGE, list_data_sources, scopes
+    from src.integrations.google_health_client import (
+        GOOGLE_HEALTH_API_LABEL,
+        GOOGLE_HEALTH_API_PATH,
+        GOOGLE_HEALTH_DATA_TYPES,
+        GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE,
+        GOOGLE_HEALTH_NO_SOURCES_MESSAGE,
+        api_base_url,
+        list_data_sources,
+        scopes,
+    )
 
     settings = _settings_document()
     status, metadata = _google_health_status(settings)
@@ -1868,6 +1883,8 @@ def debug_google_health_sources() -> dict[str, Any]:
     tokens = _metadata(settings).get("google_health_tokens")
     tokens = tokens if isinstance(tokens, dict) else {}
     granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
+    has_googlehealth_scope = any("googlehealth." in scope for scope in granted_scopes)
+    has_legacy_fitness_scope = any("/auth/fitness." in scope for scope in granted_scopes)
     payload: dict[str, Any] = {
         "status": "ok" if status == "Connected" else "warning",
         "provider": "google_health",
@@ -1880,13 +1897,19 @@ def debug_google_health_sources() -> dict[str, Any]:
         "requested_scopes": scopes(),
         "granted_scopes": granted_scopes,
         "available_data_sources": [],
-        "available_data_types": [],
+        "available_data_types": sync.get("requested_data_types", GOOGLE_HEALTH_DATA_TYPES),
+        "requested_data_types": sync.get("requested_data_types", GOOGLE_HEALTH_DATA_TYPES),
         "data_source_count": 0,
-        "api_path": sync.get("api_path", "google_fit_rest"),
-        "api_path_label": sync.get("api_path_label", "Google Fit REST API"),
-        "phone_app_data_note": sync.get("phone_app_data_note", "Google Health phone app data can come from Health Connect and may not be visible to this backend API path."),
-        "fallback_plan": sync.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
-        "last_raw_responses": sync.get("raw_aggregate_responses", {}),
+        "paired_device_count": 0,
+        "api_base_url": sync.get("api_base_url", api_base_url()),
+        "api_path": sync.get("api_path", GOOGLE_HEALTH_API_PATH),
+        "api_path_label": sync.get("api_path_label", GOOGLE_HEALTH_API_LABEL),
+        "google_fit_unused": sync.get("google_fit_unused", True),
+        "deprecated_fitness_api_unused": sync.get("deprecated_fitness_api_unused", True),
+        "phone_app_data_note": sync.get("phone_app_data_note", "Google Health API v4 is the primary wearable provider. Deprecated Google Fit/Fitness API endpoints are not used for sync."),
+        "fallback_plan": sync.get("fallback_plan", ["google_health_api_v4"]),
+        "last_raw_responses": sync.get("raw_health_responses", sync.get("raw_aggregate_responses", {})),
+        "populated_fields_by_metric": sync.get("populated_fields_by_metric", {}),
         "populated_metric_counts_by_day": sync.get("populated_metric_counts_by_day", {}),
         "fields_populated_count": sync.get("fields_populated_count", 0),
         "fields_missing_count": sync.get("fields_missing_count", 0),
@@ -1905,6 +1928,9 @@ def debug_google_health_sources() -> dict[str, Any]:
         },
         "recommended_next_action": sync.get("recommended_next_action", ""),
     }
+    if has_legacy_fitness_scope and not has_googlehealth_scope:
+        payload["status"] = "warning"
+        payload["recommended_next_action"] = GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE
     if not metadata.get("connected"):
         payload["recommended_next_action"] = "Connect Google Health OAuth before checking data sources."
         return payload
@@ -1917,11 +1943,19 @@ def debug_google_health_sources() -> dict[str, Any]:
             {
                 "available_data_sources": sources.get("data_sources") or [],
                 "available_data_types": available_types,
+                "requested_data_types": sources.get("available_data_types") or GOOGLE_HEALTH_DATA_TYPES,
                 "data_source_count": data_source_count,
+                "paired_device_count": int(sources.get("paired_device_count") or data_source_count),
+                "api_path": sources.get("api_path", GOOGLE_HEALTH_API_PATH),
+                "api_path_label": sources.get("api_path_label", GOOGLE_HEALTH_API_LABEL),
+                "api_base_url": api_base_url(),
                 "source_status": sources.get("status", "ok"),
             }
         )
-        if data_source_count <= 0:
+        if has_legacy_fitness_scope and not has_googlehealth_scope:
+            payload["status"] = "warning"
+            payload["recommended_next_action"] = GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE
+        elif data_source_count <= 0:
             payload["status"] = "warning"
             payload["recommended_next_action"] = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
     except Exception as exc:
@@ -1930,7 +1964,7 @@ def debug_google_health_sources() -> dict[str, Any]:
                 "status": "error",
                 "source_status": "error",
                 "source_error": str(exc),
-                "recommended_next_action": "Google Health token is connected, but source discovery failed. Check scopes and reconnect if this persists.",
+                "recommended_next_action": "Google Health token is connected, but paired device discovery failed. Check googlehealth.* scopes and reconnect if this persists.",
             }
         )
     return payload
@@ -2014,7 +2048,7 @@ def _save_google_health_records(records: dict[str, Any] | None) -> dict[str, Any
 
 @router.post("/api/google-health/sync")
 def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
-    from src.integrations.google_health_client import fetch_daily_metrics, normalize_daily_metrics
+    from src.integrations.google_health_client import GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE, fetch_daily_metrics, normalize_daily_metrics
 
     payload = payload or {}
     sync_run_id = f"google_health_sync:{uuid4()}"
@@ -2029,6 +2063,10 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
     logger.info("[google_health] sync started run_id=%s start=%s end=%s days=%s", sync_run_id, start_date, end_date, days)
     try:
         access_token = _google_health_access_token()
+        token_state = _metadata().get("google_health_tokens")
+        granted_scopes = str((token_state if isinstance(token_state, dict) else {}).get("scopes") or "").split()
+        if any("/auth/fitness." in scope for scope in granted_scopes) and not any("googlehealth." in scope for scope in granted_scopes):
+            raise RuntimeError(GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE)
         fetched = fetch_daily_metrics(access_token, start_date=start_date, end_date=end_date)
         if fetched.get("status") != "ok":
             raise RuntimeError(str(fetched.get("message") or "Google Health sync failed."))
@@ -2087,7 +2125,7 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "needs_reconnect": False,
                 "last_imported_count": rows_saved,
                 "rows_saved": rows_saved,
-                "last_fetched_count": int(fetched.get("raw_bucket_count") or len(fetched.get("items") or [])),
+                "last_fetched_count": int(fetched.get("raw_response_count") or fetched.get("raw_bucket_count") or len(fetched.get("items") or [])),
                 "latest_record": latest_record,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -2107,14 +2145,19 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
                 "requested_data_types": fetched.get("requested_data_types") or [],
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
-                "api_path": fetched.get("api_path", "google_fit_rest"),
-                "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+                "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+                "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
+                "api_path": fetched.get("api_path", "google_health_v4"),
+                "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
+                "google_fit_unused": fetched.get("google_fit_unused", True),
+                "deprecated_fitness_api_unused": fetched.get("deprecated_fitness_api_unused", True),
                 "phone_app_data_note": fetched.get("phone_app_data_note", ""),
-                "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+                "fallback_plan": fetched.get("fallback_plan", ["google_health_api_v4"]),
                 "empty_date_rows_count": int(fetched.get("empty_date_rows_count") or 0),
                 "empty_date_rows": fetched.get("empty_date_rows") or [],
                 "placeholder_rows_count": int(fetched.get("empty_date_rows_count") or 0),
                 "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
+                "populated_fields_by_metric": fetched.get("populated_fields_by_metric") or {},
                 "recommended_next_action": recommended_next_action,
             }
         )
@@ -2158,13 +2201,18 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
                 "requested_data_types": fetched.get("requested_data_types") or [],
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
-                "api_path": fetched.get("api_path", "google_fit_rest"),
-                "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+                "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+                "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
+                "api_path": fetched.get("api_path", "google_health_v4"),
+                "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
+                "google_fit_unused": fetched.get("google_fit_unused", True),
+                "deprecated_fitness_api_unused": fetched.get("deprecated_fitness_api_unused", True),
                 "phone_app_data_note": fetched.get("phone_app_data_note", ""),
-                "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+                "fallback_plan": fetched.get("fallback_plan", ["google_health_api_v4"]),
                 "empty_date_rows_count": int(fetched.get("empty_date_rows_count") or 0),
                 "empty_date_rows": fetched.get("empty_date_rows") or [],
                 "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
+                "populated_fields_by_metric": fetched.get("populated_fields_by_metric") or {},
                 "recommended_next_action": recommended_next_action,
             },
         )
@@ -2195,10 +2243,15 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "requested_scopes": fetched.get("requested_scopes") or [],
             "requested_data_types": fetched.get("requested_data_types") or [],
             "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
-            "api_path": fetched.get("api_path", "google_fit_rest"),
-            "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+            "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
+            "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
+            "api_path": fetched.get("api_path", "google_health_v4"),
+            "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
+            "google_fit_unused": fetched.get("google_fit_unused", True),
+            "deprecated_fitness_api_unused": fetched.get("deprecated_fitness_api_unused", True),
             "phone_app_data_note": fetched.get("phone_app_data_note", ""),
-            "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+            "fallback_plan": fetched.get("fallback_plan", ["google_health_api_v4"]),
+            "populated_fields_by_metric": fetched.get("populated_fields_by_metric") or {},
             "recommended_next_action": recommended_next_action,
             "date_range": {"start_date": start_date, "end_date": end_date},
         }

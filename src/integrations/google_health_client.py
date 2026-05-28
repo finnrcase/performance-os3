@@ -22,49 +22,48 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_HEALTH_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 GOOGLE_HEALTH_TOKEN_URL = "https://oauth2.googleapis.com/token"
-DEFAULT_GOOGLE_HEALTH_API_BASE_URL = "https://www.googleapis.com/fitness/v1"
 GOOGLE_HEALTH_SCOPES = [
-    "https://www.googleapis.com/auth/fitness.activity.read",
-    "https://www.googleapis.com/auth/fitness.body.read",
-    "https://www.googleapis.com/auth/fitness.body_temperature.read",
-    "https://www.googleapis.com/auth/fitness.heart_rate.read",
-    "https://www.googleapis.com/auth/fitness.location.read",
-    "https://www.googleapis.com/auth/fitness.oxygen_saturation.read",
-    "https://www.googleapis.com/auth/fitness.sleep.read",
+    "https://www.googleapis.com/auth/googlehealth.activity_and_fitness.readonly",
+    "https://www.googleapis.com/auth/googlehealth.health_metrics_and_measurements.readonly",
+    "https://www.googleapis.com/auth/googlehealth.sleep.readonly",
+    "https://www.googleapis.com/auth/googlehealth.profile.readonly",
+    "https://www.googleapis.com/auth/googlehealth.settings.readonly",
 ]
-GOOGLE_HEALTH_CORE_AGGREGATE_TYPES = [
-    "com.google.step_count.delta",
-    "com.google.calories.expended",
-    "com.google.active_minutes",
-    "com.google.sleep.segment",
+DEFAULT_GOOGLE_HEALTH_API_BASE_URL = "https://health.googleapis.com"
+GOOGLE_HEALTH_API_PATH = "google_health_v4"
+GOOGLE_HEALTH_API_LABEL = "Google Health API v4"
+GOOGLE_HEALTH_DAILY_ROLLUP_TYPES = [
+    "steps",
+    "total-calories",
+    "active-energy-burned",
+    "active-minutes",
+    "active-zone-minutes",
+    "distance",
+    "heart-rate",
 ]
-GOOGLE_HEALTH_HEART_RATE_AGGREGATE_TYPES = [
-    "com.google.heart_rate.summary",
-    "com.google.heart_rate.bpm",
+GOOGLE_HEALTH_DAILY_POINT_TYPES = [
+    "daily-resting-heart-rate",
+    "daily-heart-rate-variability",
+    "daily-oxygen-saturation",
+    "daily-sleep-temperature-derivations",
 ]
-GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING = "Optional heart rate summary unavailable from Google Health."
+GOOGLE_HEALTH_SESSION_POINT_TYPES = [
+    "sleep",
+    "respiratory-rate-sleep-summary",
+]
+GOOGLE_HEALTH_DATA_TYPES = [
+    *GOOGLE_HEALTH_DAILY_ROLLUP_TYPES,
+    *GOOGLE_HEALTH_DAILY_POINT_TYPES,
+    *GOOGLE_HEALTH_SESSION_POINT_TYPES,
+]
+GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING = "Optional heart rate metrics unavailable from Google Health."
 GOOGLE_HEALTH_NO_SOURCES_MESSAGE = (
-    "Google Health connected, but this API path does not expose the wearable data shown in the phone app. "
-    "Use direct Fitbit API sync or a Health Connect export/import path for that data."
+    "Google Health API connected, but no wearable data points were returned for the requested date range. "
+    "Check Google Health API access, OAuth consent scopes, and that the Fitbit/Google Health app has synced recently."
 )
-GOOGLE_HEALTH_OPTIONAL_AGGREGATE_TYPE_BATCHES = [
-    [
-        "com.google.heart_rate.summary",
-    ],
-    [
-        "com.google.heart_minutes.summary",
-        "com.google.distance.delta",
-        "com.google.calories.bmr.summary",
-    ],
-    [
-        "com.google.oxygen_saturation.summary",
-        "com.google.body.temperature.summary",
-    ],
-]
-GOOGLE_HEALTH_AGGREGATE_TYPES = [
-    *GOOGLE_HEALTH_CORE_AGGREGATE_TYPES,
-    *[data_type for batch in GOOGLE_HEALTH_OPTIONAL_AGGREGATE_TYPE_BATCHES for data_type in batch],
-]
+GOOGLE_HEALTH_LEGACY_FITNESS_SCOPES_MESSAGE = (
+    "This token only has deprecated Google Fit/Fitness scopes. Reconnect Google Health to grant googlehealth.* scopes."
+)
 GOOGLE_HEALTH_METRIC_FIELDS = [
     "sleep_hours",
     "total_sleep_minutes",
@@ -98,31 +97,6 @@ GOOGLE_HEALTH_METRIC_FIELDS = [
     "skin_temperature",
     "body_temperature",
 ]
-GOOGLE_HEALTH_DISCOVERY_GROUPS: dict[str, list[str]] = {
-    "steps": ["com.google.step_count.delta"],
-    "calories": ["com.google.calories.expended"],
-    "active_minutes": ["com.google.active_minutes"],
-    "sleep": ["com.google.sleep.segment"],
-    "heart_rate": ["com.google.heart_rate.summary", "com.google.heart_rate.bpm"],
-    "active_zone_minutes": ["com.google.heart_minutes.summary"],
-    "distance": ["com.google.distance.delta"],
-    "basal_calories": ["com.google.calories.bmr.summary"],
-    "oxygen_saturation": ["com.google.oxygen_saturation.summary"],
-    "body_temperature": [
-        "com.google.body.temperature.summary",
-        "com.google.body_temperature.summary",
-        "com.google.skin.temperature.summary",
-    ],
-}
-GOOGLE_HEALTH_CORE_GROUPS = ("steps", "calories", "active_minutes", "sleep")
-SLEEP_STAGE_NAMES = {
-    1: "awake",
-    2: "sleep",
-    3: "out_of_bed",
-    4: "light",
-    5: "deep",
-    6: "rem",
-}
 
 
 class GoogleHealthIntegrationError(RuntimeError):
@@ -170,14 +144,6 @@ def scopes() -> list[str]:
     if configured:
         return [scope for scope in configured.replace(",", " ").split() if scope]
     return GOOGLE_HEALTH_SCOPES.copy()
-
-
-def aggregate_type_batches() -> list[list[str]]:
-    configured = os.getenv("GOOGLE_HEALTH_AGGREGATE_TYPES", "").strip()
-    if configured:
-        data_types = [data_type for data_type in configured.replace(",", " ").split() if data_type]
-        return [data_types] if data_types else [GOOGLE_HEALTH_CORE_AGGREGATE_TYPES.copy()]
-    return [GOOGLE_HEALTH_CORE_AGGREGATE_TYPES.copy(), *[batch.copy() for batch in GOOGLE_HEALTH_OPTIONAL_AGGREGATE_TYPE_BATCHES]]
 
 
 def api_base_url() -> str:
@@ -375,58 +341,49 @@ def _date_text(value: str | date | datetime | None, fallback: date) -> str:
         return fallback.isoformat()
 
 
-def _millis_for_local_date(day: str, *, end: bool = False) -> int:
-    tz = _app_timezone()
-    parsed = date.fromisoformat(day)
-    if end:
-        parsed = parsed + timedelta(days=1)
-    return int(datetime(parsed.year, parsed.month, parsed.day, tzinfo=tz).timestamp() * 1000)
+def _date_obj(text: str) -> date:
+    return date.fromisoformat(str(text or "")[:10])
 
 
-def _point_value(value: dict[str, Any]) -> float | None:
-    for key in ("fpVal", "intVal"):
-        if key in value:
-            try:
-                return float(value[key])
-            except (TypeError, ValueError):
-                return None
-    return None
+def _next_date_text(text: str) -> str:
+    return (_date_obj(text) + timedelta(days=1)).isoformat()
 
 
-def _point_values(point: dict[str, Any]) -> list[float]:
-    values = point.get("value") if isinstance(point.get("value"), list) else []
-    return [parsed for parsed in (_point_value(value) for value in values) if parsed is not None]
-
-
-def _point_int_value(point: dict[str, Any]) -> int | None:
-    values = point.get("value") if isinstance(point.get("value"), list) else []
-    for value in values:
-        if "intVal" not in value:
-            continue
-        try:
-            return int(value["intVal"])
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def _point_duration_minutes(point: dict[str, Any]) -> float:
-    try:
-        start_nanos = int(point.get("startTimeNanos") or 0)
-        end_nanos = int(point.get("endTimeNanos") or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    if end_nanos <= start_nanos:
-        return 0.0
-    return (end_nanos - start_nanos) / 60_000_000_000
-
-
-def _date_from_millis(value: Any) -> str:
-    try:
-        millis = int(value)
-        return datetime.fromtimestamp(millis / 1000, _app_timezone()).date().isoformat()
-    except (TypeError, ValueError, OSError):
+def _google_date_text(value: Any) -> str:
+    if not isinstance(value, dict):
         return ""
+    try:
+        year = int(value.get("year") or 0)
+        month = int(value.get("month") or 0)
+        day = int(value.get("day") or 0)
+        if year and month and day:
+            return date(year, month, day).isoformat()
+    except (TypeError, ValueError):
+        return ""
+    return ""
+
+
+def _civil_date_time(day: str) -> dict[str, Any]:
+    parsed = _date_obj(day)
+    return {
+        "date": {"year": parsed.year, "month": parsed.month, "day": parsed.day},
+        "time": {"hours": 0, "minutes": 0, "seconds": 0, "nanos": 0},
+    }
+
+
+def _date_from_google_datetime(value: Any) -> str:
+    if isinstance(value, dict):
+        civil = _google_date_text(value.get("date"))
+        if civil:
+            return civil
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.astimezone(_app_timezone()).date().isoformat()
+    except ValueError:
+        return text[:10] if len(text) >= 10 else ""
 
 
 def _rounded(value: Any, digits: int = 1) -> float | None:
@@ -493,11 +450,11 @@ def _new_daily_row(day: str) -> dict[str, Any]:
         "source": "google_health",
         "sleep_hours": None,
         "sleep_score": None,
-        "total_sleep_minutes": 0.0,
-        "rem_sleep_minutes": 0.0,
-        "deep_sleep_minutes": 0.0,
-        "light_sleep_minutes": 0.0,
-        "awake_minutes": 0.0,
+        "total_sleep_minutes": None,
+        "rem_sleep_minutes": None,
+        "deep_sleep_minutes": None,
+        "light_sleep_minutes": None,
+        "awake_minutes": None,
         "sleep_efficiency": None,
         "resting_hr": None,
         "resting_hr_baseline": None,
@@ -507,13 +464,13 @@ def _new_daily_row(day: str) -> dict[str, Any]:
         "max_hr": None,
         "workout_average_hr": None,
         "workout_max_hr": None,
-        "steps": 0.0,
-        "active_minutes": 0.0,
-        "active_zone_minutes": 0.0,
-        "distance_meters": 0.0,
+        "steps": None,
+        "active_minutes": None,
+        "active_zone_minutes": None,
+        "distance_meters": None,
         "distance_miles": None,
-        "calories_burned": 0.0,
-        "total_calories_burned": 0.0,
+        "calories_burned": None,
+        "total_calories_burned": None,
         "active_calories_burned": None,
         "basal_calories_burned": None,
         "workout_minutes": None,
@@ -536,263 +493,64 @@ def _new_daily_row(day: str) -> dict[str, Any]:
     }
 
 
-def _add_sleep_segment(row: dict[str, Any], point: dict[str, Any]) -> None:
-    stage = _point_int_value(point)
-    duration = _point_duration_minutes(point)
-    if duration <= 0:
-        return
-    row["_seen_sleep"] = True
-    stage_name = SLEEP_STAGE_NAMES.get(stage or 0, "unknown")
-    stage_minutes = row.get("sleep_stage_minutes") if isinstance(row.get("sleep_stage_minutes"), dict) else {}
-    stage_minutes[stage_name] = float(stage_minutes.get(stage_name) or 0) + duration
-    row["sleep_stage_minutes"] = stage_minutes
-    if stage_name in {"sleep", "light", "deep", "rem"}:
-        row["total_sleep_minutes"] = float(row.get("total_sleep_minutes") or 0) + duration
-    if stage_name == "light":
-        row["light_sleep_minutes"] = float(row.get("light_sleep_minutes") or 0) + duration
-    elif stage_name == "deep":
-        row["deep_sleep_minutes"] = float(row.get("deep_sleep_minutes") or 0) + duration
-    elif stage_name == "rem":
-        row["rem_sleep_minutes"] = float(row.get("rem_sleep_minutes") or 0) + duration
-    elif stage_name in {"awake", "out_of_bed"}:
-        row["awake_minutes"] = float(row.get("awake_minutes") or 0) + duration
-
-
-def _parse_summary_values(values: list[float]) -> tuple[float | None, float | None, float | None]:
-    if len(values) >= 3:
-        average, max_value, min_value = values[0], values[1], values[2]
-        return average, max_value, min_value
-    if values:
-        average = _average(values)
-        return average, max(values), min(values)
-    return None, None, None
-
-
-def _parse_aggregate_point(row: dict[str, Any], data_type: str, point: dict[str, Any]) -> None:
-    values = _point_values(point)
-    if not values and "sleep.segment" not in data_type:
-        return
-    if "step_count" in data_type:
-        row["steps"] = float(row.get("steps") or 0) + sum(values)
-        row["_seen_steps"] = True
-    elif "calories.expended" in data_type:
-        total = sum(values)
-        row["calories_burned"] = float(row.get("calories_burned") or 0) + total
-        row["total_calories_burned"] = float(row.get("total_calories_burned") or 0) + total
-        row["_seen_calories"] = True
-    elif "calories.bmr" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        if average is not None:
-            row["basal_calories_burned"] = max(float(row.get("basal_calories_burned") or 0), float(average))
-    elif "active_minutes" in data_type:
-        row["active_minutes"] = float(row.get("active_minutes") or 0) + sum(values)
-        row["_seen_active_minutes"] = True
-    elif "heart_minutes" in data_type:
-        intensity = values[0] if values else None
-        duration = values[1] if len(values) > 1 else sum(values)
-        row["active_zone_minutes"] = float(row.get("active_zone_minutes") or 0) + float(duration or 0)
-        row["cardio_load"] = float(row.get("cardio_load") or 0) + float(intensity or duration or 0)
-        row["_seen_active_zone_minutes"] = True
-    elif "distance.delta" in data_type:
-        row["distance_meters"] = float(row.get("distance_meters") or 0) + sum(values)
-        row["_seen_distance"] = True
-    elif "heart_rate" in data_type:
-        average, max_value, min_value = _parse_summary_values(values)
-        if average is not None:
-            row["_heart_averages"].append(float(average))
-        if min_value is not None:
-            row["_heart_mins"].append(float(min_value))
-        if max_value is not None:
-            row["_heart_maxes"].append(float(max_value))
-    elif "sleep.segment" in data_type:
-        _add_sleep_segment(row, point)
-    elif "oxygen_saturation" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        row["spo2"] = _rounded(average)
-    elif "body.temperature" in data_type or "body_temperature" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        row["body_temperature"] = _rounded(average)
-    elif "skin.temperature" in data_type or "skin_temperature" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        row["skin_temperature"] = _rounded(average)
-    elif "respir" in data_type or "breathing" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        row["breathing_rate"] = _rounded(average)
-    elif "variability" in data_type or ".hrv" in data_type:
-        average, _, _ = _parse_summary_values(values)
-        row["hrv"] = _rounded(average)
-
-
-def _finalize_daily_row(row: dict[str, Any]) -> dict[str, Any]:
-    heart_average = _average(row.get("_heart_averages") or [])
-    if heart_average is not None:
-        row["average_hr"] = _rounded(heart_average)
-    if row.get("_heart_mins"):
-        row["resting_hr"] = _rounded(min(row["_heart_mins"]))
-    if row.get("_heart_maxes"):
-        row["max_hr"] = _rounded(max(row["_heart_maxes"]))
-    if row.get("average_hr") is not None and (row.get("active_minutes") or row.get("active_zone_minutes")):
-        row["workout_average_hr"] = row["average_hr"]
-        row["workout_max_hr"] = row.get("max_hr")
-
-    if row.get("_seen_sleep"):
-        sleep_minutes = float(row.get("total_sleep_minutes") or 0)
-        awake_minutes = float(row.get("awake_minutes") or 0)
-        row["sleep_hours"] = _rounded(sleep_minutes / 60, 2)
-        for key in ("total_sleep_minutes", "rem_sleep_minutes", "deep_sleep_minutes", "light_sleep_minutes", "awake_minutes"):
-            row[key] = _rounded(row.get(key), 1)
-        denominator = sleep_minutes + awake_minutes
-        row["sleep_efficiency"] = _rounded((sleep_minutes / denominator) * 100) if denominator > 0 else None
-    else:
-        for key in ("total_sleep_minutes", "rem_sleep_minutes", "deep_sleep_minutes", "light_sleep_minutes", "awake_minutes"):
-            row[key] = None
-
-    for key, seen_key in [
-        ("steps", "_seen_steps"),
-        ("active_minutes", "_seen_active_minutes"),
-        ("active_zone_minutes", "_seen_active_zone_minutes"),
-        ("distance_meters", "_seen_distance"),
-        ("calories_burned", "_seen_calories"),
-        ("total_calories_burned", "_seen_calories"),
-    ]:
-        if row.get(seen_key):
-            row[key] = _as_int(row.get(key)) if key in {"steps", "active_minutes", "active_zone_minutes"} else _rounded(row.get(key))
-        else:
-            row[key] = None
-
-    if row.get("distance_meters") is not None:
-        row["distance_miles"] = _rounded(float(row["distance_meters"]) / 1609.344, 2)
-    if row.get("total_calories_burned") is not None and row.get("basal_calories_burned") is not None:
-        row["active_calories_burned"] = _rounded(max(0.0, float(row["total_calories_burned"]) - float(row["basal_calories_burned"])))
-    if row.get("cardio_load") is not None:
-        row["cardio_load"] = _rounded(row.get("cardio_load"))
-    return {key: value for key, value in row.items() if not key.startswith("_")}
-
-
-def _parse_aggregate_bucket(bucket: dict[str, Any]) -> dict[str, Any]:
-    row = _new_daily_row(_date_from_millis(bucket.get("startTimeMillis")))
-    for dataset in bucket.get("dataset") or []:
-        for point in dataset.get("point") or []:
-            data_type = str(point.get("dataTypeName") or dataset.get("dataSourceId") or "").lower()
-            _parse_aggregate_point(row, data_type, point)
-    return _finalize_daily_row(row)
-
-
-def _aggregate_body(data_types: list[str], start_text: str, end_text: str) -> dict[str, Any]:
-    return {
-        "aggregateBy": [{"dataTypeName": data_type} for data_type in data_types],
-        "bucketByTime": {"durationMillis": 86_400_000},
-        "startTimeMillis": _millis_for_local_date(start_text),
-        "endTimeMillis": _millis_for_local_date(end_text, end=True),
-    }
-
-
-def _merge_buckets(target: dict[str, dict[str, Any]], response: dict[str, Any]) -> None:
-    for bucket in response.get("bucket") or []:
-        key = str(bucket.get("startTimeMillis") or "")
-        if not key:
-            continue
-        current = target.setdefault(
-            key,
-            {
-                "startTimeMillis": bucket.get("startTimeMillis"),
-                "endTimeMillis": bucket.get("endTimeMillis"),
-                "dataset": [],
-            },
-        )
-        current.setdefault("dataset", [])
-        current["dataset"].extend(bucket.get("dataset") or [])
-
-
-def _fetch_aggregate_batch(access_token: str, data_types: list[str], start_text: str, end_text: str) -> dict[str, Any]:
-    return _post_json(
-        f"{api_base_url()}/users/me/dataset:aggregate",
-        _aggregate_body(data_types, start_text, end_text),
-        access_token,
-        context="Google Health daily metrics fetch failed",
-    )
-
-
 def _sanitize_data_source(source: dict[str, Any]) -> dict[str, Any]:
     data_type = source.get("dataType") if isinstance(source.get("dataType"), dict) else {}
     application = source.get("application") if isinstance(source.get("application"), dict) else {}
     device = source.get("device") if isinstance(source.get("device"), dict) else {}
+    health_device = source if any(key in source for key in ("manufacturer", "model", "displayName", "deviceType")) else {}
     return {
         "data_stream_id": str(source.get("dataStreamId") or ""),
         "data_stream_name": str(source.get("dataStreamName") or ""),
         "data_type_name": str(data_type.get("name") or source.get("dataTypeName") or ""),
         "type": str(source.get("type") or ""),
+        "name": str(source.get("name") or ""),
+        "display_name": str(health_device.get("displayName") or ""),
+        "platform": str(source.get("platform") or ""),
         "application": {
             "name": str(application.get("name") or ""),
             "package_name": str(application.get("packageName") or ""),
         },
         "device": {
-            "manufacturer": str(device.get("manufacturer") or ""),
-            "model": str(device.get("model") or ""),
-            "type": str(device.get("type") or ""),
+            "manufacturer": str(device.get("manufacturer") or health_device.get("manufacturer") or ""),
+            "model": str(device.get("model") or health_device.get("model") or ""),
+            "type": str(device.get("type") or health_device.get("deviceType") or ""),
         },
     }
 
 
-def _data_source_type_names(response: dict[str, Any]) -> set[str]:
-    names: set[str] = set()
-    for source in response.get("dataSource") or []:
-        if not isinstance(source, dict):
-            continue
-        data_type = source.get("dataType") if isinstance(source.get("dataType"), dict) else {}
-        for candidate in (
-            data_type.get("name"),
-            source.get("dataTypeName"),
-            source.get("dataStreamId"),
-            source.get("dataStreamName"),
-        ):
-            text = str(candidate or "").strip()
-            if text:
-                names.add(text)
-    return names
-
-
 def list_data_sources(access_token: str) -> dict[str, Any]:
-    """Return available Google Fitness data sources for optional metric gating."""
+    """Return Google Health paired devices and supported data type identifiers.
+
+    Google Health API v4 does not use the deprecated Google Fit `dataSources`
+    endpoint. This compatibility-named function now calls pairedDevices.list for
+    debug visibility and returns the Health API data types the sync requests.
+    """
     if not str(access_token or "").strip():
         return {"status": "missing_access_token", "data_sources": [], "data_type_names": []}
     response = _get_json(
-        f"{api_base_url()}/users/me/dataSources",
+        f"{api_base_url()}/v4/users/me/pairedDevices?pageSize=100",
         access_token,
-        context="Google Health data source listing failed",
+        context="Google Health paired devices listing failed",
     )
-    data_sources = response.get("dataSource") or []
-    data_type_names = sorted(_data_source_type_names(response))
+    data_sources = response.get("pairedDevices") or []
+    data_type_names = GOOGLE_HEALTH_DATA_TYPES.copy()
     sanitized_sources = [_sanitize_data_source(source) for source in data_sources if isinstance(source, dict)]
     logger.info(
-        "[google_health] listed data sources count=%s data_types=%s",
+        "[google_health] listed paired devices count=%s data_types=%s",
         len(data_sources),
         len(data_type_names),
     )
     return {
         "status": "ok",
         "data_sources": sanitized_sources,
+        "paired_devices": sanitized_sources,
         "data_type_names": data_type_names,
         "available_data_types": data_type_names,
         "data_source_count": len(data_sources),
+        "paired_device_count": len(data_sources),
+        "api_path": GOOGLE_HEALTH_API_PATH,
+        "api_path_label": GOOGLE_HEALTH_API_LABEL,
     }
-
-
-def _matches_data_type(available: set[str], candidate: str) -> bool:
-    needle = str(candidate or "").lower()
-    if not needle:
-        return False
-    return any(needle == name.lower() or needle in name.lower() for name in available)
-
-
-def _discovered_metric_groups(data_type_names: set[str]) -> dict[str, list[str]]:
-    lowered = {str(name or "").lower() for name in data_type_names if str(name or "").strip()}
-    discovered: dict[str, list[str]] = {}
-    for group, candidates in GOOGLE_HEALTH_DISCOVERY_GROUPS.items():
-        selected = [candidate for candidate in candidates if _matches_data_type(lowered, candidate)]
-        if selected:
-            discovered[group] = selected
-    return discovered
 
 
 def _unique_preserve_order(values: list[str]) -> list[str]:
@@ -806,77 +564,268 @@ def _unique_preserve_order(values: list[str]) -> list[str]:
     return result
 
 
-def _compact_aggregate_response(response: dict[str, Any], data_types: list[str]) -> dict[str, Any]:
-    buckets = response.get("bucket") if isinstance(response.get("bucket"), list) else []
-    point_types: set[str] = set()
-    point_count = 0
-    dataset_count = 0
-    sample_bucket: dict[str, Any] = {}
-    for bucket_index, bucket in enumerate(buckets):
-        if not isinstance(bucket, dict):
-            continue
-        if bucket_index == 0:
-            sample_bucket = {
-                "startTimeMillis": bucket.get("startTimeMillis"),
-                "endTimeMillis": bucket.get("endTimeMillis"),
-                "datasets": [],
-            }
-        for dataset in bucket.get("dataset") or []:
-            if not isinstance(dataset, dict):
-                continue
-            dataset_count += 1
-            dataset_points = dataset.get("point") if isinstance(dataset.get("point"), list) else []
-            if bucket_index == 0:
-                sample_bucket.setdefault("datasets", []).append(
-                    {
-                        "dataSourceId": dataset.get("dataSourceId", ""),
-                        "point_count": len(dataset_points),
-                        "point_types": _unique_preserve_order([str(point.get("dataTypeName") or "") for point in dataset_points if isinstance(point, dict)]),
-                    }
-                )
-            for point in dataset_points:
-                if not isinstance(point, dict):
-                    continue
-                point_count += 1
-                data_type = str(point.get("dataTypeName") or dataset.get("dataSourceId") or "").strip()
-                if data_type:
-                    point_types.add(data_type)
+def _row_for_day(rows: dict[str, dict[str, Any]], day: str) -> dict[str, Any]:
+    clean_day = str(day or "")[:10]
+    if not clean_day:
+        clean_day = datetime.now(_app_timezone()).date().isoformat()
+    return rows.setdefault(clean_day, _new_daily_row(clean_day))
+
+
+def _health_date_range_body(start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
     return {
-        "requested_data_types": data_types,
-        "bucket_count": len(buckets),
-        "dataset_count": dataset_count,
-        "point_count": point_count,
-        "point_types": sorted(point_types),
-        "sample_bucket": sample_bucket,
+        "range": {
+            "start": _civil_date_time(start_text),
+            "end": _civil_date_time(_next_date_text(end_text)),
+        },
+        "windowSizeDays": 1,
+        "pageSize": 10000,
+        "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+        **({"pageToken": page_token} if page_token else {}),
     }
 
 
-def _is_heart_rate_batch(batch: list[str]) -> bool:
-    return any("heart_rate" in str(data_type).lower() for data_type in batch)
+def _fetch_health_daily_rollup(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
+    return _post_json(
+        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:dailyRollUp",
+        _health_date_range_body(start_text, end_text, page_token=page_token),
+        access_token,
+        context=f"Google Health {data_type} daily rollup failed",
+    )
 
 
-def _heart_rate_optional_batch(data_type_names: set[str]) -> list[str]:
-    lowered = {name.lower() for name in data_type_names}
-    if "com.google.heart_rate.summary" in lowered:
-        return ["com.google.heart_rate.summary"]
-    if "com.google.heart_rate.bpm" in lowered:
-        return ["com.google.heart_rate.bpm"]
-    if any("heart_rate" in name for name in lowered):
-        return ["com.google.heart_rate.bpm"]
-    return []
+def _health_point_filter(data_type: str, start_text: str, end_text: str) -> str:
+    end_exclusive = _next_date_text(end_text)
+    snake = data_type.replace("-", "_")
+    if data_type == "sleep":
+        return f'sleep.interval.civil_end_time >= "{start_text}" AND sleep.interval.civil_end_time < "{end_exclusive}"'
+    if data_type in GOOGLE_HEALTH_DAILY_POINT_TYPES:
+        return f'{snake}.date >= "{start_text}" AND {snake}.date < "{end_exclusive}"'
+    return f'{snake}.sample_time.civil_time >= "{start_text}" AND {snake}.sample_time.civil_time < "{end_exclusive}"'
 
 
-def _optional_warning_for_batch(batch: list[str], exc: Exception | None = None) -> str:
-    if _is_heart_rate_batch(batch):
-        return GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING
-    batch_text = " ".join(str(data_type).lower() for data_type in batch)
-    if "oxygen_saturation" in batch_text or "temperature" in batch_text:
-        return "Optional vitals unavailable from Google Health."
-    if "heart_minutes" in batch_text or "distance" in batch_text or "calories.bmr" in batch_text:
-        return "Optional activity detail metrics unavailable from Google Health."
-    if exc is None:
-        return f"Optional Google Health metric batch unavailable: {', '.join(batch)}."
-    return f"Skipped optional Google Health metric batch ({', '.join(batch)}): {exc}"
+def _fetch_health_points(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
+    params = {
+        "pageSize": 10000 if data_type not in {"sleep", "exercise"} else 25,
+        "filter": _health_point_filter(data_type, start_text, end_text),
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    return _get_json(
+        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints?{urlencode(params)}",
+        access_token,
+        context=f"Google Health {data_type} data point listing failed",
+    )
+
+
+def _fetch_health_reconciled_points(access_token: str, data_type: str, start_text: str, end_text: str, *, page_token: str = "") -> dict[str, Any]:
+    params = {
+        "pageSize": 10000 if data_type not in {"sleep", "exercise"} else 25,
+        "filter": _health_point_filter(data_type, start_text, end_text),
+        "dataSourceFamily": "users/me/dataSourceFamilies/all-sources",
+    }
+    if page_token:
+        params["pageToken"] = page_token
+    return _get_json(
+        f"{api_base_url()}/v4/users/me/dataTypes/{data_type}/dataPoints:reconcile?{urlencode(params)}",
+        access_token,
+        context=f"Google Health {data_type} reconciled data listing failed",
+    )
+
+
+def _compact_health_rollup_response(response: dict[str, Any], data_type: str) -> dict[str, Any]:
+    points = response.get("rollupDataPoints") if isinstance(response.get("rollupDataPoints"), list) else []
+    populated = 0
+    value_keys: set[str] = set()
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        keys = [key for key in point.keys() if key not in {"civilStartTime", "civilEndTime"} and point.get(key) not in (None, {}, [])]
+        if keys:
+            populated += 1
+            value_keys.update(keys)
+    return {
+        "requested_data_types": [data_type],
+        "data_type": data_type,
+        "endpoint": "dailyRollUp",
+        "point_count": len(points),
+        "populated_point_count": populated,
+        "value_keys": sorted(value_keys),
+        "next_page_token_present": bool(response.get("nextPageToken")),
+        "sample": points[0] if points else {},
+    }
+
+
+def _compact_health_points_response(response: dict[str, Any], data_type: str, *, endpoint: str) -> dict[str, Any]:
+    points = response.get("dataPoints") if isinstance(response.get("dataPoints"), list) else []
+    value_keys: set[str] = set()
+    platforms: set[str] = set()
+    for point in points:
+        if not isinstance(point, dict):
+            continue
+        value_keys.update(key for key in point.keys() if key not in {"name", "dataPointName", "dataSource"} and point.get(key) not in (None, {}, []))
+        source = point.get("dataSource") if isinstance(point.get("dataSource"), dict) else {}
+        platform = str(source.get("platform") or "").strip()
+        if platform:
+            platforms.add(platform)
+    return {
+        "requested_data_types": [data_type],
+        "data_type": data_type,
+        "endpoint": endpoint,
+        "point_count": len(points),
+        "populated_point_count": len([point for point in points if isinstance(point, dict) and any(key not in {"name", "dataPointName", "dataSource"} for key in point.keys())]),
+        "value_keys": sorted(value_keys),
+        "platforms": sorted(platforms),
+        "next_page_token_present": bool(response.get("nextPageToken")),
+        "sample": points[0] if points else {},
+    }
+
+
+def _sum_int_fields(payload: dict[str, Any], fields: tuple[str, ...]) -> int | None:
+    total = 0
+    seen = False
+    for field in fields:
+        value = _as_int(payload.get(field))
+        if value is not None:
+            total += value
+            seen = True
+    return total if seen else None
+
+
+def _apply_health_rollup(row: dict[str, Any], data_type: str, point: dict[str, Any]) -> None:
+    if data_type == "steps" and isinstance(point.get("steps"), dict):
+        row["steps"] = _as_int(point["steps"].get("countSum"))
+        row["_seen_steps"] = row["steps"] is not None
+    elif data_type == "total-calories" and isinstance(point.get("totalCalories"), dict):
+        row["total_calories_burned"] = _rounded(point["totalCalories"].get("kcalSum"))
+        row["calories_burned"] = row["total_calories_burned"]
+        row["_seen_calories"] = row["total_calories_burned"] is not None
+    elif data_type == "active-energy-burned" and isinstance(point.get("activeEnergyBurned"), dict):
+        row["active_calories_burned"] = _rounded(point["activeEnergyBurned"].get("kcalSum"))
+    elif data_type == "distance" and isinstance(point.get("distance"), dict):
+        millimeters = _rounded(point["distance"].get("millimetersSum"))
+        if millimeters is not None:
+            row["distance_meters"] = _rounded(millimeters / 1000)
+            row["_seen_distance"] = True
+    elif data_type == "active-minutes" and isinstance(point.get("activeMinutes"), dict):
+        records = point["activeMinutes"].get("activeMinutesRollupByActivityLevel") or []
+        minutes = sum(_as_int(item.get("activeMinutesSum")) or 0 for item in records if isinstance(item, dict))
+        row["active_minutes"] = minutes if records else None
+        row["_seen_active_minutes"] = row["active_minutes"] is not None
+    elif data_type == "active-zone-minutes" and isinstance(point.get("activeZoneMinutes"), dict):
+        minutes = _sum_int_fields(point["activeZoneMinutes"], ("sumInCardioHeartZone", "sumInPeakHeartZone", "sumInFatBurnHeartZone"))
+        row["active_zone_minutes"] = minutes
+        row["cardio_load"] = _rounded(minutes)
+        row["_seen_active_zone_minutes"] = minutes is not None
+    elif data_type == "heart-rate" and isinstance(point.get("heartRate"), dict):
+        heart = point["heartRate"]
+        row["average_hr"] = _rounded(heart.get("beatsPerMinuteAvg"))
+        row["max_hr"] = _rounded(heart.get("beatsPerMinuteMax"))
+        if row.get("resting_hr") is None:
+            row["resting_hr"] = _rounded(heart.get("beatsPerMinuteMin"))
+
+
+def _sleep_stage_key(stage_type: str) -> str:
+    stage = str(stage_type or "").upper()
+    if stage == "REM":
+        return "rem"
+    if stage == "DEEP":
+        return "deep"
+    if stage == "LIGHT":
+        return "light"
+    if stage in {"AWAKE", "RESTLESS"}:
+        return "awake"
+    if stage == "ASLEEP":
+        return "sleep"
+    return "unknown"
+
+
+def _apply_sleep_point(row: dict[str, Any], sleep: dict[str, Any]) -> None:
+    summary = sleep.get("summary") if isinstance(sleep.get("summary"), dict) else {}
+    minutes_asleep = _rounded(summary.get("minutesAsleep"))
+    minutes_awake = _rounded(summary.get("minutesAwake"))
+    if minutes_asleep is not None:
+        row["total_sleep_minutes"] = _rounded(float(row.get("total_sleep_minutes") or 0) + minutes_asleep)
+        row["_seen_sleep"] = True
+    if minutes_awake is not None:
+        row["awake_minutes"] = _rounded(float(row.get("awake_minutes") or 0) + minutes_awake)
+    stage_minutes = row.get("sleep_stage_minutes") if isinstance(row.get("sleep_stage_minutes"), dict) else {}
+    for stage in summary.get("stagesSummary") or []:
+        if not isinstance(stage, dict):
+            continue
+        key = _sleep_stage_key(str(stage.get("type") or ""))
+        minutes = _rounded(stage.get("minutes"))
+        if minutes is None:
+            continue
+        stage_minutes[key] = _rounded(float(stage_minutes.get(key) or 0) + minutes)
+        if key == "rem":
+            row["rem_sleep_minutes"] = _rounded(float(row.get("rem_sleep_minutes") or 0) + minutes)
+        elif key == "deep":
+            row["deep_sleep_minutes"] = _rounded(float(row.get("deep_sleep_minutes") or 0) + minutes)
+        elif key == "light":
+            row["light_sleep_minutes"] = _rounded(float(row.get("light_sleep_minutes") or 0) + minutes)
+    row["sleep_stage_minutes"] = stage_minutes
+
+
+def _apply_health_point(row: dict[str, Any], data_type: str, point: dict[str, Any]) -> None:
+    if data_type == "daily-resting-heart-rate" and isinstance(point.get("dailyRestingHeartRate"), dict):
+        row["resting_hr"] = _rounded(point["dailyRestingHeartRate"].get("beatsPerMinute"))
+    elif data_type == "daily-heart-rate-variability" and isinstance(point.get("dailyHeartRateVariability"), dict):
+        hrv = point["dailyHeartRateVariability"]
+        row["hrv"] = _rounded(
+            hrv.get("averageHeartRateVariabilityMilliseconds")
+            or hrv.get("deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds")
+        )
+    elif data_type == "daily-oxygen-saturation" and isinstance(point.get("dailyOxygenSaturation"), dict):
+        row["spo2"] = _rounded(point["dailyOxygenSaturation"].get("averagePercentage"))
+    elif data_type == "daily-sleep-temperature-derivations" and isinstance(point.get("dailySleepTemperatureDerivations"), dict):
+        temp = point["dailySleepTemperatureDerivations"]
+        nightly = _rounded(temp.get("nightlyTemperatureCelsius"))
+        baseline = _rounded(temp.get("baselineTemperatureCelsius"))
+        row["skin_temperature"] = _rounded(nightly - baseline) if nightly is not None and baseline is not None else nightly
+    elif data_type == "respiratory-rate-sleep-summary" and isinstance(point.get("respiratoryRateSleepSummary"), dict):
+        stats = point["respiratoryRateSleepSummary"].get("fullSleepStats") or {}
+        if isinstance(stats, dict):
+            row["breathing_rate"] = _rounded(stats.get("breathsPerMinute"))
+    elif data_type == "sleep" and isinstance(point.get("sleep"), dict):
+        _apply_sleep_point(row, point["sleep"])
+
+
+def _point_day(data_type: str, point: dict[str, Any]) -> str:
+    if data_type == "sleep" and isinstance(point.get("sleep"), dict):
+        interval = point["sleep"].get("interval") if isinstance(point["sleep"].get("interval"), dict) else {}
+        civil = interval.get("civilEndTime") if isinstance(interval.get("civilEndTime"), dict) else {}
+        return _google_date_text(civil.get("date")) or _date_from_google_datetime(interval.get("endTime"))
+    for key in ("dailyRestingHeartRate", "dailyHeartRateVariability", "dailyOxygenSaturation", "dailySleepTemperatureDerivations"):
+        if isinstance(point.get(key), dict):
+            day = _google_date_text(point[key].get("date"))
+            if day:
+                return day
+    if data_type == "respiratory-rate-sleep-summary" and isinstance(point.get("respiratoryRateSleepSummary"), dict):
+        sample_time = point["respiratoryRateSleepSummary"].get("sampleTime") if isinstance(point["respiratoryRateSleepSummary"].get("sampleTime"), dict) else {}
+        civil = sample_time.get("civilTime") if isinstance(sample_time.get("civilTime"), dict) else {}
+        return _google_date_text(civil.get("date")) or _date_from_google_datetime(sample_time.get("physicalTime"))
+    return ""
+
+
+def _finalize_health_daily_row(row: dict[str, Any]) -> dict[str, Any]:
+    if row.get("total_sleep_minutes") is not None:
+        sleep_minutes = float(row.get("total_sleep_minutes") or 0)
+        awake_minutes = float(row.get("awake_minutes") or 0)
+        row["sleep_hours"] = _rounded(sleep_minutes / 60, 2)
+        denominator = sleep_minutes + awake_minutes
+        row["sleep_efficiency"] = _rounded((sleep_minutes / denominator) * 100) if denominator > 0 else None
+        for key in ("total_sleep_minutes", "rem_sleep_minutes", "deep_sleep_minutes", "light_sleep_minutes", "awake_minutes"):
+            row[key] = _rounded(row.get(key), 1)
+    if row.get("distance_meters") is not None:
+        row["distance_miles"] = _rounded(float(row["distance_meters"]) / 1609.344, 2)
+    if row.get("total_calories_burned") is not None:
+        row["calories_burned"] = row["total_calories_burned"]
+    elif row.get("active_calories_burned") is not None:
+        row["calories_burned"] = None
+    if row.get("average_hr") is not None and (row.get("active_minutes") is not None or row.get("active_zone_minutes") is not None):
+        row["workout_average_hr"] = row["average_hr"]
+        row["workout_max_hr"] = row.get("max_hr")
+    return {key: value for key, value in row.items() if not key.startswith("_")}
 
 
 def _with_resting_hr_baselines(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1009,7 +958,7 @@ def fetch_daily_metrics(
     start_date: str | None = None,
     end_date: str | None = None,
 ) -> dict[str, Any]:
-    """Fetch daily-level Google Health metrics for the configured date range."""
+    """Fetch daily-level wearable metrics from Google Health API v4."""
     if not str(access_token or "").strip():
         return {
             "status": "missing_access_token",
@@ -1019,144 +968,117 @@ def fetch_daily_metrics(
     today = datetime.now(_app_timezone()).date()
     end_text = _date_text(end_date, today)
     start_text = _date_text(start_date, date.fromisoformat(end_text) - timedelta(days=13))
-    merged_buckets: dict[str, dict[str, Any]] = {}
+    rows_by_day: dict[str, dict[str, Any]] = {}
     warnings: list[str] = []
     optional_metric_warnings: list[str] = []
     required_metric_failures: list[str] = []
-    raw_bucket_count = 0
     raw_aggregate_responses: dict[str, Any] = {}
     data_source_summary: dict[str, Any] = {
         "status": "not_checked",
         "data_sources": [],
         "data_type_names": [],
-        "available_data_types": [],
+        "available_data_types": GOOGLE_HEALTH_DATA_TYPES.copy(),
         "data_source_count": 0,
+        "paired_devices": [],
+        "paired_device_count": 0,
     }
-    discovered_groups: dict[str, list[str]] = {}
+    discovered_groups: dict[str, list[str]] = {
+        "daily_rollup": GOOGLE_HEALTH_DAILY_ROLLUP_TYPES.copy(),
+        "daily_points": GOOGLE_HEALTH_DAILY_POINT_TYPES.copy(),
+        "session_points": GOOGLE_HEALTH_SESSION_POINT_TYPES.copy(),
+    }
     requested_data_types: list[str] = []
     recommended_next_action = ""
-    configured_aggregate_types = bool(os.getenv("GOOGLE_HEALTH_AGGREGATE_TYPES", "").strip())
-    if configured_aggregate_types:
-        batches: list[tuple[str, list[str], bool]] = [
-            (f"configured_batch_{index + 1}", batch, index == 0)
-            for index, batch in enumerate(aggregate_type_batches())
-            if batch
-        ]
+    raw_response_count = 0
+    populated_by_metric: dict[str, int] = {}
+
+    try:
+        data_sources = list_data_sources(access_token)
+        data_source_summary = {
+            "status": data_sources.get("status", "ok"),
+            "data_sources": data_sources.get("data_sources") or [],
+            "paired_devices": data_sources.get("paired_devices") or data_sources.get("data_sources") or [],
+            "data_type_names": data_sources.get("data_type_names") or GOOGLE_HEALTH_DATA_TYPES.copy(),
+            "available_data_types": data_sources.get("available_data_types") or GOOGLE_HEALTH_DATA_TYPES.copy(),
+            "data_source_count": int(data_sources.get("data_source_count") or 0),
+            "paired_device_count": int(data_sources.get("paired_device_count") or data_sources.get("data_source_count") or 0),
+            "api_path": GOOGLE_HEALTH_API_PATH,
+            "api_path_label": GOOGLE_HEALTH_API_LABEL,
+        }
+    except GoogleHealthIntegrationError as exc:
+        message = f"Google Health paired device listing failed: {exc}"
+        logger.warning("[google_health] %s", message[:500])
+        data_source_summary = {**data_source_summary, "status": "warning", "message": str(exc)}
+        warnings.append(message)
+
+    for data_type in GOOGLE_HEALTH_DAILY_ROLLUP_TYPES:
+        requested_data_types.append(data_type)
         try:
-            data_sources = list_data_sources(access_token)
-            source_types = set(data_sources.get("data_type_names") or [])
-            discovered_groups = _discovered_metric_groups(source_types)
-            data_source_summary = {
-                "status": data_sources.get("status", "ok"),
-                "data_sources": data_sources.get("data_sources") or [],
-                "data_type_names": sorted(source_types),
-                "available_data_types": sorted(source_types),
-                "data_source_count": int(data_sources.get("data_source_count") or len(data_sources.get("data_sources") or [])),
-            }
+            response = _fetch_health_daily_rollup(access_token, data_type, start_text, end_text)
         except GoogleHealthIntegrationError as exc:
-            logger.warning("[google_health] data source listing failed before configured aggregate fetch: %s", str(exc)[:500])
-            data_source_summary = {
-                "status": "warning",
-                "message": str(exc),
-                "data_sources": [],
-                "data_type_names": [],
-                "available_data_types": [],
-                "data_source_count": 0,
-            }
-            warnings.append(f"Google Health data source listing failed: {exc}")
-    else:
-        try:
-            data_sources = list_data_sources(access_token)
-            source_types = set(data_sources.get("data_type_names") or [])
-            discovered_groups = _discovered_metric_groups(source_types)
-            data_source_summary = {
-                "status": data_sources.get("status", "ok"),
-                "data_sources": data_sources.get("data_sources") or [],
-                "data_type_names": sorted(source_types),
-                "available_data_types": sorted(source_types),
-                "data_source_count": int(data_sources.get("data_source_count") or len(data_sources.get("data_sources") or [])),
-            }
-            if data_source_summary["data_source_count"] <= 0:
-                recommended_next_action = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
-                warnings.append(GOOGLE_HEALTH_NO_SOURCES_MESSAGE)
+            failure = f"Google Health API {data_type} dailyRollUp failed: {exc}"
+            if data_type in {"heart-rate"}:
                 optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
-                batches = []
+                logger.warning("[google_health] %s", failure[:500])
             else:
-                missing_core_groups = [group for group in GOOGLE_HEALTH_CORE_GROUPS if not discovered_groups.get(group)]
-                for group in missing_core_groups:
-                    warnings.append(f"Missing Google Health data source group: {group.replace('_', ' ')}.")
-                if not discovered_groups.get("heart_rate"):
-                    optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
-
-                batches = []
-                for group in GOOGLE_HEALTH_CORE_GROUPS:
-                    if discovered_groups.get(group):
-                        batches.append((group, discovered_groups[group], True))
-                for group in ("heart_rate", "active_zone_minutes", "distance", "basal_calories", "oxygen_saturation", "body_temperature"):
-                    if discovered_groups.get(group):
-                        batches.append((group, discovered_groups[group], False))
-        except GoogleHealthIntegrationError as exc:
-            message = f"Google Health data source listing failed: {exc}"
-            logger.warning("[google_health] %s", message[:500])
-            data_source_summary = {
-                "status": "warning",
-                "message": str(exc),
-                "data_sources": [],
-                "data_type_names": [],
-                "available_data_types": [],
-                "data_source_count": 0,
-            }
-            required_metric_failures.append(message)
-            warnings.append(message)
-            batches = []
-
-    for label, batch, required in batches:
-        batch = _unique_preserve_order(batch)
-        if not batch:
-            continue
-        requested_data_types.extend(batch)
-        try:
-            response = _fetch_aggregate_batch(access_token, batch, start_text, end_text)
-        except GoogleHealthIntegrationError as exc:
-            if required:
-                failure = f"Required Google Health metric group '{label}' failed: {exc}"
                 required_metric_failures.append(failure)
                 warnings.append(failure)
-            else:
-                warning = _optional_warning_for_batch(batch, exc)
-                logger.warning("[google_health] %s", warning)
-                optional_metric_warnings.append(warning)
-            raw_aggregate_responses[label] = {
-                "status": "error",
-                "requested_data_types": batch,
-                "error": str(exc),
-            }
+            raw_aggregate_responses[data_type] = {"status": "error", "requested_data_types": [data_type], "endpoint": "dailyRollUp", "error": str(exc)}
             continue
-        raw_bucket_count += len(response.get("bucket") or [])
-        raw_aggregate_responses[label] = {
-            "status": "ok",
-            **_compact_aggregate_response(response, batch),
-        }
-        _merge_buckets(merged_buckets, response)
+        compact = _compact_health_rollup_response(response, data_type)
+        raw_aggregate_responses[data_type] = {"status": "ok", **compact}
+        raw_response_count += compact["point_count"]
+        populated_by_metric[data_type] = int(compact["populated_point_count"])
+        for point in response.get("rollupDataPoints") or []:
+            if not isinstance(point, dict):
+                continue
+            day = _google_date_text((point.get("civilStartTime") if isinstance(point.get("civilStartTime"), dict) else {}).get("date"))
+            if not day:
+                continue
+            _apply_health_rollup(_row_for_day(rows_by_day, day), data_type, point)
 
-    requested_data_types = _unique_preserve_order(requested_data_types)
-    buckets = sorted(merged_buckets.values(), key=lambda bucket: int(bucket.get("startTimeMillis") or 0))
-    all_items = [
-        item
-        for item in (_parse_aggregate_bucket(bucket) for bucket in buckets)
-        if item.get("date")
-    ]
+    for data_type in [*GOOGLE_HEALTH_DAILY_POINT_TYPES, *GOOGLE_HEALTH_SESSION_POINT_TYPES]:
+        requested_data_types.append(data_type)
+        try:
+            response = _fetch_health_reconciled_points(access_token, data_type, start_text, end_text)
+            endpoint = "reconcile"
+        except GoogleHealthIntegrationError as reconcile_error:
+            try:
+                response = _fetch_health_points(access_token, data_type, start_text, end_text)
+                endpoint = "list"
+            except GoogleHealthIntegrationError as list_error:
+                message = f"Google Health API {data_type} dataPoints failed: reconcile={reconcile_error}; list={list_error}"
+                if data_type in {"daily-resting-heart-rate", "daily-heart-rate-variability"}:
+                    optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
+                elif data_type in {"daily-oxygen-saturation", "daily-sleep-temperature-derivations", "respiratory-rate-sleep-summary"}:
+                    optional_metric_warnings.append("Optional Google Health vitals unavailable.")
+                else:
+                    warnings.append(message)
+                raw_aggregate_responses[data_type] = {"status": "error", "requested_data_types": [data_type], "endpoint": "reconcile/list", "error": message}
+                continue
+        compact = _compact_health_points_response(response, data_type, endpoint=endpoint)
+        raw_aggregate_responses[data_type] = {"status": "ok", **compact}
+        raw_response_count += compact["point_count"]
+        populated_by_metric[data_type] = int(compact["populated_point_count"])
+        for point in response.get("dataPoints") or []:
+            if not isinstance(point, dict):
+                continue
+            day = _point_day(data_type, point)
+            if not day:
+                continue
+            _apply_health_point(_row_for_day(rows_by_day, day), data_type, point)
+
+    all_items = [_finalize_health_daily_row(row) for _, row in sorted(rows_by_day.items())]
     all_items = _with_resting_hr_baselines(all_items)
     items = [row for row in all_items if has_populated_metrics(row)]
     empty_items = [row for row in all_items if not has_populated_metrics(row)]
     empty_date_rows = [str(row.get("date") or "")[:10] for row in empty_items if str(row.get("date") or "").strip()]
 
-    if not all_items and not warnings:
-        warnings.append("No Google Health daily buckets returned for the requested date range.")
-    elif empty_items:
-        warnings.append(f"Google Health returned {len(empty_items)} empty daily bucket(s) with no populated wearable metrics.")
-
-    if items:
+    if not items:
+        recommended_next_action = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
+        if recommended_next_action not in warnings:
+            warnings.append(recommended_next_action)
+    else:
         missing_groups = {
             "sleep": ("sleep_hours", "total_sleep_minutes"),
             "resting heart rate": ("resting_hr",),
@@ -1168,29 +1090,25 @@ def fetch_daily_metrics(
                 if label == "resting heart rate":
                     optional_metric_warnings.append(GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING)
                 else:
-                    warnings.append(f"Missing Google Health metric group: {label}.")
-    elif not recommended_next_action and data_source_summary.get("data_source_count", 0) <= 0:
-        recommended_next_action = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
-
-    if not items and recommended_next_action and recommended_next_action not in warnings:
-        warnings.append(recommended_next_action)
+                    warnings.append(f"Missing Google Health API metric group: {label}.")
 
     optional_metric_warnings = list(dict.fromkeys(optional_metric_warnings))
     warnings = list(dict.fromkeys([*warnings, *optional_metric_warnings]))
+    requested_data_types = _unique_preserve_order(requested_data_types)
     for warning in warnings:
-        if warning.startswith("Missing") or warning.startswith("No Google Health") or "empty daily bucket" in warning:
+        if warning.startswith("Missing") or warning.startswith("No Google Health") or "unavailable" in warning.lower():
             logger.warning("[google_health] %s", warning)
     records = build_google_health_records(items)
     field_counts = _field_count_summary(all_items)
     logger.info(
-        "[google_health] fetched daily metrics populated_days=%s empty_days=%s raw_buckets=%s warnings=%s start=%s end=%s data_sources=%s",
+        "[google_health] fetched v4 metrics populated_days=%s empty_days=%s raw_points=%s warnings=%s start=%s end=%s paired_devices=%s",
         len(items),
         len(empty_items),
-        raw_bucket_count,
+        raw_response_count,
         len(warnings),
         start_text,
         end_text,
-        data_source_summary.get("data_source_count", 0),
+        data_source_summary.get("paired_device_count", 0),
     )
     return {
         "status": "ok",
@@ -1206,21 +1124,27 @@ def fetch_daily_metrics(
         "optional_metric_warnings": optional_metric_warnings,
         "required_metric_failures": required_metric_failures,
         "data_sources": data_source_summary,
-        "api_path": "google_fit_rest",
-        "api_path_label": "Google Fit REST API",
-        "phone_app_data_note": "Google Health phone app data may come from Health Connect and may not be visible through Google Fit REST aggregate endpoints.",
-        "fallback_plan": ["fitbit_direct_api", "health_connect_export_import"],
+        "api_base_url": api_base_url(),
+        "api_path": GOOGLE_HEALTH_API_PATH,
+        "api_path_label": GOOGLE_HEALTH_API_LABEL,
+        "google_fit_unused": True,
+        "deprecated_fitness_api_unused": True,
+        "phone_app_data_note": "Google Health API v4 is the primary wearable provider. Deprecated Google Fit/Fitness API endpoints are not used for sync.",
+        "fallback_plan": ["google_health_api_v4"],
         "discovered_metric_groups": discovered_groups,
         "requested_scopes": scopes(),
         "requested_data_types": requested_data_types,
         "raw_aggregate_responses": raw_aggregate_responses,
-        "raw_bucket_count": raw_bucket_count,
+        "raw_health_responses": raw_aggregate_responses,
+        "raw_response_count": raw_response_count,
+        "raw_bucket_count": 0,
         "fetched_days": len(all_items),
         "populated_days": len(items),
         "placeholder_rows": empty_items,
         "empty_date_rows": empty_date_rows,
         "empty_date_rows_count": len(empty_date_rows),
         "populated_metric_counts_by_day": populated_metric_counts_by_day(all_items),
+        "populated_fields_by_metric": populated_by_metric,
         "data_available": bool(items),
         "recommended_next_action": recommended_next_action,
         **field_counts,

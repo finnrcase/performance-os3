@@ -126,8 +126,8 @@ def test_google_health_sources_debug_reports_empty_source_state(monkeypatch):
     assert payload["connected"] is True
     assert payload["data_source_count"] == 0
     assert payload["available_data_types"] == []
-    assert "this API path does not expose" in payload["recommended_next_action"]
-    assert payload["api_path"] == "google_fit_rest"
+    assert "deprecated Google Fit/Fitness scopes" in payload["recommended_next_action"]
+    assert payload["api_path"] == "google_health_v4"
 
 
 def test_google_health_client_id_leading_equals_is_normalized(monkeypatch):
