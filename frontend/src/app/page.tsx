@@ -347,12 +347,35 @@ type WearableMetricEntry = {
   source: "manual" | "fitbit" | "google_health" | "mock" | string;
   sleep_hours: number | null;
   sleep_score: number | null;
+  total_sleep_minutes?: number | null;
+  rem_sleep_minutes?: number | null;
+  deep_sleep_minutes?: number | null;
+  light_sleep_minutes?: number | null;
+  awake_minutes?: number | null;
+  sleep_efficiency?: number | null;
   resting_hr: number | null;
+  resting_hr_baseline?: number | null;
+  resting_hr_deviation?: number | null;
   hrv: number | null;
+  average_hr?: number | null;
+  max_hr?: number | null;
+  workout_average_hr?: number | null;
+  workout_max_hr?: number | null;
   steps: number | null;
   active_minutes: number | null;
+  active_zone_minutes?: number | null;
+  distance_meters?: number | null;
+  distance_miles?: number | null;
   calories_burned: number | null;
+  total_calories_burned?: number | null;
+  active_calories_burned?: number | null;
+  basal_calories_burned?: number | null;
   workout_minutes?: number | null;
+  cardio_load?: number | null;
+  breathing_rate?: number | null;
+  spo2?: number | null;
+  skin_temperature?: number | null;
+  body_temperature?: number | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -383,6 +406,7 @@ type TrainingReadinessSignals = {
   lift_recommendation?: { label?: string; reason?: string };
   fueling_recommendation?: { label?: string; reason?: string };
   hydration_recommendation?: { label?: string; reason?: string };
+  sickness_warning?: { status?: string; label?: string; message?: string; disclaimer?: string };
   signals?: string[];
   diagnostics?: Record<string, unknown>;
 };
@@ -405,6 +429,97 @@ type MuscleCoverageResponse = {
   source?: string;
   diagnostics?: Record<string, unknown>;
   message?: string;
+};
+
+type GoogleHealthDashboardSignals = {
+  status: string;
+  source?: string;
+  date?: string;
+  reason?: string;
+  latest_metric_date?: string;
+  message?: string;
+  debug?: {
+    metric_rows_available?: number;
+    latest_metric_date?: string;
+    missing_metric_warnings?: string[];
+    partial_data?: boolean;
+    error_type?: string;
+    message?: string;
+  };
+  sleep_quality?: {
+    score?: number | null;
+    status?: string;
+    duration_hours?: number | null;
+    rem_minutes?: number | null;
+    deep_minutes?: number | null;
+    light_minutes?: number | null;
+    awake_minutes?: number | null;
+    efficiency?: number | null;
+    message?: string;
+  };
+  recovery_readiness?: {
+    score?: number | null;
+    status?: string;
+    label?: string;
+    message?: string;
+  };
+  sickness_warning?: {
+    status?: string;
+    label?: string;
+    message?: string;
+    abnormal_signals?: string[];
+    signal_count?: number;
+    disclaimer?: string;
+  };
+  resting_hr_vs_baseline?: {
+    resting_hr?: number | null;
+    baseline?: number | null;
+    deviation?: number | null;
+    status?: string;
+  };
+  hrv?: {
+    hrv?: number | null;
+    baseline?: number | null;
+    status?: string;
+  };
+  health?: {
+    breathing_rate?: number | null;
+    spo2?: number | null;
+    skin_temperature?: number | null;
+    body_temperature?: number | null;
+  };
+  calories_burned_vs_intake?: {
+    calories_burned?: number | null;
+    logged_intake?: number | null;
+    intake_vs_burned?: number | null;
+    status?: string;
+    message?: string;
+  };
+  suggested_calorie_adjustment?: {
+    adjustment?: number;
+    status?: string;
+    confidence?: string;
+    baseline_target?: number | null;
+    activity_modifier?: number | null;
+    recovery_modifier?: number | null;
+    context_target?: number | null;
+    bodyweight_confirmation?: {
+      confirmed?: boolean;
+      sample_size?: number;
+      weekly_change_lb?: number | null;
+    };
+    message?: string;
+  };
+  activity_load?: {
+    steps?: number | null;
+    active_minutes?: number | null;
+    active_zone_minutes?: number | null;
+    distance_miles?: number | null;
+    recent_training_minutes?: number | null;
+    recent_hard_sets?: number | null;
+    load_score?: number | null;
+    status?: string;
+  };
 };
 
 type TrainingEntry = {
@@ -884,9 +999,17 @@ type SettingsHealthCard = {
     last_imported_count?: number;
     last_updated_count?: number;
     last_fetched_count?: number;
+    imported_metrics?: number;
+    fetched_days?: number;
     latest_activity_date?: string;
     latest_measurement_date?: string;
+    latest_record?: string;
     last_error?: string;
+    last_warning?: string;
+    last_status?: string;
+    last_message?: string;
+    last_warning_count?: number;
+    last_storage_error_count?: number;
   };
 };
 
@@ -1210,6 +1333,7 @@ type DashboardData = {
       reasoning: string[];
     };
   };
+  google_health?: GoogleHealthDashboardSignals;
   prs: Pick<PersonalRecords, "bench_press" | "mile_time">;
   goals: Goals;
   targets: Targets;
@@ -1292,6 +1416,7 @@ type SettingsData = {
   strava?: DiagnosticComponent;
   hevy?: DiagnosticComponent;
   withings?: DiagnosticComponent;
+  google_health?: DiagnosticComponent;
   frontend?: DiagnosticComponent;
   other_integrations?: Record<string, DiagnosticComponent>;
   required_user_actions?: string[];
@@ -1299,7 +1424,7 @@ type SettingsData = {
   appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
-  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean }>;
+  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string }>;
 };
 
 type ApiConnectionLayer = {
@@ -1319,6 +1444,7 @@ type ApiConnectionTestResponse = {
   hevy: ApiConnectionTestItem;
   openai: ApiConnectionTestItem;
   withings: ApiConnectionTestItem;
+  google_health?: ApiConnectionTestItem;
 };
 
 type FormState = {
@@ -1630,7 +1756,7 @@ const STARTUP_LOADING_MESSAGES = [
   "Initializing dashboard...",
   "Loading performance systems...",
 ] as const;
-const STARTUP_MORPH_MS = 1100;
+const STARTUP_DISSOLVE_MS = 760;
 const integrationLabels: Record<string, string> = {
   hevy_api_key: "Hevy API key",
   strava_client_id: "Strava client ID",
@@ -1639,6 +1765,7 @@ const integrationLabels: Record<string, string> = {
   fitbit_client_secret: "Fitbit client secret",
   google_health_client_id: "Google Health client ID",
   google_health_client_secret: "Google Health client secret",
+  google_health_redirect_uri: "Google Health redirect URI",
   withings_client_id: "Withings client ID",
   withings_client_secret: "Withings client secret",
   openai_api_key: "OpenAI API key",
@@ -2234,7 +2361,7 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
   );
 }
 
-function StartupLoadingScreen({ morphing }: Readonly<{ morphing: boolean }>) {
+function StartupLoadingScreen({ dissolving }: Readonly<{ dissolving: boolean }>) {
   const [messageIndex, setMessageIndex] = useState(0);
   const [messageVisible, setMessageVisible] = useState(true);
 
@@ -2259,26 +2386,20 @@ function StartupLoadingScreen({ morphing }: Readonly<{ morphing: boolean }>) {
   }, []);
 
   return (
-    <div className={cx("startup-screen fixed inset-0 z-50 overflow-hidden text-zinc-100", morphing && "is-morphing")}>
-      {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img
-        src="/loading.png"
-        alt=""
-        aria-hidden="true"
-        className="startup-background-image absolute inset-0 h-full w-full object-cover object-center"
-      />
-      <div className="startup-overlay-layer absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,rgba(20,28,21,0.12),rgba(5,6,7,0.44)_42%,rgba(0,0,0,0.82)_100%)]" />
-      <div className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(180deg,rgba(0,0,0,0.38)_0%,rgba(0,0,0,0.18)_38%,rgba(0,0,0,0.72)_100%)]" />
+    <div className={cx("startup-screen fixed inset-0 z-50 overflow-hidden text-zinc-100", dissolving && "is-dissolving")}>
+      <div className="startup-background-image absolute inset-0" aria-hidden="true" />
+      <div className="startup-overlay-layer absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,rgba(84,113,62,0.08),rgba(8,9,10,0.46)_44%,rgba(0,0,0,0.88)_100%)]" />
+      <div className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(180deg,rgba(16,17,19,0.82)_0%,rgba(9,10,11,0.42)_42%,rgba(0,0,0,0.86)_100%)]" />
       <div className="relative flex min-h-dvh items-center justify-center px-6">
         <div className="-translate-y-[7vh] text-center">
-          <div className="startup-logo-morph-origin mx-auto">
+          <div className="startup-logo-dissolve mx-auto">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/heart-logo.png"
+              src="/POSLOGO.png"
               alt="Performance OS"
-              width={160}
-              height={160}
-              className="startup-logo-glow h-36 w-36 object-contain sm:h-40 sm:w-40"
+              width={176}
+              height={176}
+              className="startup-logo-glow h-32 w-32 object-contain sm:h-36 sm:w-36"
             />
           </div>
           <div className="startup-loading-details">
@@ -4082,6 +4203,49 @@ function normalizeDashboardMacroProgress(raw: unknown, fallbackTarget?: unknown)
   };
 }
 
+function dashboardHealthTone(status?: string) {
+  const normalized = String(status || "").toLowerCase();
+  if (["warning", "red", "poor", "high", "suppressed", "above_estimated_burn", "below_estimated_burn"].includes(normalized)) {
+    return "border-rose-300/25 bg-rose-300/[0.08] text-rose-100";
+  }
+  if (["watch", "yellow", "fair", "near_estimated_burn", "suggest_adjustment"].includes(normalized)) {
+    return "border-amber-300/25 bg-amber-300/[0.08] text-amber-100";
+  }
+  if (["clear", "green", "good", "normal", "likely_near_maintenance", "hold"].includes(normalized)) {
+    return "border-emerald-300/25 bg-emerald-300/[0.08] text-emerald-100";
+  }
+  return "border-white/10 bg-white/[0.035] text-zinc-200";
+}
+
+function DashboardHealthSignalTile({
+  title,
+  value,
+  detail,
+  status,
+  icon: Icon,
+}: Readonly<{
+  title: string;
+  value: string;
+  detail: string;
+  status?: string;
+  icon: React.ElementType;
+}>) {
+  return (
+    <div className="min-h-[132px] rounded-lg border border-white/10 bg-white/[0.035] p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{title}</p>
+          <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+        </div>
+        <div className={cx("rounded-lg border p-2", dashboardHealthTone(status))}>
+          <Icon className="h-4 w-4" />
+        </div>
+      </div>
+      <p className="mt-3 text-xs leading-5 text-zinc-400">{detail}</p>
+    </div>
+  );
+}
+
 function statusBadgeClass(status: string) {
   if (status === "green") {
     return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
@@ -4292,6 +4456,33 @@ function Dashboard({
   const todayVolume = finiteNumberOrNull(lift?.today_volume);
   const recoveryScore = finiteNumberOrNull(recovery?.latest_score);
   const extraRunReasoning = stringList(recovery?.extra_run_readiness?.reasoning);
+  const googleHealth = data?.google_health;
+  const googleHealthReady = googleHealth?.status === "ok";
+  const sleepQuality = googleHealth?.sleep_quality;
+  const recoveryReadiness = googleHealth?.recovery_readiness;
+  const sicknessWarning = googleHealth?.sickness_warning;
+  const restingHrSignal = googleHealth?.resting_hr_vs_baseline;
+  const calorieBurnSignal = googleHealth?.calories_burned_vs_intake;
+  const calorieAdjustmentSignal = googleHealth?.suggested_calorie_adjustment;
+  const activityLoadSignal = googleHealth?.activity_load;
+  const healthVitals = googleHealth?.health;
+  const sicknessSignals = stringList(sicknessWarning?.abnormal_signals);
+  const calculationWarnings = stringList(googleHealth?.debug?.missing_metric_warnings);
+  const bodyweightConfirmation = calorieAdjustmentSignal?.bodyweight_confirmation;
+  const caloriesBurned = finiteNumberOrNull(calorieBurnSignal?.calories_burned);
+  const caloriesIntake = finiteNumberOrNull(calorieBurnSignal?.logged_intake);
+  const caloriesDelta = finiteNumberOrNull(calorieBurnSignal?.intake_vs_burned);
+  const calorieAdjustment = finiteNumberOrNull(calorieAdjustmentSignal?.adjustment) ?? 0;
+  const formatDashboardNumber = (value: unknown, unit = "", digits = 0) => {
+    const parsed = finiteNumberOrNull(value);
+    return parsed === null ? "--" : `${parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
+  };
+  const signedDashboardNumber = (value: unknown, unit = "", digits = 0) => {
+    const parsed = finiteNumberOrNull(value);
+    if (parsed === null) return "--";
+    const formatted = parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    return `${parsed > 0 ? "+" : ""}${formatted}${unit}`;
+  };
   const macroWeeklyScore = finiteNumberOrNull(macroAdherence?.weekly_score);
   const failedDashboardBlocks = arrayOrEmpty<DashboardDebugBlock>(data?.debug?.errors ?? data?.errors).filter((block) => block.status === "error" || block.error_type);
   const dashboardDegraded = data?.debug?.dashboard_status === "degraded" && failedDashboardBlocks.length > 0;
@@ -4476,6 +4667,142 @@ function Dashboard({
               <p className="mt-1 text-xs leading-5 text-zinc-500">{extraRunReasoning[0]}</p>
             ) : null}
           </div>
+        </Card>
+      </TargetSectionErrorBoundary>
+
+      <TargetSectionErrorBoundary title="Google Health recovery signals unavailable" description="Wearable recovery data could not render safely." resetKey={`${googleHealth?.date ?? ""}-${googleHealth?.status ?? ""}`}>
+        <Card className="xl:col-span-2">
+          <SectionHeader
+            eyebrow="Recovery"
+            title="Google Health Signals"
+            action={googleHealthReady ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
+                {googleHealth?.source || "google_health"} · {googleHealth?.date || data?.date}
+              </span>
+            ) : null}
+          />
+          {googleHealthReady ? (
+            <div className="space-y-4">
+              <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                <DashboardHealthSignalTile
+                  title="Sleep Quality"
+                  value={sleepQuality?.score !== null && sleepQuality?.score !== undefined ? `${sleepQuality.score}/100` : "--"}
+                  detail={`${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
+                  status={sleepQuality?.status}
+                  icon={HeartPulse}
+                />
+                <DashboardHealthSignalTile
+                  title="Recovery Readiness"
+                  value={recoveryReadiness?.score !== null && recoveryReadiness?.score !== undefined ? `${recoveryReadiness.score}/100` : "--"}
+                  detail={recoveryReadiness?.message || "Recovery readiness uses sleep, HR, vitals, and training load."}
+                  status={recoveryReadiness?.status}
+                  icon={Gauge}
+                />
+                <DashboardHealthSignalTile
+                  title="Sickness Warning"
+                  value={sicknessWarning?.label || "No sickness pattern detected"}
+                  detail={sicknessWarning?.message || "No multi-signal sickness pattern from available wearable data."}
+                  status={sicknessWarning?.status}
+                  icon={AlertTriangle}
+                />
+                <DashboardHealthSignalTile
+                  title="Resting HR vs Baseline"
+                  value={`${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
+                  detail={`Deviation ${formatDashboardNumber(restingHrSignal?.deviation, " bpm", 1)} · HRV ${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}
+                  status={restingHrSignal?.status}
+                  icon={HeartPulse}
+                />
+                <DashboardHealthSignalTile
+                  title="Calories Burned vs Intake"
+                  value={caloriesBurned !== null ? `${Math.round(caloriesBurned).toLocaleString()} kcal` : "--"}
+                  detail={`Intake ${caloriesIntake !== null ? Math.round(caloriesIntake).toLocaleString() : "--"} kcal · ${caloriesDelta !== null ? `${caloriesDelta > 0 ? "+" : ""}${Math.round(caloriesDelta).toLocaleString()} kcal` : "no delta"} · ${calorieBurnSignal?.message || "Burn is context, not the saved target."}`}
+                  status={calorieBurnSignal?.status}
+                  icon={Utensils}
+                />
+                <DashboardHealthSignalTile
+                  title="Suggested Calorie Adjustment"
+                  value={`${calorieAdjustment > 0 ? "+" : ""}${Math.round(calorieAdjustment)} kcal`}
+                  detail={`${calorieAdjustmentSignal?.message || "Hold saved target until bodyweight trend confirms a change."} Activity ${signedDashboardNumber(calorieAdjustmentSignal?.activity_modifier, " kcal")} · recovery ${signedDashboardNumber(calorieAdjustmentSignal?.recovery_modifier, " kcal")} · context ${formatDashboardNumber(calorieAdjustmentSignal?.context_target, " kcal")}`}
+                  status={calorieAdjustmentSignal?.status}
+                  icon={Target}
+                />
+                <DashboardHealthSignalTile
+                  title="Activity Load"
+                  value={activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Need data"}
+                  detail={`${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active · ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone · ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}
+                  status={activityLoadSignal?.status}
+                  icon={BarChart3}
+                />
+                <DashboardHealthSignalTile
+                  title="Vitals"
+                  value={healthVitals?.spo2 !== null && healthVitals?.spo2 !== undefined ? `${healthVitals.spo2}% SpO2` : "Optional"}
+                  detail={`Breathing ${formatDashboardNumber(healthVitals?.breathing_rate, "/min", 1)} · Skin temp ${formatDashboardNumber(healthVitals?.skin_temperature, "", 1)} · Body temp ${formatDashboardNumber(healthVitals?.body_temperature, "C", 1)}`}
+                  status={sicknessWarning?.status}
+                  icon={Sparkles}
+                />
+              </div>
+              {sicknessSignals.length ? (
+                <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessWarning?.status))}>
+                  <p className="text-sm font-semibold">Possible sickness / elevated recovery risk</p>
+                  <p className="mt-2 text-sm leading-6 text-zinc-300">Consider reducing intensity today. Prioritize sleep, hydration, and easy movement. This is not a diagnosis.</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {sicknessSignals.slice(0, 6).map((signal) => (
+                      <span key={signal} className="rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs text-zinc-100">{signal}</span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Calculation Details</p>
+                    <p className="mt-1 text-sm font-semibold text-white">Why these wearable signals changed</p>
+                  </div>
+                  <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+                </summary>
+                <div className="mt-4 grid gap-3 text-xs leading-5 text-zinc-400 md:grid-cols-2">
+                  <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+                    <p className="font-semibold text-zinc-100">Current inputs</p>
+                    <p className="mt-2">Sleep: {formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)}; REM/deep: {formatDashboardNumber(sleepQuality?.rem_minutes, "m")} / {formatDashboardNumber(sleepQuality?.deep_minutes, "m")}; efficiency: {formatDashboardNumber(sleepQuality?.efficiency, "%")}.</p>
+                    <p>RHR: {formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} vs baseline {formatDashboardNumber(restingHrSignal?.baseline, " bpm")} ({signedDashboardNumber(restingHrSignal?.deviation, " bpm", 1)}).</p>
+                    <p>HRV: {formatDashboardNumber(googleHealth?.hrv?.hrv)} vs baseline {formatDashboardNumber(googleHealth?.hrv?.baseline)}.</p>
+                    <p>Activity: {formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active, {formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone, {formatDashboardNumber(activityLoadSignal?.steps)} steps.</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+                    <p className="font-semibold text-zinc-100">Calorie context</p>
+                    <p className="mt-2">Saved baseline: {formatDashboardNumber(calorieAdjustmentSignal?.baseline_target, " kcal")}.</p>
+                    <p>Wearable burn: {formatDashboardNumber(calorieBurnSignal?.calories_burned, " kcal")}; logged intake: {formatDashboardNumber(calorieBurnSignal?.logged_intake, " kcal")}; delta: {signedDashboardNumber(calorieBurnSignal?.intake_vs_burned, " kcal")}.</p>
+                    <p>Context modifiers: activity {signedDashboardNumber(calorieAdjustmentSignal?.activity_modifier, " kcal")}; recovery {signedDashboardNumber(calorieAdjustmentSignal?.recovery_modifier, " kcal")}; context target {formatDashboardNumber(calorieAdjustmentSignal?.context_target, " kcal")}.</p>
+                    <p>Bodyweight confirmation: {bodyweightConfirmation?.confirmed ? "confirmed" : "not confirmed"} ({bodyweightConfirmation?.sample_size ?? 0} recent weigh-ins{bodyweightConfirmation?.weekly_change_lb !== null && bodyweightConfirmation?.weekly_change_lb !== undefined ? `, ${signedDashboardNumber(bodyweightConfirmation.weekly_change_lb, " lb/wk", 2)}` : ""}).</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+                    <p className="font-semibold text-zinc-100">Reasoning</p>
+                    <p className="mt-2">{recoveryReadiness?.message || "Recovery readiness needs sleep, HR, vitals, and activity data."}</p>
+                    <p>{calorieAdjustmentSignal?.message || "Calorie targets are held until bodyweight trend confirms a change."}</p>
+                    <p>{sicknessWarning?.message || "No multi-signal sickness pattern from available data."}</p>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 p-3">
+                    <p className="font-semibold text-zinc-100">Data quality</p>
+                    <p className="mt-2">Metric rows available: {googleHealth?.debug?.metric_rows_available ?? "--"}.</p>
+                    <p>Latest metric date: {googleHealth?.latest_metric_date || googleHealth?.debug?.latest_metric_date || googleHealth?.date || "--"}.</p>
+                    {calculationWarnings.length ? (
+                      <ul className="mt-2 space-y-1">
+                        {calculationWarnings.slice(0, 4).map((warning) => <li key={warning}>- {warning}</li>)}
+                      </ul>
+                    ) : <p>No missing core metric warnings for this date.</p>}
+                    <a href="/calculation-logic" className="accent-text-strong mt-3 inline-flex text-xs font-semibold">Open full calculation guide</a>
+                  </div>
+                </div>
+              </details>
+            </div>
+          ) : (
+            <EmptyState
+              title={googleHealth?.reason === "no_wearable_data_connected" ? "No wearable data connected" : "No Google Health data for this date"}
+              description={googleHealth?.message || "Connect or sync Google Health to show sleep, readiness, sickness risk, calories burned, and activity load."}
+              action="Open Settings"
+              onAction={() => setActivePage("settings")}
+            />
+          )}
         </Card>
       </TargetSectionErrorBoundary>
 
@@ -6615,6 +6942,7 @@ function RecoveryPage({
   const latestWearable = sortedWearableMetrics.at(-1) ?? null;
   const wearableFlags = Array.isArray(wearableSignals?.flags) ? wearableSignals.flags : [];
   const readinessMessages = Array.isArray(trainingReadiness?.signals) ? trainingReadiness.signals : [];
+  const sicknessReadiness = trainingReadiness?.sickness_warning;
   const wearableNumber = (value: unknown, suffix = "") => {
     const number = finiteNumberOrNull(value);
     return number === null ? "--" : `${Number.isInteger(number) ? number.toLocaleString() : number.toFixed(1)}${suffix}`;
@@ -6757,6 +7085,14 @@ function RecoveryPage({
                 </div>
               ))}
               {readinessMessages.length ? <p className="text-xs leading-5 text-zinc-500">{readinessMessages[0]}</p> : null}
+              {sicknessReadiness ? (
+                <div className={cx("rounded-lg border p-3", dashboardHealthTone(sicknessReadiness.status))}>
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">Sickness Warning</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{sicknessReadiness.label || "No sickness pattern detected"}</p>
+                  <p className="mt-1 text-xs leading-5 text-zinc-300">{sicknessReadiness.message || "No multi-signal sickness pattern from available wearable data."}</p>
+                  <p className="mt-1 text-[11px] text-zinc-500">{sicknessReadiness.disclaimer || "This is not a diagnosis."}</p>
+                </div>
+              ) : null}
             </div>
           ) : (
             <p className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-4 text-sm leading-6 text-zinc-400">
@@ -10259,6 +10595,7 @@ function DiagnosticStatusDashboard({ settings }: Readonly<{ settings: SettingsDa
     ["strava", "Strava", settings.strava],
     ["hevy", "Hevy", settings.hevy],
     ["withings", "Withings", settings.withings],
+    ["google_health", "Google Health", settings.google_health],
   ];
   const other = Object.entries(settings.other_integrations ?? {}).map(([key, value]) => [key, key.replaceAll("_", " / "), value] as const);
   const cards = [...primary, ...other].filter(([id, , component]) => id !== "backend" && Boolean(component));
@@ -10326,6 +10663,9 @@ function IntegrationHealthGrid({
   onImportStrava,
   onConnectStrava,
   onConnectWithings,
+  onConnectGoogleHealth,
+  onSyncGoogleHealth,
+  googleHealthSyncing,
   onSyncWithings,
 }: Readonly<{
   cards: SettingsHealthCard[];
@@ -10333,6 +10673,9 @@ function IntegrationHealthGrid({
   onImportStrava: () => void;
   onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
+  onConnectGoogleHealth: () => void;
+  onSyncGoogleHealth: () => void;
+  googleHealthSyncing?: boolean;
   onSyncWithings: () => void;
 }>) {
   const actionFor = (card: SettingsHealthCard) => {
@@ -10342,6 +10685,9 @@ function IntegrationHealthGrid({
     if (card.action === "strava_reconnect") return { label: "Reconnect Strava", onClick: () => onConnectStrava(true) };
     if (card.action === "withings_connect") return { label: "Connect", onClick: onConnectWithings };
     if (card.action === "withings_sync") return { label: "Sync", onClick: onSyncWithings };
+    if (card.action === "google_health_connect") return { label: "Connect", onClick: onConnectGoogleHealth };
+    if (card.action === "google_health_reconnect") return { label: "Reconnect", onClick: onConnectGoogleHealth };
+    if (card.action === "google_health_sync") return { label: googleHealthSyncing ? "Syncing..." : "Sync", onClick: onSyncGoogleHealth, disabled: googleHealthSyncing };
     return null;
   };
   return (
@@ -10364,7 +10710,7 @@ function IntegrationHealthGrid({
               <div className="mt-3 flex items-center justify-between gap-2">
                 <p className="text-xs font-medium text-zinc-500">{card.last_synced_at ? relativeSyncTime(card.last_synced_at) : card.label}</p>
                 {action ? (
-                  <button type="button" onClick={action.onClick} className="rounded-md border border-white/10 px-2 py-1 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                  <button type="button" onClick={action.onClick} disabled={action.disabled} className="rounded-md border border-white/10 px-2 py-1 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
                     {action.label}
                   </button>
                 ) : null}
@@ -10385,6 +10731,16 @@ function IntegrationHealthGrid({
                   <p>Scopes: <span className="text-zinc-300">{card.metadata.scopes || "Not granted"}</span></p>
                   <p>Fetched: <span className="text-zinc-300">{card.metadata.last_fetched_count ?? 0}</span> · Imported: <span className="text-zinc-300">{card.metadata.last_imported_count ?? 0}</span> · Updated: <span className="text-zinc-300">{card.metadata.last_updated_count ?? 0}</span></p>
                   {card.metadata.latest_measurement_date ? <p>Latest measurement: <span className="text-zinc-300">{card.metadata.latest_measurement_date}</span></p> : null}
+                </div>
+              ) : null}
+              {card.id === "google_health" && card.metadata ? (
+                <div className="mt-3 grid gap-1 border-t border-white/10 pt-3 text-[11px] leading-5 text-zinc-500">
+                  <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
+                  <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Imported: <span className="text-zinc-300">{card.metadata.imported_metrics ?? card.metadata.last_imported_count ?? 0}</span></p>
+                  {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status}</span></p> : null}
+                  {card.metadata.latest_record ? <p>Latest daily metric: <span className="text-zinc-300">{card.metadata.latest_record}</span></p> : null}
+                  {card.metadata.last_warning ? <p className="text-amber-100">Last warning: {card.metadata.last_warning}</p> : null}
+                  {card.metadata.last_error ? <p className="text-amber-100">Last error: {card.metadata.last_error}</p> : null}
                 </div>
               ) : null}
             </div>
@@ -10441,10 +10797,11 @@ function ApiConnectionTestPanel({
   testing: boolean;
   onTest: () => void;
 }>) {
-  const cards: Array<{ id: "hevy" | "openai" | "withings"; title: string; description: string }> = [
+  const cards: Array<{ id: "hevy" | "openai" | "withings" | "google_health"; title: string; description: string }> = [
     { id: "hevy", title: "Hevy", description: "API key and workout endpoint" },
     { id: "openai", title: "OpenAI / ChatGPT", description: "API key and lightweight API reachability" },
     { id: "withings", title: "Withings", description: "App credentials, OAuth token, scope, and body metrics API" },
+    { id: "google_health", title: "Google Health", description: "OAuth token, scopes, and daily wearable sync readiness" },
   ];
   return (
     <Card>
@@ -10986,6 +11343,10 @@ function SettingsPage({
   onTestApiConnections,
   onConnectStrava,
   onConnectWithings,
+  onConnectGoogleHealth,
+  onSyncGoogleHealth,
+  onDisconnectGoogleHealth,
+  googleHealthSyncing,
   onSyncWithings,
   onSyncWithingsHistory,
   onTestOpenAI,
@@ -11004,6 +11365,10 @@ function SettingsPage({
   onTestApiConnections: () => void;
   onConnectStrava: (reconnect?: boolean) => void;
   onConnectWithings: () => void;
+  onConnectGoogleHealth: () => void;
+  onSyncGoogleHealth: () => void;
+  onDisconnectGoogleHealth: () => void;
+  googleHealthSyncing?: boolean;
   onSyncWithings: () => void;
   onSyncWithingsHistory: () => void;
   onTestOpenAI: () => void;
@@ -11017,7 +11382,11 @@ function SettingsPage({
   const stravaConnected = stravaStatus === "Connected";
   const hevyStatus = settings?.statuses?.hevy_api_key ?? settingsHealthCard(settings, "hevy")?.status ?? "Not configured";
   const withingsStatus = settings?.statuses?.withings ?? settingsHealthCard(settings, "withings")?.status ?? "Not configured";
-  const fitbitStatus = settings?.statuses?.fitbit_google_health ?? settings?.statuses?.fitbit_client_id ?? "Not configured";
+  const googleHealthStatus = settings?.statuses?.google_health ?? settingsHealthCard(settings, "google_health")?.label ?? "Not configured";
+  const googleHealthConnected = googleHealthStatus === "Connected";
+  const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; details?: { last_error?: string } } | undefined;
+  const googleHealthError = String(settingsService(settings, "google_health")?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
+  const googleHealthWarning = String(settingsService(settings, "google_health")?.last_warning || settingsHealthCard(settings, "google_health")?.metadata?.last_warning || "");
   const openAiStatus = settings?.statuses?.openai_api_key ?? settingsService(settings, "openai")?.status ?? "Not configured";
   const appleHealthStatus = settings?.statuses?.apple_health_export_file ?? "Local upload";
   return (
@@ -11050,10 +11419,15 @@ function SettingsPage({
             ]}
           />
           <SettingsConnectionCard
-            title="Fitbit / Google Health"
-            description="Prepared for wearable recovery signals when OAuth sync is enabled."
-            status={fitbitStatus}
-            lastSync={settingsLastSync(settings, "fitbit")}
+            title="Google Health"
+            description={googleHealthError ? `Last sync error: ${googleHealthError}` : googleHealthWarning ? `Last sync warning: ${googleHealthWarning}` : settingsService(settings, "google_health")?.message ?? "Daily wearable metrics sync for readiness signals."}
+            status={googleHealthStatus}
+            lastSync={settingsLastSync(settings, "google_health")}
+            actions={[
+              { label: googleHealthConnected ? "Reconnect Google Health" : "Connect Google Health", onClick: onConnectGoogleHealth, variant: "primary" },
+              { label: googleHealthSyncing ? "Syncing..." : "Sync Now", onClick: onSyncGoogleHealth, disabled: !googleHealthConnected || googleHealthSyncing, variant: "secondary" },
+              { label: "Disconnect", onClick: onDisconnectGoogleHealth, disabled: !googleHealthConnected || googleHealthSyncing, variant: "danger" },
+            ]}
           />
           <SettingsConnectionCard
             title="OpenAI"
@@ -11100,6 +11474,7 @@ function SettingsPage({
           {[
             { label: "Sync Hevy", detail: "Refresh workout history and training summaries.", onClick: onSyncHevy, disabled: false },
             { label: "Manual Strava Import", detail: "Import recent run/cardio activities.", onClick: onImportStrava, disabled: !stravaConnected },
+            { label: "Sync Google Health", detail: "Pull daily wearable metrics for readiness signals.", onClick: onSyncGoogleHealth, disabled: !googleHealthConnected },
             { label: "Sync Weight Now", detail: "Pull the latest Withings scale measurement.", onClick: onSyncWithings, disabled: !withingsConnected },
             { label: "Sync Withings History", detail: "Backfill historical weight and body composition.", onClick: onSyncWithingsHistory, disabled: !withingsConnected },
           ].map((action) => (
@@ -11156,7 +11531,19 @@ function SettingsPage({
           </Card>
           <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
           <DiagnosticStatusDashboard settings={settings} />
-          {settings?.health?.length ? <IntegrationHealthGrid cards={settings.health} onSyncHevy={onSyncHevy} onImportStrava={onImportStrava} onConnectStrava={onConnectStrava} onConnectWithings={onConnectWithings} onSyncWithings={onSyncWithings} /> : null}
+          {settings?.health?.length ? (
+            <IntegrationHealthGrid
+              cards={settings.health}
+              onSyncHevy={onSyncHevy}
+              onImportStrava={onImportStrava}
+              onConnectStrava={onConnectStrava}
+              onConnectWithings={onConnectWithings}
+              onConnectGoogleHealth={onConnectGoogleHealth}
+              onSyncGoogleHealth={onSyncGoogleHealth}
+              googleHealthSyncing={googleHealthSyncing}
+              onSyncWithings={onSyncWithings}
+            />
+          ) : null}
           <Card>
             <SectionHeader eyebrow="Raw state" title="Saved integration values" />
             <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -11364,6 +11751,7 @@ function HomeContent() {
   const [hevyPreview, setHevyPreview] = useState<HevyPreview | null>(null);
   const [hevySync, setHevySync] = useState<HevySyncStatus | null>(null);
   const [hevySyncing, setHevySyncing] = useState(false);
+  const [googleHealthSyncing, setGoogleHealthSyncing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadingMessage, setLoadingMessage] = useState("Waking backend...");
   const [initialBootComplete, setInitialBootComplete] = useState(false);
@@ -11736,7 +12124,7 @@ function HomeContent() {
           setStartupTransitioning(false);
           setInitialBootComplete(true);
           startupTransitionTimerRef.current = null;
-        }, STARTUP_MORPH_MS);
+        }, STARTUP_DISSOLVE_MS);
         return;
       }
       setLoading(false);
@@ -13698,6 +14086,51 @@ function HomeContent() {
             setApiError(error instanceof Error ? error.message : "Unable to connect Withings.");
           }
         }}
+        onConnectGoogleHealth={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const result = await apiGet<{ status: string; message?: string; auth_url: string }>("/api/google-health/connect");
+            if (result.status !== "ok" || !result.auth_url) {
+              throw new Error(result.message ?? "Unable to generate Google Health authorization URL.");
+            }
+            window.location.href = result.auth_url;
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to connect Google Health.");
+          }
+        }}
+        onSyncGoogleHealth={async () => {
+          if (googleHealthSyncing) return;
+          setGoogleHealthSyncing(true);
+          setApiError(null);
+          setMessage("Google Health sync started. Dashboard stays usable while metrics refresh.");
+          try {
+            const result = await apiSend<{ status: string; message?: string; imported_metrics?: number; fetched_days?: number; latest_record?: string; warnings?: string[]; storage_errors?: unknown[] }>("/api/google-health/sync", "POST", { days: 14 });
+            if (result.status === "error") {
+              throw new Error(result.message ?? "Google Health sync failed.");
+            }
+            const warningText = result.warnings?.length ? ` ${result.warnings[0]}` : "";
+            setMessage(`${result.message ?? `Google Health sync complete: ${result.imported_metrics ?? 0} daily row(s) saved.`}${warningText}`);
+            void refreshAll({ allowColdStartRetry: false });
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Google Health sync failed.");
+          } finally {
+            setGoogleHealthSyncing(false);
+          }
+        }}
+        googleHealthSyncing={googleHealthSyncing}
+        onDisconnectGoogleHealth={async () => {
+          setApiError(null);
+          setMessage(null);
+          try {
+            const updated = await apiSend<SettingsData>("/api/google-health/disconnect", "POST", {});
+            applySettingsData(updated);
+            setMessage("Google Health disconnected. Reconnect from Settings when ready.");
+            await refreshAll();
+          } catch (error) {
+            setApiError(error instanceof Error ? error.message : "Unable to disconnect Google Health.");
+          }
+        }}
         onSyncWithings={async () => {
           setApiError(null);
           setMessage(null);
@@ -13846,13 +14279,13 @@ function HomeContent() {
   return (
     <main data-accent-theme={accentTheme} className="h-screen overflow-hidden bg-[#07080b] text-zinc-100">
       <div className="accent-page-glow pointer-events-none fixed inset-0" />
-      {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen morphing={startupTransitioning} /> : null}
+      {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen dissolving={startupTransitioning} /> : null}
       <div className={cx("startup-app-shell relative flex h-screen overflow-hidden", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
         <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
           <div className="mb-8 flex items-center gap-3">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src="/heart-logo.png"
+              src="/POSLOGO.png"
               alt="Performance OS logo"
               width={40}
               height={40}
@@ -13913,7 +14346,7 @@ function HomeContent() {
               <div className="flex min-w-0 items-start gap-3">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src="/heart-logo.png"
+                  src="/POSLOGO.png"
                   alt="Performance OS logo"
                   width={36}
                   height={36}

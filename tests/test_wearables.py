@@ -218,3 +218,43 @@ def test_training_readiness_stays_green_with_stable_wearables():
     assert readiness["run_recommendation"]["color"] == "Green"
     assert readiness["run_recommendation"]["label"] == "Run OK"
     assert readiness["lift_recommendation"]["label"] == "Push normal"
+
+
+def test_training_readiness_uses_rhr_deviation_and_recovery_health_signals():
+    wearable_rows = []
+    for index in range(7):
+        day = pd.Timestamp("2026-05-10") + pd.Timedelta(days=index)
+        wearable_rows.append(
+            {
+                "metric_id": f"baseline-{index}",
+                "date": day.date().isoformat(),
+                "source": "google_health",
+                "sleep_hours": 7.5,
+                "resting_hr": 55,
+                "resting_hr_deviation": 0,
+                "hrv": 60,
+                "steps": 6500,
+                "active_minutes": 40,
+            }
+        )
+    wearable_rows.append(
+        {
+            "metric_id": "health-risk",
+            "date": "2026-05-17",
+            "source": "google_health",
+            "sleep_hours": 6.2,
+            "resting_hr": 62,
+            "resting_hr_deviation": 7,
+            "hrv": 58,
+            "steps": 7000,
+            "active_minutes": 45,
+            "spo2": 93,
+        }
+    )
+
+    readiness = calculate_training_readiness_signals(pd.DataFrame(wearable_rows))
+
+    assert readiness["run_recommendation"]["color"] == "Red"
+    assert readiness["lift_recommendation"]["label"] == "Recovery day"
+    assert readiness["diagnostics"]["recovery_health"]["sickness_warning"] is True
+    assert any("possible sickness" in signal for signal in readiness["signals"])

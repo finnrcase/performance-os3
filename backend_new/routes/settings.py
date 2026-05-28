@@ -20,6 +20,7 @@ INTEGRATION_FIELDS = [
     "fitbit_client_secret",
     "google_health_client_id",
     "google_health_client_secret",
+    "google_health_redirect_uri",
     "withings_client_id",
     "withings_client_secret",
     "openai_api_key",
@@ -37,6 +38,7 @@ ENV_BY_FIELD = {
     "fitbit_client_secret": "FITBIT_CLIENT_SECRET",
     "google_health_client_id": "GOOGLE_HEALTH_CLIENT_ID",
     "google_health_client_secret": "GOOGLE_HEALTH_CLIENT_SECRET",
+    "google_health_redirect_uri": "GOOGLE_HEALTH_REDIRECT_URI",
     "openai_api_key": "OPENAI_API_KEY",
 }
 
@@ -135,6 +137,42 @@ def _strava_connection(settings: dict[str, Any], integrations: dict[str, Any]) -
     }
 
 
+def _google_health_connection(settings: dict[str, Any], integrations: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    metadata = settings.get("metadata") if isinstance(settings.get("metadata"), dict) else {}
+    tokens = metadata.get("google_health_tokens") if isinstance(metadata.get("google_health_tokens"), dict) else {}
+    sync = metadata.get("google_health_sync") if isinstance(metadata.get("google_health_sync"), dict) else {}
+    has_credentials = (
+        integrations.get("google_health_client_id")
+        and integrations.get("google_health_client_secret")
+    ) or (
+        _configured_from_env("google_health_client_id")
+        and _configured_from_env("google_health_client_secret")
+    )
+    refresh_token = str(tokens.get("refresh_token") or "").strip()
+    access_token = str(tokens.get("access_token") or "").strip()
+    if not has_credentials:
+        status = "Not configured"
+    elif sync.get("needs_reconnect"):
+        status = "Reconnect required"
+    elif refresh_token:
+        status = "Connected"
+    else:
+        status = "Disconnected"
+    return status, {
+        "connected": status == "Connected",
+        "configured": bool(has_credentials),
+        "token_status": "reconnect_required" if sync.get("needs_reconnect") else "valid" if refresh_token else "missing",
+        "access_token_present": bool(access_token),
+        "refresh_token_present": bool(refresh_token),
+        "last_synced_at": sync.get("last_synced_at", ""),
+        "latest_record": sync.get("latest_record", ""),
+        "last_error": sync.get("last_error", ""),
+        "reconnect_required": bool(sync.get("needs_reconnect") and has_credentials),
+        "imported_metrics": sync.get("last_imported_count", 0),
+        "fetched_days": sync.get("last_fetched_count", 0),
+    }
+
+
 def _openai_status(openai_config: dict[str, Any], metadata: dict[str, Any]) -> dict[str, Any]:
     configured = bool(openai_config.get("openai_key_configured"))
     last_test = metadata.get("openai_last_test") if isinstance(metadata.get("openai_last_test"), dict) else {}
@@ -211,6 +249,7 @@ def settings_payload() -> dict[str, Any]:
     statuses["openai_api_key"] = openai_service["label"]
     withings_status = _withings_status(settings, integrations)
     strava_status, strava_service = _strava_connection(settings, integrations)
+    google_health_status, google_health_service = _google_health_connection(settings, integrations)
     wearable_credentials_configured = all(
         statuses.get(field) == "Configured"
         for field in ["fitbit_client_id", "fitbit_client_secret"]
@@ -222,6 +261,7 @@ def settings_payload() -> dict[str, Any]:
         {
             "strava": strava_status,
             "withings": withings_status,
+            "google_health": google_health_status,
             "fitbit_google_health": "Configured" if wearable_credentials_configured else "Prepared",
         }
     )
@@ -248,13 +288,38 @@ def settings_payload() -> dict[str, Any]:
         "fitbit_google_health": {
             "configured": wearable_credentials_configured,
             "status": "configured" if wearable_credentials_configured else "placeholder",
-            "message": "Wearable storage and manual/mock metrics are ready. OAuth is intentionally not enabled yet.",
+            "message": "Wearable storage and manual/mock metrics are ready.",
+        },
+        "google_health": {
+            "configured": google_health_service["configured"],
+            "status": "connected" if google_health_status == "Connected" else "needs_reconnect" if google_health_status == "Reconnect required" else "disconnected" if google_health_status == "Disconnected" else "not_configured",
+            "message": "Google Health daily sync is available from Settings.",
+            **google_health_service,
         },
         "openai": {
             **openai_service,
         },
     }
     health = [
+        {
+            "id": "google_health",
+            "name": "Google Health",
+            "status": "green" if google_health_status == "Connected" else "yellow" if google_health_status in {"Disconnected", "Reconnect required"} else "gray",
+            "message": services["google_health"]["message"],
+            "last_synced_at": google_health_service["last_synced_at"],
+            "latest_record": google_health_service["latest_record"],
+            "action": "google_health_sync" if google_health_status == "Connected" else "google_health_reconnect" if google_health_status == "Reconnect required" else "google_health_connect",
+            "metadata": {
+                "connection": google_health_status,
+                "configured": google_health_service["configured"],
+                "reconnect_required": google_health_service["reconnect_required"],
+                "token_status": google_health_service["token_status"],
+                "imported_metrics": google_health_service["imported_metrics"],
+                "fetched_days": google_health_service["fetched_days"],
+                "latest_record": google_health_service["latest_record"],
+                "last_error": google_health_service["last_error"],
+            },
+        },
         {
             "id": "strava",
             "name": "Strava",
@@ -303,6 +368,13 @@ def settings_payload() -> dict[str, Any]:
             "last_successful_sync": withings_service["last_synced_at"],
             "latest_measure_date": withings_service["latest_record"],
             "reconnect_required": withings_service["reconnect_required"],
+        },
+        "google_health": {
+            "status": google_health_status,
+            "last_successful_sync": google_health_service["last_synced_at"],
+            "latest_record": google_health_service["latest_record"],
+            "reconnect_required": google_health_service["reconnect_required"],
+            "last_error": google_health_service["last_error"],
         },
     }
 

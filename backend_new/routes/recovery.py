@@ -8,7 +8,7 @@ import pandas as pd
 
 from backend_new.db import ensure_jsonb_table, fetch_json_rows, insert_json_row
 from backend_new.utils import app_today_iso, json_safe, utc_now_iso
-from src.wearables import calculate_training_readiness_signals, calculate_wearable_recovery_signals
+from src.wearables import WEARABLE_NUMERIC_COLUMNS, calculate_training_readiness_signals, calculate_wearable_recovery_signals
 
 router = APIRouter(tags=["recovery"])
 
@@ -94,16 +94,7 @@ def _normalize_wearable_metric(payload: dict[str, Any]) -> dict[str, Any]:
     item["id"] = item["metric_id"]
     item["date"] = str(item.get("date") or _today_iso())[:10]
     item["source"] = str(item.get("source") or "manual").strip() or "manual"
-    for field in [
-        "sleep_hours",
-        "sleep_score",
-        "resting_hr",
-        "hrv",
-        "steps",
-        "active_minutes",
-        "calories_burned",
-        "workout_minutes",
-    ]:
+    for field in WEARABLE_NUMERIC_COLUMNS:
         item[field] = _number_or_none(item.get(field))
     item.setdefault("created_at", now)
     item["updated_at"] = now

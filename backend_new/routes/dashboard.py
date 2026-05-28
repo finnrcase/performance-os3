@@ -10,12 +10,13 @@ from typing import Any, Callable
 from fastapi import APIRouter, Query
 import pandas as pd
 
-from backend_new.db import fetch_dashboard_core_bundle, fetch_latest_document
+from backend_new.db import fetch_dashboard_core_bundle, fetch_json_rows, fetch_latest_document
 from backend_new.routes.goals import calculate_targets, fallback_goals
 from backend_new.config import app_timezone_name
 from backend_new.utils import app_today_iso, utc_now_iso
 from src.body_metrics import canonical_daily_bodyweights
 from src.analytics.recovery_engine import calculate_recovery_score
+from src.google_health_dashboard import build_google_health_dashboard_signals
 from src.training_schedule import DEFAULT_RECURRING_SCHEDULE_PROFILE, classify_strength_split, planned_training_for_date, summarize_training_day
 
 
@@ -1706,6 +1707,7 @@ def _fallback_payload(today: str, blocks: list[dict[str, Any]], *, started: floa
         "goals": {},
         "targets": {},
         "nutrition_today": {},
+        "google_health": {"status": "insufficient_data", "message": "Dashboard core failed before Google Health signals could load."},
         "latest_workout": None,
         "counts": {},
         "debug": {
@@ -1806,6 +1808,13 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         {"items": bundle_sleep_rows, "status": "fallback"},
         blocks,
     )
+    wearable_payload = _source_block(
+        "wearables",
+        "wearable_metrics",
+        lambda: {"items": fetch_json_rows("wearable_metrics", limit=120, date_field="date"), "status": "ok"},
+        {"items": [], "status": "fallback"},
+        blocks,
+    )
 
     food_rows = _safe_items(food_payload)
     nutrition_history_items = _safe_items(nutrition_history_payload)
@@ -1813,6 +1822,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     raw_body_rows = _safe_items(body_payload, "raw_items") or bundle_body_rows
     recovery_rows = _safe_items(recovery_payload)
     sleep_rows = _safe_items(sleep_payload)
+    wearable_rows = _safe_items(wearable_payload)
     training_items = _safe_items(training_payload)
     training_rows = _training_rows_from_history(training_items)
     goals = {**fallback_goals(), **(goals_payload.get("goals") if isinstance(goals_payload.get("goals"), dict) else {})}
@@ -1846,6 +1856,47 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     training_available = training_status in {"ok", "not_configured", "not_loaded"}
     target_calories = _number(targets.get("target_calories"), 0)
     recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows, target_calories)
+    try:
+        google_health = build_google_health_dashboard_signals(
+            wearable_rows=wearable_rows,
+            recovery_rows=recovery_rows,
+            training_rows=training_rows,
+            nutrition_today=nutrition_today,
+            targets=targets,
+            body_rows=body_rows,
+            today=today,
+        )
+        blocks.append(
+            {
+                "block": "google_health_signals",
+                "name": "google_health_signals",
+                "status": "ok" if google_health.get("status") == "ok" else "empty",
+                "rows": len(wearable_rows),
+                "duration_ms": 0,
+                "message": google_health.get("message", ""),
+            }
+        )
+    except Exception as exc:
+        logger.exception("[dashboard_core] google health signals failed")
+        google_health = {
+            "status": "insufficient_data",
+            "source": "google_health",
+            "date": today,
+            "reason": "signal_builder_failed",
+            "message": "No wearable data connected. Recovery signals are temporarily unavailable.",
+            "debug": {"error_type": type(exc).__name__, "message": str(exc), "metric_rows_available": len(wearable_rows)},
+        }
+        blocks.append(
+            {
+                "block": "google_health_signals",
+                "name": "google_health_signals",
+                "status": "degraded",
+                "rows": len(wearable_rows),
+                "duration_ms": 0,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+        )
     counts = {
         **(bundle.get("counts") if isinstance(bundle.get("counts"), dict) else {}),
         "nutrition": len(food_rows),
@@ -1855,6 +1906,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "training_rows": len(training_rows),
         "recovery": len(recovery_rows),
         "sleep": len(sleep_rows),
+        "wearables": len(wearable_rows),
     }
     sources = {
         "food": {
@@ -1886,8 +1938,14 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
             "source": "/api/recovery/logs + /api/recovery/sleep",
             "recovery_rows": len(recovery_rows),
             "sleep_rows": len(sleep_rows),
+            "wearable_rows": len(wearable_rows),
             "latest_recovery_date": _latest_field(recovery_rows, "date"),
             "latest_sleep_date": _latest_field(sleep_rows, "date"),
+        },
+        "wearables": {
+            "source": "wearable_metrics",
+            "latest_metric_date": _latest_field(wearable_rows, "date"),
+            "rows": len(wearable_rows),
         },
     }
     cache = _dashboard_cache_payload(bundle, sources)
@@ -1942,7 +2000,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         [
             {"block": "today_food_summary", "name": "today_food_summary", "status": "ok", "rows": len(food_rows), "duration_ms": 0},
             {"block": "weight_summary", "name": "weight_summary", "status": "ok", "rows": len(body_rows), "duration_ms": 0},
-            {"block": "recovery_summary", "name": "recovery_summary", "status": "ok", "rows": len(recovery_rows), "sleep_rows": len(sleep_rows), "duration_ms": 0},
+            {"block": "recovery_summary", "name": "recovery_summary", "status": "ok", "rows": len(recovery_rows), "sleep_rows": len(sleep_rows), "wearable_rows": len(wearable_rows), "duration_ms": 0},
             {
                 "block": "load_training",
                 "name": "load_training",
@@ -1983,6 +2041,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
         "workout_quality": workout_quality,
         "todays_action": {"status": "maintain", "color": "gray", "headline": "Keep logging", "reason": "Lightweight dashboard core loaded."},
         "recovery": recovery,
+        "google_health": google_health,
         "prs": {"bench_press": None, "mile_time": None},
         "latest_recovery": latest_recovery,
         "recovery_trend": recovery_trend,

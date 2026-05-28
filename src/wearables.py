@@ -23,24 +23,70 @@ WEARABLE_METRIC_COLUMNS = [
     "source",
     "sleep_hours",
     "sleep_score",
+    "total_sleep_minutes",
+    "rem_sleep_minutes",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "awake_minutes",
+    "sleep_efficiency",
     "resting_hr",
+    "resting_hr_baseline",
+    "resting_hr_deviation",
     "hrv",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
     "steps",
     "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "distance_miles",
     "calories_burned",
+    "total_calories_burned",
+    "active_calories_burned",
+    "basal_calories_burned",
     "workout_minutes",
+    "cardio_load",
+    "breathing_rate",
+    "spo2",
+    "skin_temperature",
+    "body_temperature",
     "created_at",
     "updated_at",
 ]
 WEARABLE_NUMERIC_COLUMNS = [
     "sleep_hours",
     "sleep_score",
+    "total_sleep_minutes",
+    "rem_sleep_minutes",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "awake_minutes",
+    "sleep_efficiency",
     "resting_hr",
+    "resting_hr_baseline",
+    "resting_hr_deviation",
     "hrv",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
     "steps",
     "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "distance_miles",
     "calories_burned",
+    "total_calories_burned",
+    "active_calories_burned",
+    "basal_calories_burned",
     "workout_minutes",
+    "cardio_load",
+    "breathing_rate",
+    "spo2",
+    "skin_temperature",
+    "body_temperature",
 ]
 WEARABLE_METRICS_PATH = processed_data_path("wearable_metrics.csv")
 
@@ -160,16 +206,20 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
     if df.empty:
         return pd.DataFrame(), {"rows": int(len(raw)), "valid_days": 0, "missing_columns": missing_columns}
 
-    aggregations = {
-        "sleep_hours": "mean",
-        "sleep_score": "mean",
-        "resting_hr": "mean",
-        "hrv": "mean",
-        "steps": "sum",
-        "active_minutes": "sum",
-        "calories_burned": "sum",
-        "workout_minutes": "sum",
+    sum_columns = {
+        "steps",
+        "active_minutes",
+        "active_zone_minutes",
+        "distance_meters",
+        "distance_miles",
+        "calories_burned",
+        "total_calories_burned",
+        "active_calories_burned",
+        "basal_calories_burned",
+        "workout_minutes",
+        "cardio_load",
     }
+    aggregations = {column: "sum" if column in sum_columns else "mean" for column in WEARABLE_NUMERIC_COLUMNS}
     daily = (
         df.groupby("_date_ts", as_index=False)
         .agg({column: aggregations[column] for column in WEARABLE_NUMERIC_COLUMNS})
@@ -274,27 +324,44 @@ def _activity_trend(daily_df: pd.DataFrame) -> dict:
         return {
             "steps": _metric_trend(daily_df, "steps"),
             "active_minutes": _metric_trend(daily_df, "active_minutes"),
+            "active_zone_minutes": _metric_trend(daily_df, "active_zone_minutes"),
+            "distance_meters": _metric_trend(daily_df, "distance_meters"),
             "calories_burned": _metric_trend(daily_df, "calories_burned"),
             "workout_minutes": _metric_trend(daily_df, "workout_minutes"),
+            "cardio_load": _metric_trend(daily_df, "cardio_load"),
             "activity_load": _metric_trend(daily_df, "activity_load"),
             "trend": "insufficient_data",
         }
 
     activity = daily_df.copy()
-    for column in ["steps", "active_minutes", "calories_burned", "workout_minutes"]:
+    for column in [
+        "steps",
+        "active_minutes",
+        "active_zone_minutes",
+        "distance_meters",
+        "calories_burned",
+        "workout_minutes",
+        "cardio_load",
+    ]:
         activity[column] = pd.to_numeric(activity.get(column), errors="coerce")
     activity["activity_load"] = (
         activity["steps"].fillna(0) / 1000
         + activity["active_minutes"].fillna(0)
+        + activity["active_zone_minutes"].fillna(0) * 1.5
+        + activity["distance_meters"].fillna(0) / 1000
         + activity["workout_minutes"].fillna(0)
-        + activity["calories_burned"].fillna(0) / 100
+        + activity["cardio_load"].fillna(0)
+        + activity["calories_burned"].fillna(0) / 150
     )
     load_trend = _metric_trend(activity, "activity_load", higher_is_better=True, stable_threshold=0.08)
     return {
         "steps": _metric_trend(activity, "steps", higher_is_better=True, stable_threshold=0.08),
         "active_minutes": _metric_trend(activity, "active_minutes", higher_is_better=True, stable_threshold=0.08),
+        "active_zone_minutes": _metric_trend(activity, "active_zone_minutes", higher_is_better=True, stable_threshold=0.08),
+        "distance_meters": _metric_trend(activity, "distance_meters", higher_is_better=True, stable_threshold=0.08),
         "calories_burned": _metric_trend(activity, "calories_burned", higher_is_better=True, stable_threshold=0.08),
         "workout_minutes": _metric_trend(activity, "workout_minutes", higher_is_better=True, stable_threshold=0.08),
+        "cardio_load": _metric_trend(activity, "cardio_load", higher_is_better=True, stable_threshold=0.08),
         "activity_load": load_trend,
         "trend": load_trend["trend"],
     }
@@ -336,6 +403,19 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
                 "change_vs_previous_7_days": None,
                 "trend": "insufficient_data",
             },
+            "sleep_stages": {
+                "rem_sleep_minutes": None,
+                "deep_sleep_minutes": None,
+                "light_sleep_minutes": None,
+                "awake_minutes": None,
+                "sleep_efficiency": None,
+            },
+            "health": {
+                "breathing_rate": None,
+                "spo2": None,
+                "skin_temperature": None,
+                "body_temperature": None,
+            },
             "activity": _activity_trend(daily),
             "flags": ["No wearable data yet."],
             "diagnostics": diagnostics,
@@ -350,16 +430,44 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
     resting_hr = _metric_trend(daily, "resting_hr", higher_is_better=False)
     hrv = _metric_trend(daily, "hrv", higher_is_better=True)
     activity = _activity_trend(daily)
+    sleep_stages = {
+        "rem_sleep_minutes": _rounded(latest_row.get("rem_sleep_minutes")),
+        "deep_sleep_minutes": _rounded(latest_row.get("deep_sleep_minutes")),
+        "light_sleep_minutes": _rounded(latest_row.get("light_sleep_minutes")),
+        "awake_minutes": _rounded(latest_row.get("awake_minutes")),
+        "sleep_efficiency": _rounded(latest_row.get("sleep_efficiency")),
+    }
+    health = {
+        "breathing_rate": _rounded(latest_row.get("breathing_rate")),
+        "spo2": _rounded(latest_row.get("spo2")),
+        "skin_temperature": _rounded(latest_row.get("skin_temperature")),
+        "body_temperature": _rounded(latest_row.get("body_temperature")),
+    }
+    rhr_deviation = _rounded(latest_row.get("resting_hr_deviation"))
 
     flags = []
     if sleep["rolling_7_day_average"] is not None and sleep["rolling_7_day_average"] < 7:
         flags.append("Sleep average is below 7 hours.")
+    if rhr_deviation is not None and rhr_deviation >= 5:
+        flags.append("Resting HR is meaningfully above baseline.")
     if resting_hr["trend"] == "declining":
         flags.append("Resting HR is trending higher than baseline.")
     if hrv["trend"] == "declining":
         flags.append("HRV is trending lower than baseline.")
     if activity["trend"] == "improving" and (sleep["trend"] == "declining" or hrv["trend"] == "declining"):
         flags.append("Activity is rising while recovery markers are softening.")
+    if health["spo2"] is not None and health["spo2"] < 94:
+        flags.append("SpO2 is below the usual recovery range.")
+    if health["breathing_rate"] is not None and health["breathing_rate"] >= 22:
+        flags.append("Breathing rate is elevated.")
+    if (
+        health["skin_temperature"] is not None
+        and abs(float(health["skin_temperature"])) <= 5
+        and abs(float(health["skin_temperature"])) >= 1
+    ):
+        flags.append("Skin temperature is meaningfully different from baseline.")
+    if health["body_temperature"] is not None and health["body_temperature"] >= 37.8:
+        flags.append("Body temperature is elevated.")
     if not flags:
         flags.append("Wearable recovery signals are stable.")
 
@@ -370,6 +478,8 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
         "sleep": sleep,
         "resting_hr": resting_hr,
         "hrv": hrv,
+        "sleep_stages": sleep_stages,
+        "health": health,
         "activity": activity,
         "flags": flags,
         "diagnostics": diagnostics,
@@ -631,8 +741,11 @@ def calculate_training_readiness_signals(
     wearable["activity_load"] = (
         pd.to_numeric(wearable.get("steps"), errors="coerce").fillna(0) / 1000
         + pd.to_numeric(wearable.get("active_minutes"), errors="coerce").fillna(0)
+        + pd.to_numeric(wearable.get("active_zone_minutes"), errors="coerce").fillna(0) * 1.5
+        + pd.to_numeric(wearable.get("distance_meters"), errors="coerce").fillna(0) / 1000
         + pd.to_numeric(wearable.get("workout_minutes"), errors="coerce").fillna(0)
-        + pd.to_numeric(wearable.get("calories_burned"), errors="coerce").fillna(0) / 100
+        + pd.to_numeric(wearable.get("cardio_load"), errors="coerce").fillna(0)
+        + pd.to_numeric(wearable.get("calories_burned"), errors="coerce").fillna(0) / 150
     )
 
     sleep_7_average = _rounded(pd.to_numeric(wearable["sleep_hours"], errors="coerce").dropna().tail(7).mean())
@@ -647,6 +760,10 @@ def calculate_training_readiness_signals(
         and resting_hr["baseline_sample_size"] >= 3
         and resting_hr["recent_average"] > resting_hr["baseline_average"] + 5
     )
+    latest_row = wearable.iloc[-1].to_dict()
+    latest_rhr_deviation = _rounded(latest_row.get("resting_hr_deviation"))
+    if latest_rhr_deviation is not None and latest_rhr_deviation >= 5:
+        resting_hr_high = True
     hrv_below_baseline = bool(
         hrv["recent_average"] is not None
         and hrv["baseline_average"] is not None
@@ -666,6 +783,19 @@ def calculate_training_readiness_signals(
         and steps["baseline_sample_size"] >= 3
         and steps["recent_average"] > steps["baseline_average"] + 3000
     )
+    latest_spo2 = _rounded(latest_row.get("spo2"))
+    latest_breathing_rate = _rounded(latest_row.get("breathing_rate"))
+    latest_skin_temperature = _rounded(latest_row.get("skin_temperature"))
+    latest_body_temperature = _rounded(latest_row.get("body_temperature"))
+    low_spo2 = bool(latest_spo2 is not None and latest_spo2 < 94)
+    elevated_breathing = bool(latest_breathing_rate is not None and latest_breathing_rate >= 22)
+    skin_temp_delta_high = bool(
+        latest_skin_temperature is not None
+        and abs(float(latest_skin_temperature)) <= 5
+        and abs(float(latest_skin_temperature)) >= 1
+    )
+    body_temp_high = bool(latest_body_temperature is not None and latest_body_temperature >= 37.8)
+    sickness_warning = bool(low_spo2 or elevated_breathing or skin_temp_delta_high or body_temp_high)
 
     training = _training_load_summary(training_df)
     nutrition = _nutrition_summary(nutrition_df, training)
@@ -686,6 +816,8 @@ def calculate_training_readiness_signals(
         signals.append("7-day sleep average is below 7 hours.")
     if activity_high:
         signals.append("Recent steps/activity are unusually high; hidden fatigue is possible.")
+    if sickness_warning:
+        signals.append("Recovery health signals suggest possible sickness or unusual fatigue.")
     if low_carbs_high_training:
         signals.append(f"Recent carbs are below the current training-load threshold ({nutrition['carb_threshold']:.0f}g).")
     if recovery_training_decline:
@@ -695,7 +827,13 @@ def calculate_training_readiness_signals(
     if not signals:
         signals.append("No major readiness flags from current wearable trends.")
 
-    if recovery_training_decline and elevated_hr_low_hrv:
+    if sickness_warning:
+        run_recommendation = {
+            "color": "Red",
+            "label": "Skip run / recovery day",
+            "reason": "Recovery health signals suggest avoiding added cardio stress today.",
+        }
+    elif recovery_training_decline and elevated_hr_low_hrv:
         run_recommendation = {
             "color": "Red",
             "label": "Skip run / recovery day",
@@ -720,7 +858,12 @@ def calculate_training_readiness_signals(
             "reason": "Wearable trends do not show a run-specific readiness concern.",
         }
 
-    if recovery_training_decline:
+    if sickness_warning:
+        lift_recommendation = {
+            "label": "Recovery day",
+            "reason": "Health signals suggest backing off until recovery markers normalize.",
+        }
+    elif recovery_training_decline:
         lift_recommendation = {
             "label": "Deload suggested",
             "reason": "Recovery is declining while recent training load is high.",
@@ -782,6 +925,12 @@ def calculate_training_readiness_signals(
         "lift_recommendation": lift_recommendation,
         "fueling_recommendation": fueling_recommendation,
         "hydration_recommendation": hydration_recommendation,
+        "sickness_warning": {
+            "status": "warning" if sickness_warning else "clear",
+            "label": "Possible sickness / elevated recovery risk" if sickness_warning else "No sickness pattern detected",
+            "message": "Consider reducing intensity today. Prioritize sleep, hydration, and easy movement." if sickness_warning else "No multi-signal sickness pattern from available wearable data.",
+            "disclaimer": "This is not a diagnosis.",
+        },
         "signals": signals,
         "diagnostics": {
             **diagnostics,
@@ -793,5 +942,13 @@ def calculate_training_readiness_signals(
             "nutrition": nutrition,
             "recovery": recovery,
             "post_workout": post_workout,
+            "recovery_health": {
+                "spo2": latest_spo2,
+                "breathing_rate": latest_breathing_rate,
+                "skin_temperature": latest_skin_temperature,
+                "body_temperature": latest_body_temperature,
+                "sickness_warning": sickness_warning,
+                "resting_hr_deviation": latest_rhr_deviation,
+            },
         },
     }
