@@ -154,7 +154,15 @@ def test_fitbit_fetch_daily_metrics_parses_sleep_heart_and_activity(monkeypatch)
 
 def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
     def fake_get_json(_url, _access_token, **_kwargs):
-        return {"dataSource": [{"dataType": {"name": "com.google.heart_rate.summary"}}]}
+        return {
+            "dataSource": [
+                {"dataType": {"name": "com.google.step_count.delta"}},
+                {"dataType": {"name": "com.google.calories.expended"}},
+                {"dataType": {"name": "com.google.active_minutes"}},
+                {"dataType": {"name": "com.google.sleep.segment"}},
+                {"dataType": {"name": "com.google.heart_rate.summary"}},
+            ]
+        }
 
     def fake_post_json(_url, body, _access_token, **_kwargs):
         requested = {item["dataTypeName"] for item in body.get("aggregateBy", [])}
@@ -200,6 +208,8 @@ def test_google_health_aggregate_response_normalizes_daily_metrics(monkeypatch):
     assert int(normalized.iloc[0]["resting_hr"]) == 48
     assert fetched["records"]["sleep"][0]["rem_sleep_minutes"] == 60
     assert fetched["records"]["heart"][0]["max_hr"] == 151
+    assert fetched["empty_date_rows_count"] == 0
+    assert fetched["fields_populated_count"] > 0
 
 
 def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
@@ -242,6 +252,28 @@ def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
     assert len(normalized) == 1
     assert normalized.iloc[0]["resting_hr"] is None
     assert requested_batches
+
+
+def test_google_health_no_available_sources_does_not_return_placeholder_rows(monkeypatch):
+    def fake_get_json(_url, _access_token, **_kwargs):
+        return {"dataSource": []}
+
+    def fake_post_json(_url, _body, _access_token, **_kwargs):
+        raise AssertionError("Google Health aggregate should not run when source discovery is empty.")
+
+    monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
+    monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
+
+    fetched = google_health_client.fetch_daily_metrics("token", start_date="2024-05-16", end_date="2024-05-16")
+    normalized = google_health_client.normalize_daily_metrics(fetched["items"])
+
+    assert fetched["status"] == "ok"
+    assert fetched["items"] == []
+    assert normalized.empty
+    assert fetched["data_available"] is False
+    assert fetched["data_sources"]["data_source_count"] == 0
+    assert google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE in fetched["warnings"]
+    assert fetched["recommended_next_action"] == google_health_client.GOOGLE_HEALTH_NO_SOURCES_MESSAGE
 
 
 def test_google_health_records_include_rhr_baseline_and_activity_model():

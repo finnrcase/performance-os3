@@ -374,10 +374,20 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "sample_latest_normalized_row": sync.get("sample_latest_normalized_row", {}),
         "fields_populated_count": sync.get("fields_populated_count", 0),
         "fields_missing_count": sync.get("fields_missing_count", 0),
+        "empty_date_rows_count": sync.get("empty_date_rows_count", 0),
+        "empty_date_rows": sync.get("empty_date_rows", []),
+        "populated_metric_counts_by_day": sync.get("populated_metric_counts_by_day", {}),
         "last_fetched_count": sync.get("last_fetched_count", 0),
         "optional_metric_warnings": sync.get("optional_metric_warnings", []),
         "required_metric_failures": sync.get("required_metric_failures", []),
         "data_sources": sync.get("data_sources", {}),
+        "available_data_types": sync.get("available_data_types", []),
+        "requested_data_types": sync.get("requested_data_types", []),
+        "api_path": sync.get("api_path", "google_fit_rest"),
+        "api_path_label": sync.get("api_path_label", "Google Fit REST API"),
+        "phone_app_data_note": sync.get("phone_app_data_note", ""),
+        "fallback_plan": sync.get("fallback_plan", []),
+        "recommended_next_action": sync.get("recommended_next_action", ""),
         "needs_reconnect": needs_reconnect,
     }
 
@@ -1156,6 +1166,12 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "fetched_days": google_health_meta.get("last_fetched_count", 0),
             "optional_metric_warnings": google_health_meta.get("optional_metric_warnings", []),
             "required_metric_failures": google_health_meta.get("required_metric_failures", []),
+            "recommended_next_action": google_health_meta.get("recommended_next_action", ""),
+            "api_path": google_health_meta.get("api_path", "google_fit_rest"),
+            "api_path_label": google_health_meta.get("api_path_label", "Google Fit REST API"),
+            "phone_app_data_note": google_health_meta.get("phone_app_data_note", ""),
+            "available_data_types": google_health_meta.get("available_data_types", []),
+            "empty_date_rows_count": google_health_meta.get("empty_date_rows_count", 0),
         },
         "fitbit": {
             "configured": base["fitbit"]["configured"],
@@ -1841,6 +1857,85 @@ def debug_google_health(request: Request) -> dict[str, Any]:
     return _google_health_debug_payload(request)
 
 
+@router.get("/api/debug/google-health/sources")
+def debug_google_health_sources() -> dict[str, Any]:
+    from src.integrations.google_health_client import GOOGLE_HEALTH_NO_SOURCES_MESSAGE, list_data_sources, scopes
+
+    settings = _settings_document()
+    status, metadata = _google_health_status(settings)
+    sync = _metadata(settings).get("google_health_sync")
+    sync = sync if isinstance(sync, dict) else {}
+    tokens = _metadata(settings).get("google_health_tokens")
+    tokens = tokens if isinstance(tokens, dict) else {}
+    granted_scopes = str(tokens.get("scopes") or metadata.get("scopes") or "").split()
+    payload: dict[str, Any] = {
+        "status": "ok" if status == "Connected" else "warning",
+        "provider": "google_health",
+        "checked_at": utc_now_iso(),
+        "connected_status": status,
+        "connected": bool(metadata.get("connected")),
+        "token_status": metadata.get("token_status", "missing"),
+        "access_token_present": bool(metadata.get("access_token_present")),
+        "refresh_token_present": bool(metadata.get("refresh_token_present")),
+        "requested_scopes": scopes(),
+        "granted_scopes": granted_scopes,
+        "available_data_sources": [],
+        "available_data_types": [],
+        "data_source_count": 0,
+        "api_path": sync.get("api_path", "google_fit_rest"),
+        "api_path_label": sync.get("api_path_label", "Google Fit REST API"),
+        "phone_app_data_note": sync.get("phone_app_data_note", "Google Health phone app data can come from Health Connect and may not be visible to this backend API path."),
+        "fallback_plan": sync.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+        "last_raw_responses": sync.get("raw_aggregate_responses", {}),
+        "populated_metric_counts_by_day": sync.get("populated_metric_counts_by_day", {}),
+        "fields_populated_count": sync.get("fields_populated_count", 0),
+        "fields_missing_count": sync.get("fields_missing_count", 0),
+        "empty_row_counts": {
+            "empty_date_rows_count": sync.get("empty_date_rows_count", 0),
+            "empty_date_rows": sync.get("empty_date_rows", []),
+        },
+        "last_sync": {
+            "status": sync.get("last_status", ""),
+            "message": sync.get("last_message", ""),
+            "last_synced_at": sync.get("last_synced_at", ""),
+            "rows_saved": sync.get("rows_saved", 0),
+            "rows_saved_by_table": sync.get("rows_saved_by_table", {}),
+            "warnings": sync.get("optional_metric_warnings", []),
+            "required_metric_failures": sync.get("required_metric_failures", []),
+        },
+        "recommended_next_action": sync.get("recommended_next_action", ""),
+    }
+    if not metadata.get("connected"):
+        payload["recommended_next_action"] = "Connect Google Health OAuth before checking data sources."
+        return payload
+    try:
+        access_token = _google_health_access_token(settings)
+        sources = list_data_sources(access_token)
+        available_types = sources.get("available_data_types") or sources.get("data_type_names") or []
+        data_source_count = int(sources.get("data_source_count") or len(sources.get("data_sources") or []))
+        payload.update(
+            {
+                "available_data_sources": sources.get("data_sources") or [],
+                "available_data_types": available_types,
+                "data_source_count": data_source_count,
+                "source_status": sources.get("status", "ok"),
+            }
+        )
+        if data_source_count <= 0:
+            payload["status"] = "warning"
+            payload["recommended_next_action"] = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
+    except Exception as exc:
+        payload.update(
+            {
+                "status": "error",
+                "source_status": "error",
+                "source_error": str(exc),
+                "recommended_next_action": "Google Health token is connected, but source discovery failed. Check scopes and reconnect if this persists.",
+            }
+        )
+    return payload
+
+
 @router.get("/api/google-health/callback", name="google_health_callback")
 def google_health_callback(
     request: Request,
@@ -1941,9 +2036,14 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         now = utc_now_iso()
         saved_rows: list[dict[str, Any]] = []
         normalized_rows = [dict(row) for row in normalized.to_dict(orient="records")]
+        populated_rows = [row for row in normalized_rows if _google_health_row_field_counts(row)["fields_populated_count"] > 0]
         sample_latest_normalized_row = _google_health_latest_row(normalized_rows)
         sample_field_counts = _google_health_row_field_counts(sample_latest_normalized_row)
-        for row in normalized_rows:
+        aggregate_field_counts = {
+            "fields_populated_count": int(fetched.get("fields_populated_count") or sum(_google_health_row_field_counts(row)["fields_populated_count"] for row in populated_rows)),
+            "fields_missing_count": int(fetched.get("fields_missing_count") or 0),
+        }
+        for row in populated_rows:
             row_date = _google_health_text(row.get("date"))[:10]
             if not row_date:
                 continue
@@ -1963,10 +2063,18 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         sync_warnings = list(dict.fromkeys(str(item) for item in (fetched.get("warnings") or []) if str(item or "").strip()))
         rows_saved = len(saved_rows)
         rows_saved_by_table = {"wearable_metrics": rows_saved, **(saved_records.get("counts", {}) if isinstance(saved_records.get("counts"), dict) else {})}
-        sync_status = "partial" if sync_errors else "ok"
+        no_data = rows_saved == 0 and not sync_errors and not required_metric_failures
+        sync_status = "partial" if sync_errors or required_metric_failures else "no_data" if no_data else "ok"
+        recommended_next_action = str(fetched.get("recommended_next_action") or "")
         sync_message = (
             f"Google Health sync completed with storage warnings: {rows_saved} daily row(s) saved."
             if sync_errors
+            else f"Google Health sync completed with required metric warnings: {rows_saved} daily row(s) saved."
+            if required_metric_failures
+            else recommended_next_action
+            if no_data and recommended_next_action
+            else f"Google Health sync completed but no populated wearable metric rows were saved."
+            if no_data
             else f"Google Health sync complete: {rows_saved} daily row(s) saved."
         )
         sync_state = _save_google_health_sync_state(
@@ -1974,7 +2082,7 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "last_synced_at": now,
                 "last_status": sync_status,
                 "last_message": sync_message,
-                "last_error": "; ".join(str(error.get("error") or "") for error in sync_errors[:2]),
+                "last_error": "; ".join(str(error.get("error") or "") for error in sync_errors[:2]) or "; ".join(required_metric_failures[:2]),
                 "last_warning": "; ".join(sync_warnings[:2]),
                 "needs_reconnect": False,
                 "last_imported_count": rows_saved,
@@ -1987,11 +2095,27 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "rows_saved_by_table": rows_saved_by_table,
                 "sample_latest_normalized_row": sample_latest_normalized_row,
                 **sample_field_counts,
+                **aggregate_field_counts,
                 "last_warning_count": len(sync_warnings),
                 "last_storage_error_count": len(sync_errors),
                 "optional_metric_warnings": optional_metric_warnings,
                 "required_metric_failures": required_metric_failures,
                 "data_sources": fetched.get("data_sources") or {},
+                "available_data_types": (fetched.get("data_sources") or {}).get("available_data_types") or (fetched.get("data_sources") or {}).get("data_type_names") or [],
+                "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
+                "requested_scopes": fetched.get("requested_scopes") or [],
+                "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
+                "requested_data_types": fetched.get("requested_data_types") or [],
+                "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
+                "api_path": fetched.get("api_path", "google_fit_rest"),
+                "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+                "phone_app_data_note": fetched.get("phone_app_data_note", ""),
+                "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+                "empty_date_rows_count": int(fetched.get("empty_date_rows_count") or 0),
+                "empty_date_rows": fetched.get("empty_date_rows") or [],
+                "placeholder_rows_count": int(fetched.get("empty_date_rows_count") or 0),
+                "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
+                "recommended_next_action": recommended_next_action,
             }
         )
         logger.info(
@@ -2022,11 +2146,26 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "rows_saved_by_table": rows_saved_by_table,
                 "sample_latest_normalized_row": sample_latest_normalized_row,
                 **sample_field_counts,
+                **aggregate_field_counts,
                 "warnings": sync_warnings,
                 "optional_metric_warnings": optional_metric_warnings,
                 "required_metric_failures": required_metric_failures,
                 "storage_errors": sync_errors[:5],
                 "data_sources": fetched.get("data_sources") or {},
+                "available_data_types": (fetched.get("data_sources") or {}).get("available_data_types") or (fetched.get("data_sources") or {}).get("data_type_names") or [],
+                "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
+                "requested_scopes": fetched.get("requested_scopes") or [],
+                "granted_scopes": str((_metadata().get("google_health_tokens") if isinstance(_metadata().get("google_health_tokens"), dict) else {}).get("scopes") or "").split(),
+                "requested_data_types": fetched.get("requested_data_types") or [],
+                "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
+                "api_path": fetched.get("api_path", "google_fit_rest"),
+                "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+                "phone_app_data_note": fetched.get("phone_app_data_note", ""),
+                "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+                "empty_date_rows_count": int(fetched.get("empty_date_rows_count") or 0),
+                "empty_date_rows": fetched.get("empty_date_rows") or [],
+                "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
+                "recommended_next_action": recommended_next_action,
             },
         )
         return {
@@ -2037,8 +2176,13 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "rows_saved_by_table": rows_saved_by_table,
             "sample_latest_normalized_row": sample_latest_normalized_row,
             **sample_field_counts,
+            **aggregate_field_counts,
             "imported_records": saved_records.get("counts", {}),
-            "fetched_days": len(fetched.get("items") or []),
+            "fetched_days": int(fetched.get("fetched_days") or len(fetched.get("items") or [])),
+            "populated_days": int(fetched.get("populated_days") or len(populated_rows)),
+            "empty_date_rows_count": int(fetched.get("empty_date_rows_count") or 0),
+            "empty_date_rows": fetched.get("empty_date_rows") or [],
+            "populated_metric_counts_by_day": fetched.get("populated_metric_counts_by_day") or {},
             "latest_record": latest_record,
             "last_synced_at": sync_state.get("last_synced_at", now),
             "warnings": sync_warnings,
@@ -2046,6 +2190,16 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "required_metric_failures": required_metric_failures,
             "storage_errors": sync_errors[:5],
             "data_sources": fetched.get("data_sources") or {},
+            "available_data_types": (fetched.get("data_sources") or {}).get("available_data_types") or (fetched.get("data_sources") or {}).get("data_type_names") or [],
+            "discovered_metric_groups": fetched.get("discovered_metric_groups") or {},
+            "requested_scopes": fetched.get("requested_scopes") or [],
+            "requested_data_types": fetched.get("requested_data_types") or [],
+            "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
+            "api_path": fetched.get("api_path", "google_fit_rest"),
+            "api_path_label": fetched.get("api_path_label", "Google Fit REST API"),
+            "phone_app_data_note": fetched.get("phone_app_data_note", ""),
+            "fallback_plan": fetched.get("fallback_plan", ["fitbit_direct_api", "health_connect_export_import"]),
+            "recommended_next_action": recommended_next_action,
             "date_range": {"start_date": start_date, "end_date": end_date},
         }
     except Exception as exc:

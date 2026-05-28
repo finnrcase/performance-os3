@@ -1022,6 +1022,12 @@ type SettingsHealthCard = {
     rows_saved?: number;
     fields_populated_count?: number;
     fields_missing_count?: number;
+    empty_date_rows_count?: number;
+    available_data_types?: string[];
+    requested_data_types?: string[];
+    recommended_next_action?: string;
+    api_path_label?: string;
+    phone_app_data_note?: string;
     optional_metric_warnings?: string[];
     required_metric_failures?: string[];
   };
@@ -1439,7 +1445,7 @@ type SettingsData = {
   appearance?: { accent_color?: AccentTheme | string };
   statuses: Record<string, string>;
   health?: SettingsHealthCard[];
-  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; optional_metric_warnings?: string[]; required_metric_failures?: string[] }>;
+  services?: Record<string, { configured: boolean; status: string; label?: string; message: string; model?: string; api_key_source?: string; response_ms?: number; last_synced_at?: string; latest_record?: string; reconnect_required?: boolean; last_error?: string; last_warning?: string; last_status?: string; last_message?: string; rows_saved?: number; imported_metrics?: number; fetched_days?: number; empty_date_rows_count?: number; available_data_types?: string[]; optional_metric_warnings?: string[]; required_metric_failures?: string[]; recommended_next_action?: string; api_path?: string; api_path_label?: string; phone_app_data_note?: string }>;
 };
 
 type FitbitDebugStage = {
@@ -1501,6 +1507,46 @@ type FitbitDebugPayload = {
   imported_metrics?: number;
   fetched_days?: number;
   storage_errors?: unknown[];
+};
+
+type GoogleHealthSourcesDebugPayload = {
+  status: string;
+  provider: "google_health" | string;
+  checked_at: string;
+  connected_status: string;
+  connected: boolean;
+  token_status: string;
+  access_token_present: boolean;
+  refresh_token_present: boolean;
+  requested_scopes: string[];
+  granted_scopes: string[];
+  available_data_sources: Array<Record<string, unknown>>;
+  available_data_types: string[];
+  data_source_count: number;
+  source_status?: string;
+  source_error?: string;
+  api_path?: string;
+  api_path_label?: string;
+  phone_app_data_note?: string;
+  fallback_plan?: string[];
+  last_raw_responses?: Record<string, unknown>;
+  populated_metric_counts_by_day?: Record<string, number>;
+  fields_populated_count?: number;
+  fields_missing_count?: number;
+  empty_row_counts?: {
+    empty_date_rows_count?: number;
+    empty_date_rows?: string[];
+  };
+  last_sync?: {
+    status?: string;
+    message?: string;
+    last_synced_at?: string;
+    rows_saved?: number;
+    rows_saved_by_table?: Record<string, number>;
+    warnings?: string[];
+    required_metric_failures?: string[];
+  };
+  recommended_next_action?: string;
 };
 
 type ApiConnectionLayer = {
@@ -11866,6 +11912,130 @@ function FitbitDebugPanel({
   );
 }
 
+function GoogleHealthSourcesDebugPanel({
+  debug,
+  loading,
+  onRefresh,
+}: Readonly<{
+  debug: GoogleHealthSourcesDebugPayload | null;
+  loading: boolean;
+  onRefresh: () => void;
+}>) {
+  const sync = debug?.last_sync;
+  const rawResponseEntries = Object.entries(debug?.last_raw_responses ?? {});
+  const metricCounts = Object.entries(debug?.populated_metric_counts_by_day ?? {}).slice(-7).reverse();
+  const sourcePreview = (debug?.available_data_sources ?? []).slice(0, 6);
+  return (
+    <Card>
+      <SectionHeader
+        eyebrow="Integrations Debug"
+        title="Google Health Source Debug"
+        action={
+          <button type="button" onClick={onRefresh} disabled={loading} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+            <RefreshCw className={cx("h-4 w-4", loading && "animate-spin")} />
+            Refresh sources
+          </button>
+        }
+      />
+      {!debug ? (
+        <p className="text-sm text-zinc-400">{loading ? "Loading Google Health source diagnostics..." : "Google Health source diagnostics have not loaded yet."}</p>
+      ) : (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", healthStatusClass(debug.connected ? "connected" : "yellow"))}>
+              {debug.connected_status}
+            </span>
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold capitalize", fitbitStageClass(debug.token_status))}>
+              Token: {debug.token_status?.replaceAll("_", " ") || "missing"}
+            </span>
+            <span className={cx("rounded-full border px-3 py-1 text-xs font-semibold", fitbitFreshnessClass(debug.data_source_count > 0 ? "green" : debug.connected ? "yellow" : "red"))}>
+              Sources: {debug.data_source_count}
+            </span>
+          </div>
+          {debug.recommended_next_action ? (
+            <p className="rounded-lg border border-amber-300/20 bg-amber-300/10 p-3 text-sm leading-6 text-amber-100">{debug.recommended_next_action}</p>
+          ) : null}
+          {debug.phone_app_data_note ? (
+            <p className="rounded-lg border border-white/10 bg-white/[0.035] p-3 text-sm leading-6 text-zinc-300">{debug.phone_app_data_note}</p>
+          ) : null}
+          {debug.source_error ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 p-3 text-sm text-red-100">{debug.source_error}</p> : null}
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Backend API path</p>
+              <p className="mt-2 text-sm font-semibold text-white">{debug.api_path_label || "Google Fit REST API"}</p>
+              <p className="mt-1 text-xs text-zinc-500">{debug.api_path || "google_fit_rest"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Granted scopes</p>
+              <p className="mt-2 text-sm font-semibold text-white">{debug.granted_scopes?.length ? debug.granted_scopes.join(", ") : "None detected"}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Available data types</p>
+              <p className="mt-2 text-sm font-semibold text-white">{debug.available_data_types?.length ? debug.available_data_types.length.toLocaleString() : "0"}</p>
+              <p className="mt-1 line-clamp-2 text-xs text-zinc-500">{debug.available_data_types?.slice(0, 5).join(", ") || "No Google Fit data types returned."}</p>
+            </div>
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-xs font-medium uppercase tracking-[0.16em] text-zinc-500">Last sync</p>
+              <p className="mt-2 text-sm font-semibold text-white">{sync?.last_synced_at ? relativeSyncTime(sync.last_synced_at) : "Not recorded"}</p>
+              <p className="mt-1 text-xs text-zinc-500">Rows saved {sync?.rows_saved ?? 0} · Empty rows {debug.empty_row_counts?.empty_date_rows_count ?? 0}</p>
+            </div>
+          </div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="text-sm font-semibold text-white">Available sources</p>
+              {sourcePreview.length ? (
+                <div className="mt-2 space-y-2">
+                  {sourcePreview.map((source, index) => (
+                    <div key={`${index}-${String(source.data_stream_id ?? source.data_type_name ?? "")}`} className="rounded-lg border border-white/10 bg-white/[0.035] p-2 text-xs leading-5 text-zinc-400">
+                      <p className="font-semibold text-zinc-200">{String(source.data_type_name ?? "Unknown data type")}</p>
+                      <p className="break-all text-zinc-500">{String(source.data_stream_id ?? "")}</p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs leading-5 text-zinc-500">No data sources returned by the current Google Fit REST API token.</p>
+              )}
+            </div>
+            <div className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="text-sm font-semibold text-white">Raw returned data counts</p>
+              {rawResponseEntries.length ? (
+                <div className="mt-2 space-y-2 text-xs leading-5 text-zinc-400">
+                  {rawResponseEntries.map(([key, value]) => {
+                    const item = value as { status?: string; bucket_count?: number; point_count?: number; requested_data_types?: string[] };
+                    return (
+                      <div key={key} className="rounded-lg border border-white/10 bg-white/[0.035] p-2">
+                        <p className="font-semibold text-zinc-200">{key}: {item.status || "unknown"}</p>
+                        <p>Buckets {item.bucket_count ?? 0} · Points {item.point_count ?? 0}</p>
+                        <p className="text-zinc-500">{item.requested_data_types?.join(", ") || "No requested types recorded"}</p>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="mt-2 text-xs leading-5 text-zinc-500">No aggregate responses recorded. This usually means source discovery returned zero compatible data types.</p>
+              )}
+              {metricCounts.length ? (
+                <div className="mt-3 border-t border-white/10 pt-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Populated metrics by day</p>
+                  <div className="mt-2 grid gap-1 text-xs text-zinc-400">
+                    {metricCounts.map(([day, count]) => <p key={day}>{day}: <span className="text-zinc-200">{count}</span></p>)}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+          {debug.fallback_plan?.length ? (
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <p className="text-sm font-semibold text-white">Fallback plan</p>
+              <p className="mt-2 text-xs leading-5 text-zinc-400">{debug.fallback_plan.map((item) => item.replaceAll("_", " ")).join(" · ")}</p>
+            </div>
+          ) : null}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function startupStatusClass(status: StartupDebugEntry["status"]) {
   if (status === "ok") return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
   if (status === "pending") return "border-zinc-300/20 bg-white/[0.04] text-zinc-200";
@@ -12339,6 +12509,8 @@ function SettingsPage({
   apiConnectionTesting,
   fitbitDebug,
   fitbitDebugLoading,
+  googleHealthSourcesDebug,
+  googleHealthSourcesLoading,
   fitbitSyncing,
   forms,
   setForms,
@@ -12346,6 +12518,7 @@ function SettingsPage({
   onAccentThemeChange,
   onTestApiConnections,
   onRefreshFitbitDebug,
+  onRefreshGoogleHealthSources,
   onForceFitbitSync,
   onConnectFitbit,
   onSyncFitbit,
@@ -12369,6 +12542,8 @@ function SettingsPage({
   apiConnectionTesting: boolean;
   fitbitDebug: FitbitDebugPayload | null;
   fitbitDebugLoading: boolean;
+  googleHealthSourcesDebug: GoogleHealthSourcesDebugPayload | null;
+  googleHealthSourcesLoading: boolean;
   fitbitSyncing: boolean;
   forms: FormState;
   setForms: React.Dispatch<React.SetStateAction<FormState>>;
@@ -12376,6 +12551,7 @@ function SettingsPage({
   onAccentThemeChange: (theme: AccentTheme) => void;
   onTestApiConnections: () => void;
   onRefreshFitbitDebug: () => void;
+  onRefreshGoogleHealthSources: () => void;
   onForceFitbitSync: () => void;
   onConnectFitbit: () => void;
   onSyncFitbit: () => void;
@@ -12404,7 +12580,7 @@ function SettingsPage({
   const googleHealthStatus = settings?.statuses?.google_health ?? googleHealthCard?.label ?? "Not configured";
   const googleHealthConnected = googleHealthStatus === "Connected";
   const googleHealthConfigured = Boolean(googleHealthService?.configured ?? googleHealthCard?.metadata?.configured);
-  const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; last_warning?: string; last_status?: string; rows_saved?: number; optional_metric_warnings?: string[]; details?: { last_error?: string } } | undefined;
+  const googleHealthDiagnostic = settings?.google_health as unknown as { last_error?: string; last_warning?: string; last_status?: string; rows_saved?: number; optional_metric_warnings?: string[]; details?: { last_error?: string; recommended_next_action?: string } } | undefined;
   const googleHealthLastStatus = String(googleHealthService?.last_status || googleHealthCard?.metadata?.last_status || googleHealthDiagnostic?.last_status || "");
   const googleHealthRowsSaved = finiteNumberOrNull(googleHealthService?.rows_saved)
     ?? finiteNumberOrNull(googleHealthCard?.metadata?.rows_saved)
@@ -12420,10 +12596,13 @@ function SettingsPage({
   const googleHealthWarning = Array.from(new Set(googleHealthOptionalWarnings))[0] ?? "";
   const rawGoogleHealthError = String(googleHealthService?.last_error || googleHealthDiagnostic?.last_error || googleHealthDiagnostic?.details?.last_error || "");
   const googleHealthError = googleHealthLastStatus === "ok" ? "" : rawGoogleHealthError;
+  const googleHealthNextAction = String(googleHealthService?.recommended_next_action || googleHealthCard?.metadata?.recommended_next_action || googleHealthDiagnostic?.details?.recommended_next_action || "");
   const googleHealthDescription = !googleHealthConfigured
     ? "Google Health connection is not configured yet. Add backend OAuth env vars, then redeploy the API."
     : googleHealthLastStatus === "ok"
       ? `Last sync successful${googleHealthRowsSaved !== null ? ` · Rows saved: ${Math.round(googleHealthRowsSaved).toLocaleString()}` : ""}${googleHealthWarning ? ` · Warning: ${googleHealthWarning}` : ""}`
+      : googleHealthNextAction
+        ? googleHealthNextAction
       : googleHealthError
         ? `Last sync error: ${googleHealthError}`
         : googleHealthWarning
@@ -12590,6 +12769,7 @@ function SettingsPage({
           </Card>
           <ApiConnectionTestPanel results={apiConnectionTests} testing={apiConnectionTesting} onTest={onTestApiConnections} />
           <FitbitDebugPanel debug={fitbitDebug} loading={fitbitDebugLoading} syncing={fitbitSyncing} onRefresh={onRefreshFitbitDebug} onForceSync={onForceFitbitSync} />
+          <GoogleHealthSourcesDebugPanel debug={googleHealthSourcesDebug} loading={googleHealthSourcesLoading} onRefresh={onRefreshGoogleHealthSources} />
           <DiagnosticStatusDashboard settings={settings} />
           {settings?.health?.length ? (
             <IntegrationHealthGrid
@@ -12778,6 +12958,8 @@ function HomeContent() {
   const [apiConnectionTesting, setApiConnectionTesting] = useState(false);
   const [fitbitDebug, setFitbitDebug] = useState<FitbitDebugPayload | null>(null);
   const [fitbitDebugLoading, setFitbitDebugLoading] = useState(false);
+  const [googleHealthSourcesDebug, setGoogleHealthSourcesDebug] = useState<GoogleHealthSourcesDebugPayload | null>(null);
+  const [googleHealthSourcesLoading, setGoogleHealthSourcesLoading] = useState(false);
   const [fitbitSyncing, setFitbitSyncing] = useState(false);
   const [accentTheme, setAccentTheme] = useState<AccentTheme>(() => readStoredAccentTheme());
   const [forms, setForms] = useState<FormState>(initialForms);
@@ -13003,6 +13185,21 @@ function HomeContent() {
     }
   }, []);
 
+  const refreshGoogleHealthSourcesDebug = useCallback(async () => {
+    setGoogleHealthSourcesLoading(true);
+    setApiError(null);
+    try {
+      const data = await apiGet<GoogleHealthSourcesDebugPayload>("/api/debug/google-health/sources", SETTINGS_API_TIMEOUT_MS);
+      setGoogleHealthSourcesDebug(data);
+      return data;
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : "Google Health source debug failed.");
+      return null;
+    } finally {
+      setGoogleHealthSourcesLoading(false);
+    }
+  }, []);
+
   const forceFitbitSync = useCallback(async () => {
     if (fitbitSyncing) return;
     const path = "/api/fitbit/sync";
@@ -13103,6 +13300,13 @@ function HomeContent() {
         path: "/api/debug/fitbit",
         timeoutMs: SETTINGS_API_TIMEOUT_MS,
         run: async () => setFitbitDebug(await trackedApiGet<FitbitDebugPayload>({ key: "fitbit_debug", label: "Fitbit debug", path: "/api/debug/fitbit", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
+      },
+      {
+        key: "google_health_sources_debug",
+        label: "Google Health source debug",
+        path: "/api/debug/google-health/sources",
+        timeoutMs: SETTINGS_API_TIMEOUT_MS,
+        run: async () => setGoogleHealthSourcesDebug(await trackedApiGet<GoogleHealthSourcesDebugPayload>({ key: "google_health_sources_debug", label: "Google Health source debug", path: "/api/debug/google-health/sources", required: false }, SETTINGS_API_TIMEOUT_MS, recordStartupDebug)),
       },
       {
         key: "nutrition_logs",
@@ -15197,6 +15401,8 @@ function HomeContent() {
         apiConnectionTesting={apiConnectionTesting}
         fitbitDebug={fitbitDebug}
         fitbitDebugLoading={fitbitDebugLoading}
+        googleHealthSourcesDebug={googleHealthSourcesDebug}
+        googleHealthSourcesLoading={googleHealthSourcesLoading}
         fitbitSyncing={fitbitSyncing}
         forms={forms}
         setForms={setForms}
@@ -15204,6 +15410,9 @@ function HomeContent() {
         onTestApiConnections={handleTestApiConnections}
         onRefreshFitbitDebug={() => {
           void refreshFitbitDebug();
+        }}
+        onRefreshGoogleHealthSources={() => {
+          void refreshGoogleHealthSourcesDebug();
         }}
         onForceFitbitSync={() => {
           void forceFitbitSync();
@@ -15313,6 +15522,7 @@ function HomeContent() {
             const warning = result.optional_metric_warnings?.[0] ?? result.warnings?.[0] ?? "";
             const warningText = warning ? ` Warning: ${warning}` : "";
             setMessage(`${result.message ?? `Google Health sync complete: ${rowsSaved} daily row(s) saved.`}${warningText}`);
+            void refreshGoogleHealthSourcesDebug();
             void refreshAll({ allowColdStartRetry: false });
           } catch (error) {
             setApiError(error instanceof Error ? error.message : "Google Health sync failed.");

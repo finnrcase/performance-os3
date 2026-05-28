@@ -92,6 +92,44 @@ def test_google_health_debug_endpoint_sanitizes_oauth_config(monkeypatch):
     assert payload["oauth_provider"]["generated_authorize_url_preview"]
 
 
+def test_google_health_sources_debug_reports_empty_source_state(monkeypatch):
+    monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_ID", "958682873913-example.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_HEALTH_CLIENT_SECRET", "secret")
+    monkeypatch.setenv("GOOGLE_HEALTH_REDIRECT_URI", GOOGLE_HEALTH_EXPECTED_CALLBACK_URL)
+    settings = {
+        "integrations": {},
+        "metadata": {
+            "google_health_tokens": {
+                "access_token": "access",
+                "refresh_token": "refresh",
+                "expires_at": 9999999999,
+                "scopes": "https://www.googleapis.com/auth/fitness.activity.read",
+            },
+            "google_health_sync": {
+                "last_status": "no_data",
+                "empty_date_rows_count": 14,
+                "populated_metric_counts_by_day": {"2026-05-28": 0},
+            },
+        },
+    }
+
+    with (
+        patch("backend_new.routes.integrations.fetch_latest_document", return_value=settings),
+        patch("backend_new.routes.integrations._google_health_access_token", return_value="access"),
+        patch("src.integrations.google_health_client.list_data_sources", return_value={"status": "ok", "data_sources": [], "data_type_names": [], "available_data_types": [], "data_source_count": 0}),
+    ):
+        response = client.get("/api/debug/google-health/sources")
+
+    payload = response.json()
+    assert response.status_code == 200
+    assert payload["status"] == "warning"
+    assert payload["connected"] is True
+    assert payload["data_source_count"] == 0
+    assert payload["available_data_types"] == []
+    assert "this API path does not expose" in payload["recommended_next_action"]
+    assert payload["api_path"] == "google_fit_rest"
+
+
 def test_google_health_client_id_leading_equals_is_normalized(monkeypatch):
     from src.integrations.google_health_client import get_auth_url
 

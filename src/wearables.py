@@ -89,6 +89,15 @@ WEARABLE_NUMERIC_COLUMNS = [
     "body_temperature",
 ]
 WEARABLE_METRICS_PATH = processed_data_path("wearable_metrics.csv")
+ACTIVITY_LOAD_COLUMNS = [
+    "steps",
+    "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "calories_burned",
+    "workout_minutes",
+    "cardio_load",
+]
 
 
 def _empty_wearable_metrics() -> pd.DataFrame:
@@ -219,7 +228,13 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
         "workout_minutes",
         "cardio_load",
     }
-    aggregations = {column: "sum" if column in sum_columns else "mean" for column in WEARABLE_NUMERIC_COLUMNS}
+    def sum_optional(series: pd.Series):
+        return pd.to_numeric(series, errors="coerce").sum(min_count=1)
+
+    def mean_optional(series: pd.Series):
+        return pd.to_numeric(series, errors="coerce").mean()
+
+    aggregations = {column: sum_optional if column in sum_columns else mean_optional for column in WEARABLE_NUMERIC_COLUMNS}
     daily = (
         df.groupby("_date_ts", as_index=False)
         .agg({column: aggregations[column] for column in WEARABLE_NUMERIC_COLUMNS})
@@ -233,6 +248,27 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
         "valid_days": int(len(daily)),
         "missing_columns": missing_columns,
     }
+
+
+def _numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column in frame.columns:
+        return pd.to_numeric(frame[column], errors="coerce")
+    return pd.Series(pd.NA, index=frame.index, dtype="float64")
+
+
+def _activity_load_series(frame: pd.DataFrame) -> pd.Series:
+    components = pd.DataFrame({column: _numeric_series(frame, column) for column in ACTIVITY_LOAD_COLUMNS}, index=frame.index)
+    has_any_activity = components.notna().any(axis=1)
+    load = (
+        components["steps"].fillna(0) / 1000
+        + components["active_minutes"].fillna(0)
+        + components["active_zone_minutes"].fillna(0) * 1.5
+        + components["distance_meters"].fillna(0) / 1000
+        + components["workout_minutes"].fillna(0)
+        + components["cardio_load"].fillna(0)
+        + components["calories_burned"].fillna(0) / 150
+    )
+    return load.where(has_any_activity, pd.NA)
 
 
 def _rounded(value, digits: int = 1):
@@ -334,25 +370,9 @@ def _activity_trend(daily_df: pd.DataFrame) -> dict:
         }
 
     activity = daily_df.copy()
-    for column in [
-        "steps",
-        "active_minutes",
-        "active_zone_minutes",
-        "distance_meters",
-        "calories_burned",
-        "workout_minutes",
-        "cardio_load",
-    ]:
+    for column in ACTIVITY_LOAD_COLUMNS:
         activity[column] = pd.to_numeric(activity.get(column), errors="coerce")
-    activity["activity_load"] = (
-        activity["steps"].fillna(0) / 1000
-        + activity["active_minutes"].fillna(0)
-        + activity["active_zone_minutes"].fillna(0) * 1.5
-        + activity["distance_meters"].fillna(0) / 1000
-        + activity["workout_minutes"].fillna(0)
-        + activity["cardio_load"].fillna(0)
-        + activity["calories_burned"].fillna(0) / 150
-    )
+    activity["activity_load"] = _activity_load_series(activity)
     load_trend = _metric_trend(activity, "activity_load", higher_is_better=True, stable_threshold=0.08)
     return {
         "steps": _metric_trend(activity, "steps", higher_is_better=True, stable_threshold=0.08),
@@ -738,15 +758,7 @@ def calculate_training_readiness_signals(
         }
 
     wearable = daily.copy()
-    wearable["activity_load"] = (
-        pd.to_numeric(wearable.get("steps"), errors="coerce").fillna(0) / 1000
-        + pd.to_numeric(wearable.get("active_minutes"), errors="coerce").fillna(0)
-        + pd.to_numeric(wearable.get("active_zone_minutes"), errors="coerce").fillna(0) * 1.5
-        + pd.to_numeric(wearable.get("distance_meters"), errors="coerce").fillna(0) / 1000
-        + pd.to_numeric(wearable.get("workout_minutes"), errors="coerce").fillna(0)
-        + pd.to_numeric(wearable.get("cardio_load"), errors="coerce").fillna(0)
-        + pd.to_numeric(wearable.get("calories_burned"), errors="coerce").fillna(0) / 150
-    )
+    wearable["activity_load"] = _activity_load_series(wearable)
 
     sleep_7_average = _rounded(pd.to_numeric(wearable["sleep_hours"], errors="coerce").dropna().tail(7).mean())
     resting_hr = _recent_vs_baseline(wearable, "resting_hr")

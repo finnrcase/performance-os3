@@ -100,6 +100,35 @@ def test_calculate_wearable_recovery_signals_trends():
     assert signals["diagnostics"]["valid_days"] == 14
 
 
+def test_null_wearable_rows_do_not_become_zero_activity_or_calories():
+    rows = [
+        {
+            "metric_id": f"google-empty-{index}",
+            "date": (pd.Timestamp("2026-05-10") + pd.Timedelta(days=index)).date().isoformat(),
+            "source": "google_health",
+            "sleep_hours": None,
+            "total_sleep_minutes": None,
+            "steps": None,
+            "active_minutes": None,
+            "active_zone_minutes": None,
+            "calories_burned": None,
+            "total_calories_burned": None,
+            "resting_hr": None,
+            "hrv": None,
+        }
+        for index in range(4)
+    ]
+
+    signals = calculate_wearable_recovery_signals(pd.DataFrame(rows))
+    readiness = calculate_training_readiness_signals(pd.DataFrame(rows))
+
+    assert signals["activity"]["steps"]["latest"] is None
+    assert signals["activity"]["calories_burned"]["latest"] is None
+    assert signals["activity"]["activity_load"]["latest"] is None
+    assert readiness["status"] == "ok"
+    assert "Recent steps/activity are unusually high" not in readiness["signals"]
+
+
 def test_training_readiness_needs_more_wearable_history():
     readiness = calculate_training_readiness_signals(pd.DataFrame())
 
