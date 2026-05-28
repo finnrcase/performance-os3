@@ -370,6 +370,10 @@ def _google_health_status(settings: dict[str, Any]) -> tuple[str, dict[str, Any]
         "last_storage_error_count": sync.get("last_storage_error_count", 0),
         "last_imported_count": sync.get("last_imported_count", 0),
         "rows_saved": sync.get("rows_saved", sync.get("last_imported_count", 0)),
+        "rows_saved_by_table": sync.get("rows_saved_by_table", {}),
+        "sample_latest_normalized_row": sync.get("sample_latest_normalized_row", {}),
+        "fields_populated_count": sync.get("fields_populated_count", 0),
+        "fields_missing_count": sync.get("fields_missing_count", 0),
         "last_fetched_count": sync.get("last_fetched_count", 0),
         "optional_metric_warnings": sync.get("optional_metric_warnings", []),
         "required_metric_failures": sync.get("required_metric_failures", []),
@@ -1698,6 +1702,63 @@ def pd_is_na(value: Any) -> bool:
         return False
 
 
+GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS = [
+    "sleep_hours",
+    "total_sleep_minutes",
+    "rem_sleep_minutes",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "awake_minutes",
+    "sleep_efficiency",
+    "sleep_score",
+    "resting_hr",
+    "resting_hr_baseline",
+    "resting_hr_deviation",
+    "hrv",
+    "average_hr",
+    "max_hr",
+    "steps",
+    "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "distance_miles",
+    "total_calories_burned",
+    "calories_burned",
+    "active_calories_burned",
+    "basal_calories_burned",
+    "breathing_rate",
+    "spo2",
+    "skin_temperature",
+    "body_temperature",
+]
+
+
+def _google_health_metric_present(value: Any) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return True
+    return parsed > 0
+
+
+def _google_health_row_field_counts(row: dict[str, Any] | None) -> dict[str, int]:
+    sample = row if isinstance(row, dict) else {}
+    populated = sum(1 for field in GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS if _google_health_metric_present(sample.get(field)))
+    return {
+        "fields_populated_count": populated,
+        "fields_missing_count": len(GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS) - populated,
+    }
+
+
+def _google_health_latest_row(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    clean = [dict(row) for row in rows if isinstance(row, dict) and _google_health_text(row.get("date"))]
+    if not clean:
+        return {}
+    return sorted(clean, key=lambda row: _google_health_text(row.get("date")))[-1]
+
+
 def _google_health_access_token(settings: dict[str, Any] | None = None) -> str:
     from src.integrations.google_health_client import refresh_access_token
 
@@ -1879,7 +1940,10 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         normalized = normalize_daily_metrics(fetched.get("items") or [])
         now = utc_now_iso()
         saved_rows: list[dict[str, Any]] = []
-        for row in normalized.to_dict(orient="records"):
+        normalized_rows = [dict(row) for row in normalized.to_dict(orient="records")]
+        sample_latest_normalized_row = _google_health_latest_row(normalized_rows)
+        sample_field_counts = _google_health_row_field_counts(sample_latest_normalized_row)
+        for row in normalized_rows:
             row_date = _google_health_text(row.get("date"))[:10]
             if not row_date:
                 continue
@@ -1898,6 +1962,7 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
         required_metric_failures = list(dict.fromkeys(str(item) for item in (fetched.get("required_metric_failures") or []) if str(item or "").strip()))
         sync_warnings = list(dict.fromkeys(str(item) for item in (fetched.get("warnings") or []) if str(item or "").strip()))
         rows_saved = len(saved_rows)
+        rows_saved_by_table = {"wearable_metrics": rows_saved, **(saved_records.get("counts", {}) if isinstance(saved_records.get("counts"), dict) else {})}
         sync_status = "partial" if sync_errors else "ok"
         sync_message = (
             f"Google Health sync completed with storage warnings: {rows_saved} daily row(s) saved."
@@ -1919,6 +1984,9 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "start_date": start_date,
                 "end_date": end_date,
                 "last_record_counts": saved_records.get("counts", {}),
+                "rows_saved_by_table": rows_saved_by_table,
+                "sample_latest_normalized_row": sample_latest_normalized_row,
+                **sample_field_counts,
                 "last_warning_count": len(sync_warnings),
                 "last_storage_error_count": len(sync_errors),
                 "optional_metric_warnings": optional_metric_warnings,
@@ -1951,6 +2019,9 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "imported_metrics": rows_saved,
                 "rows_saved": rows_saved,
                 "record_counts": saved_records.get("counts", {}),
+                "rows_saved_by_table": rows_saved_by_table,
+                "sample_latest_normalized_row": sample_latest_normalized_row,
+                **sample_field_counts,
                 "warnings": sync_warnings,
                 "optional_metric_warnings": optional_metric_warnings,
                 "required_metric_failures": required_metric_failures,
@@ -1963,6 +2034,9 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "message": sync_message,
             "rows_saved": rows_saved,
             "imported_metrics": rows_saved,
+            "rows_saved_by_table": rows_saved_by_table,
+            "sample_latest_normalized_row": sample_latest_normalized_row,
+            **sample_field_counts,
             "imported_records": saved_records.get("counts", {}),
             "fetched_days": len(fetched.get("items") or []),
             "latest_record": latest_record,

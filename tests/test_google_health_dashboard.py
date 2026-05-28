@@ -1,4 +1,4 @@
-from src.google_health_dashboard import build_google_health_dashboard_signals
+from src.google_health_dashboard import build_google_health_dashboard_signals, merge_google_health_rows
 
 
 def test_google_health_dashboard_flags_sickness_without_diagnosis():
@@ -157,3 +157,90 @@ def test_google_health_missing_heart_signals_lower_confidence_without_penalty():
     assert result["recovery_readiness"]["score"] == 100
     assert result["recovery_readiness"]["confidence"] == "low"
     assert result["recovery_readiness"]["missing_heart_signals"] is True
+
+
+def test_google_health_zero_sensor_values_are_unavailable_not_real_metrics():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "sleep_hours": 0,
+                "total_sleep_minutes": 0,
+                "rem_sleep_minutes": 0,
+                "deep_sleep_minutes": 0,
+                "resting_hr": 0,
+                "resting_hr_baseline": 0,
+                "hrv": 0,
+                "steps": 0,
+                "active_minutes": 0,
+                "active_zone_minutes": 0,
+                "total_calories_burned": 0,
+            }
+        ],
+        recovery_rows=[],
+        training_rows=[{"date": "2026-05-27", "sets": 40, "rpe": 8, "duration_minutes": 300}],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["sleep_quality"]["status"] == "insufficient_data"
+    assert result["sleep_quality"]["duration_hours"] is None
+    assert result["resting_hr_vs_baseline"]["resting_hr"] is None
+    assert result["calories_burned_vs_intake"]["calories_burned"] is None
+    assert result["calories_burned_vs_intake"]["message"] == "Wearable burn unavailable from Google Health."
+    assert result["activity_load"]["status"] == "insufficient_data"
+    assert result["activity_load"]["high_load"] is False
+
+
+def test_google_health_dashboard_merges_split_google_health_tables():
+    merged = merge_google_health_rows(
+        wearable_rows=[{"date": "2026-05-27", "source": "google_health", "metric_id": "google_health:2026-05-27"}],
+        sleep_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "total_sleep_time": 7.5,
+                "total_sleep_minutes": 450,
+                "rem_sleep_minutes": 90,
+                "deep_sleep_minutes": 70,
+                "sleep_efficiency": 88,
+            }
+        ],
+        activity_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "steps": 9200,
+                "active_minutes": 52,
+                "active_zone_minutes": 18,
+                "total_calories_burned": 2637,
+            }
+        ],
+        heart_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "resting_hr": 54,
+            }
+        ],
+    )
+    result = build_google_health_dashboard_signals(
+        wearable_rows=merged,
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["sleep_quality"]["duration_hours"] == 7.5
+    assert result["sleep_quality"]["rem_minutes"] == 90
+    assert result["activity_load"]["steps"] == 9200
+    assert result["calories_burned_vs_intake"]["calories_burned"] == 2637
+    assert result["resting_hr_vs_baseline"]["resting_hr"] == 54
+    assert "google_health_sleep" in result["debug"]["source_tables"]
+    assert result["debug"]["fields_used"]["total_calories_burned"] == 2637

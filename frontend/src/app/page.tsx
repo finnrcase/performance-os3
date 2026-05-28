@@ -441,6 +441,13 @@ type GoogleHealthDashboardSignals = {
   debug?: {
     metric_rows_available?: number;
     latest_metric_date?: string;
+    selected_date?: string;
+    source_table?: string;
+    source_tables?: string[];
+    latest_raw_row?: Record<string, unknown>;
+    normalized_wearable_row?: Record<string, unknown>;
+    fields_used?: Record<string, unknown>;
+    missing_fields?: string[];
     missing_metric_warnings?: string[];
     partial_data?: boolean;
     error_type?: string;
@@ -1013,6 +1020,8 @@ type SettingsHealthCard = {
     last_warning_count?: number;
     last_storage_error_count?: number;
     rows_saved?: number;
+    fields_populated_count?: number;
+    fields_missing_count?: number;
     optional_metric_warnings?: string[];
     required_metric_failures?: string[];
   };
@@ -4542,6 +4551,12 @@ function Dashboard({
   const caloriesIntake = finiteNumberOrNull(calorieBurnSignal?.logged_intake);
   const caloriesDelta = finiteNumberOrNull(calorieBurnSignal?.intake_vs_burned);
   const calorieAdjustment = finiteNumberOrNull(calorieAdjustmentSignal?.adjustment) ?? 0;
+  const sleepUnavailable = sleepQuality?.status === "insufficient_data" || finiteNumberOrNull(sleepQuality?.duration_hours) === null;
+  const restingHrUnavailable = restingHrSignal?.status === "insufficient_data" || finiteNumberOrNull(restingHrSignal?.resting_hr) === null;
+  const hrvUnavailable = googleHealth?.hrv?.status === "insufficient_data" || finiteNumberOrNull(googleHealth?.hrv?.hrv) === null;
+  const activityUnavailable = activityLoadSignal?.status === "insufficient_data";
+  const vitalsUnavailable = [healthVitals?.spo2, healthVitals?.breathing_rate, healthVitals?.skin_temperature, healthVitals?.body_temperature].every((value) => finiteNumberOrNull(value) === null);
+  const compactDebugJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
   const formatDashboardNumber = (value: unknown, unit = "", digits = 0) => {
     const parsed = finiteNumberOrNull(value);
     return parsed === null ? "--" : `${parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits })}${unit}`;
@@ -4755,8 +4770,8 @@ function Dashboard({
               <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
                 <DashboardHealthSignalTile
                   title="Sleep Quality"
-                  value={sleepQuality?.score !== null && sleepQuality?.score !== undefined ? `${sleepQuality.score}/100` : "--"}
-                  detail={`${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
+                  value={sleepUnavailable ? "Sleep data unavailable" : sleepQuality?.score !== null && sleepQuality?.score !== undefined ? `${sleepQuality.score}/100` : "--"}
+                  detail={sleepUnavailable ? "Google Health did not provide sleep duration or stages for this date." : `${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
                   status={sleepQuality?.status}
                   icon={HeartPulse}
                 />
@@ -4776,15 +4791,15 @@ function Dashboard({
                 />
                 <DashboardHealthSignalTile
                   title="Resting HR vs Baseline"
-                  value={`${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
-                  detail={`Deviation ${formatDashboardNumber(restingHrSignal?.deviation, " bpm", 1)} · HRV ${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}
+                  value={restingHrUnavailable ? "Resting HR unavailable" : `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
+                  detail={restingHrUnavailable ? `HRV ${hrvUnavailable ? "unavailable" : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}` : `Deviation ${formatDashboardNumber(restingHrSignal?.deviation, " bpm", 1)} · HRV ${hrvUnavailable ? "unavailable" : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}`}
                   status={restingHrSignal?.status}
                   icon={HeartPulse}
                 />
                 <DashboardHealthSignalTile
                   title="Calories Burned vs Intake"
-                  value={caloriesBurned !== null ? `${Math.round(caloriesBurned).toLocaleString()} kcal` : "--"}
-                  detail={`Intake ${caloriesIntake !== null ? Math.round(caloriesIntake).toLocaleString() : "--"} kcal · ${caloriesDelta !== null ? `${caloriesDelta > 0 ? "+" : ""}${Math.round(caloriesDelta).toLocaleString()} kcal` : "no delta"} · ${calorieBurnSignal?.message || "Burn is context, not the saved target."}`}
+                  value={caloriesBurned !== null ? `${Math.round(caloriesBurned).toLocaleString()} kcal` : "Wearable burn unavailable"}
+                  detail={caloriesBurned !== null ? `Intake ${caloriesIntake !== null ? Math.round(caloriesIntake).toLocaleString() : "--"} kcal · ${caloriesDelta !== null ? `${caloriesDelta > 0 ? "+" : ""}${Math.round(caloriesDelta).toLocaleString()} kcal` : "no delta"} · ${calorieBurnSignal?.message || "Burn is context, not the saved target."}` : "Google Health did not provide calorie burn for this date."}
                   status={calorieBurnSignal?.status}
                   icon={Utensils}
                 />
@@ -4797,15 +4812,15 @@ function Dashboard({
                 />
                 <DashboardHealthSignalTile
                   title="Activity Load"
-                  value={activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Need data"}
-                  detail={`${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active · ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone · ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}
+                  value={activityUnavailable ? "Unavailable" : activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Need data"}
+                  detail={activityUnavailable ? "Google Health did not provide steps, active minutes, or zone minutes." : `${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active · ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone · ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}
                   status={activityLoadSignal?.status}
                   icon={BarChart3}
                 />
                 <DashboardHealthSignalTile
                   title="Vitals"
-                  value={healthVitals?.spo2 !== null && healthVitals?.spo2 !== undefined ? `${healthVitals.spo2}% SpO2` : "Optional"}
-                  detail={`Breathing ${formatDashboardNumber(healthVitals?.breathing_rate, "/min", 1)} · Skin temp ${formatDashboardNumber(healthVitals?.skin_temperature, "", 1)} · Body temp ${formatDashboardNumber(healthVitals?.body_temperature, "C", 1)}`}
+                  value={vitalsUnavailable ? "Vitals unavailable" : healthVitals?.spo2 !== null && healthVitals?.spo2 !== undefined ? `${healthVitals.spo2}% SpO2` : "Optional"}
+                  detail={vitalsUnavailable ? "Breathing rate, SpO2, and temperature were not provided." : `Breathing ${formatDashboardNumber(healthVitals?.breathing_rate, "/min", 1)} · Skin temp ${formatDashboardNumber(healthVitals?.skin_temperature, "", 1)} · Body temp ${formatDashboardNumber(healthVitals?.body_temperature, "C", 1)}`}
                   status={sicknessWarning?.status}
                   icon={Sparkles}
                 />
@@ -4832,10 +4847,12 @@ function Dashboard({
                 <div className="mt-4 grid gap-3 text-xs leading-5 text-zinc-400 md:grid-cols-2">
                   <div className="rounded-lg border border-white/10 bg-black/15 p-3">
                     <p className="font-semibold text-zinc-100">Current inputs</p>
-                    <p className="mt-2">Sleep: {formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)}; REM/deep: {formatDashboardNumber(sleepQuality?.rem_minutes, "m")} / {formatDashboardNumber(sleepQuality?.deep_minutes, "m")}; efficiency: {formatDashboardNumber(sleepQuality?.efficiency, "%")}.</p>
-                    <p>RHR: {formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} vs baseline {formatDashboardNumber(restingHrSignal?.baseline, " bpm")} ({signedDashboardNumber(restingHrSignal?.deviation, " bpm", 1)}).</p>
-                    <p>HRV: {formatDashboardNumber(googleHealth?.hrv?.hrv)} vs baseline {formatDashboardNumber(googleHealth?.hrv?.baseline)}.</p>
-                    <p>Activity: {formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active, {formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone, {formatDashboardNumber(activityLoadSignal?.steps)} steps.</p>
+                    <p className="mt-2">Selected date: {googleHealth?.debug?.selected_date || googleHealth?.date || data?.date || "--"}.</p>
+                    <p>Source table: {googleHealth?.debug?.source_table || "wearable_metrics"}.</p>
+                    <p>Sleep: {sleepUnavailable ? "unavailable" : `${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)}; REM/deep ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} / ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")}; efficiency ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}.</p>
+                    <p>RHR: {restingHrUnavailable ? "unavailable" : `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} vs baseline ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")} (${signedDashboardNumber(restingHrSignal?.deviation, " bpm", 1)})`}.</p>
+                    <p>HRV: {hrvUnavailable ? "unavailable" : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs baseline ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}.</p>
+                    <p>Activity: {activityUnavailable ? "unavailable" : `${formatDashboardNumber(activityLoadSignal?.active_minutes, "m")} active, ${formatDashboardNumber(activityLoadSignal?.active_zone_minutes, "m")} zone, ${formatDashboardNumber(activityLoadSignal?.steps)} steps`}.</p>
                   </div>
                   <div className="rounded-lg border border-white/10 bg-black/15 p-3">
                     <p className="font-semibold text-zinc-100">Calorie context</p>
@@ -4854,12 +4871,31 @@ function Dashboard({
                     <p className="font-semibold text-zinc-100">Data quality</p>
                     <p className="mt-2">Metric rows available: {googleHealth?.debug?.metric_rows_available ?? "--"}.</p>
                     <p>Latest metric date: {googleHealth?.latest_metric_date || googleHealth?.debug?.latest_metric_date || googleHealth?.date || "--"}.</p>
+                    <p>Fields used: {Object.keys(googleHealth?.debug?.fields_used ?? {}).length}.</p>
+                    <p>Missing fields: {stringList(googleHealth?.debug?.missing_fields).slice(0, 8).join(", ") || "None"}.</p>
                     {calculationWarnings.length ? (
                       <ul className="mt-2 space-y-1">
                         {calculationWarnings.slice(0, 4).map((warning) => <li key={warning}>- {warning}</li>)}
                       </ul>
                     ) : <p>No missing core metric warnings for this date.</p>}
                     <a href="/calculation-logic" className="accent-text-strong mt-3 inline-flex text-xs font-semibold">Open full calculation guide</a>
+                  </div>
+                  <div className="rounded-lg border border-white/10 bg-black/15 p-3 md:col-span-2">
+                    <p className="font-semibold text-zinc-100">Google Health row mapping</p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-3">
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Raw row</p>
+                        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-black/30 p-2 text-[10px] leading-4 text-zinc-400">{compactDebugJson(googleHealth?.debug?.latest_raw_row)}</pre>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Normalized row</p>
+                        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-black/30 p-2 text-[10px] leading-4 text-zinc-400">{compactDebugJson(googleHealth?.debug?.normalized_wearable_row)}</pre>
+                      </div>
+                      <div>
+                        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Fields used</p>
+                        <pre className="mt-2 max-h-44 overflow-auto rounded-md bg-black/30 p-2 text-[10px] leading-4 text-zinc-400">{compactDebugJson(googleHealth?.debug?.fields_used)}</pre>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </details>
@@ -11550,6 +11586,7 @@ function IntegrationHealthGrid({
                   {card.metadata.connected !== undefined ? <p>Connected: <span className="text-zinc-300">{card.metadata.connected ? "yes" : "no"}</span></p> : null}
                   <p>Token: <span className="capitalize text-zinc-300">{card.metadata.token_status || "missing"}</span></p>
                   <p>Fetched: <span className="text-zinc-300">{card.metadata.fetched_days ?? card.metadata.last_fetched_count ?? 0}</span> · Rows saved: <span className="text-zinc-300">{card.metadata.rows_saved ?? card.metadata.imported_metrics ?? card.metadata.last_imported_count ?? 0}</span></p>
+                  {card.metadata.fields_populated_count !== undefined ? <p>Latest fields: <span className="text-zinc-300">{card.metadata.fields_populated_count}</span> populated · <span className="text-zinc-300">{card.metadata.fields_missing_count ?? 0}</span> missing</p> : null}
                   {card.metadata.last_status ? <p>Last result: <span className="text-zinc-300">{card.metadata.last_status === "ok" ? "successful" : card.metadata.last_status}</span></p> : null}
                   {card.metadata.latest_record ? <p>Latest daily metric: <span className="text-zinc-300">{card.metadata.latest_record}</span></p> : null}
                   {card.metadata.last_warning ? <p className="text-amber-100">Warnings: {card.metadata.last_warning}</p> : null}

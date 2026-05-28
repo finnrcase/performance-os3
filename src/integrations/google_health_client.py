@@ -676,6 +676,11 @@ def _heart_rate_optional_batch(data_type_names: set[str]) -> list[str]:
 def _optional_warning_for_batch(batch: list[str], exc: Exception | None = None) -> str:
     if _is_heart_rate_batch(batch):
         return GOOGLE_HEALTH_OPTIONAL_HEART_RATE_WARNING
+    batch_text = " ".join(str(data_type).lower() for data_type in batch)
+    if "oxygen_saturation" in batch_text or "temperature" in batch_text:
+        return "Optional vitals unavailable from Google Health."
+    if "heart_minutes" in batch_text or "distance" in batch_text or "calories.bmr" in batch_text:
+        return "Optional activity detail metrics unavailable from Google Health."
     if exc is None:
         return f"Optional Google Health metric batch unavailable: {', '.join(batch)}."
     return f"Skipped optional Google Health metric batch ({', '.join(batch)}): {exc}"

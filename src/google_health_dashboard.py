@@ -11,6 +11,36 @@ from datetime import datetime, timedelta
 import math
 from typing import Any
 
+GOOGLE_HEALTH_SIGNAL_FIELDS = [
+    "sleep_hours",
+    "total_sleep_minutes",
+    "rem_sleep_minutes",
+    "deep_sleep_minutes",
+    "light_sleep_minutes",
+    "awake_minutes",
+    "sleep_efficiency",
+    "sleep_score",
+    "resting_hr",
+    "resting_hr_baseline",
+    "resting_hr_deviation",
+    "hrv",
+    "average_hr",
+    "max_hr",
+    "steps",
+    "active_minutes",
+    "active_zone_minutes",
+    "distance_meters",
+    "distance_miles",
+    "total_calories_burned",
+    "calories_burned",
+    "active_calories_burned",
+    "basal_calories_burned",
+    "breathing_rate",
+    "spo2",
+    "skin_temperature",
+    "body_temperature",
+]
+
 
 def _num(value: Any) -> float | None:
     if value is None:
@@ -22,6 +52,19 @@ def _num(value: Any) -> float | None:
     except (TypeError, ValueError):
         return None
     return parsed if math.isfinite(parsed) else None
+
+
+def _positive_num(value: Any) -> float | None:
+    parsed = _num(value)
+    return parsed if parsed is not None and parsed > 0 else None
+
+
+def _first_positive(row: dict[str, Any], *fields: str) -> float | None:
+    for field in fields:
+        parsed = _positive_num(row.get(field))
+        if parsed is not None:
+            return parsed
+    return None
 
 
 def _round(value: float | None, digits: int = 1) -> float | int | None:
@@ -53,6 +96,71 @@ def _same_day_row(rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
     return sorted(candidates, key=lambda row: str(row.get("updated_at") or row.get("created_at") or ""))[-1]
 
 
+def _value_present(value: Any, *, zero_is_missing: bool = False) -> bool:
+    if value in (None, "", [], {}):
+        return False
+    parsed = _num(value)
+    if zero_is_missing and parsed is not None and parsed <= 0:
+        return False
+    return True
+
+
+def _compact_debug_row(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(row, dict):
+        return {}
+    keep = {"date", "source", *GOOGLE_HEALTH_SIGNAL_FIELDS}
+    return {key: row.get(key) for key in keep if key in row}
+
+
+def _merge_row_value(target: dict[str, Any], key: str, value: Any) -> None:
+    if key.startswith("_") or key in {"metric_id", "summary_id", "sleep_id", "heart_id", "activity_id", "signal_id"}:
+        return
+    mapped_key = {
+        "total_sleep_time": "sleep_hours",
+        "hr_zones": "heart_rate_zones",
+    }.get(key, key)
+    if not _value_present(value):
+        target.setdefault(mapped_key, value if mapped_key in {"date", "source"} else target.get(mapped_key))
+        return
+    if not _value_present(target.get(mapped_key)):
+        target[mapped_key] = value
+
+
+def merge_google_health_rows(
+    *,
+    wearable_rows: list[dict[str, Any]],
+    daily_summary_rows: list[dict[str, Any]] | None = None,
+    sleep_rows: list[dict[str, Any]] | None = None,
+    heart_rows: list[dict[str, Any]] | None = None,
+    activity_rows: list[dict[str, Any]] | None = None,
+    recovery_signal_rows: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Merge normalized and split Google Health tables into one row per date."""
+    by_date: dict[str, dict[str, Any]] = {}
+
+    def absorb(table: str, rows: list[dict[str, Any]] | None) -> None:
+        for raw in rows or []:
+            if not isinstance(raw, dict):
+                continue
+            day = _date_text(raw.get("date"))
+            if not day:
+                continue
+            target = by_date.setdefault(day, {"date": day, "source": "google_health", "_source_tables": [], "_raw_table_rows": {}})
+            if table not in target["_source_tables"]:
+                target["_source_tables"].append(table)
+            target["_raw_table_rows"][table] = _compact_debug_row(raw)
+            for key, value in raw.items():
+                _merge_row_value(target, key, value)
+
+    absorb("wearable_metrics", wearable_rows)
+    absorb("google_health_daily_summary", daily_summary_rows)
+    absorb("google_health_sleep", sleep_rows)
+    absorb("google_health_heart", heart_rows)
+    absorb("google_health_activity", activity_rows)
+    absorb("google_health_recovery_signals", recovery_signal_rows)
+    return sorted(by_date.values(), key=lambda row: _date_text(row.get("date")))
+
+
 def _previous_values(rows: list[dict[str, Any]], today: str, field: str, *, days: int = 14) -> list[float]:
     today_obj = _date_obj(today)
     if today_obj is None:
@@ -61,7 +169,7 @@ def _previous_values(rows: list[dict[str, Any]], today: str, field: str, *, days
     values: list[float] = []
     for row in rows:
         row_date = _date_obj(row.get("date"))
-        value = _num(row.get(field))
+        value = _positive_num(row.get(field))
         if row_date is None or value is None:
             continue
         if start <= row_date < today_obj:
@@ -84,13 +192,14 @@ def _status_from_score(score: float | None) -> str:
 
 
 def _sleep_signal(row: dict[str, Any]) -> dict[str, Any]:
-    duration = _num(row.get("sleep_hours"))
-    if duration is None and _num(row.get("total_sleep_minutes")) is not None:
-        duration = float(row["total_sleep_minutes"]) / 60
-    rem = _num(row.get("rem_sleep_minutes"))
-    deep = _num(row.get("deep_sleep_minutes"))
-    efficiency = _num(row.get("sleep_efficiency"))
-    source_score = _num(row.get("sleep_score"))
+    duration = _positive_num(row.get("sleep_hours"))
+    total_minutes = _positive_num(row.get("total_sleep_minutes"))
+    if duration is None and total_minutes is not None:
+        duration = total_minutes / 60
+    rem = _positive_num(row.get("rem_sleep_minutes"))
+    deep = _positive_num(row.get("deep_sleep_minutes"))
+    efficiency = _positive_num(row.get("sleep_efficiency"))
+    source_score = _positive_num(row.get("sleep_score"))
     weighted = 0.0
     total_weight = 0.0
     if duration is not None:
@@ -123,13 +232,13 @@ def _sleep_signal(row: dict[str, Any]) -> dict[str, Any]:
         "awake_minutes": _round(_num(row.get("awake_minutes")), 0),
         "efficiency": _round(efficiency, 0),
         "poor_sleep": poor,
-        "message": "Sleep is supporting recovery." if status == "good" else "Sleep quality is a recovery limiter." if status == "poor" else "Sleep is adequate, but worth watching.",
+        "message": "Sleep data unavailable from Google Health." if status == "insufficient_data" else "Sleep is supporting recovery." if status == "good" else "Sleep quality is a recovery limiter." if status == "poor" else "Sleep is adequate, but worth watching.",
     }
 
 
 def _rhr_signal(row: dict[str, Any], rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
-    resting_hr = _num(row.get("resting_hr"))
-    baseline = _num(row.get("resting_hr_baseline")) or _avg(_previous_values(rows, today, "resting_hr", days=14)[-7:])
+    resting_hr = _positive_num(row.get("resting_hr"))
+    baseline = _positive_num(row.get("resting_hr_baseline")) or _avg(_previous_values(rows, today, "resting_hr", days=14)[-7:])
     deviation = _num(row.get("resting_hr_deviation"))
     if deviation is None and resting_hr is not None and baseline is not None:
         deviation = resting_hr - baseline
@@ -146,7 +255,7 @@ def _rhr_signal(row: dict[str, Any], rows: list[dict[str, Any]], today: str) -> 
 
 
 def _hrv_signal(row: dict[str, Any], rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
-    hrv = _num(row.get("hrv"))
+    hrv = _positive_num(row.get("hrv"))
     baseline = _avg(_previous_values(rows, today, "hrv", days=14)[-7:])
     suppressed = bool(hrv is not None and baseline is not None and hrv < baseline * 0.9)
     watch = bool(hrv is not None and baseline is not None and hrv < baseline * 0.95)
@@ -175,12 +284,13 @@ def _subjective_recovery_signal(recovery_rows: list[dict[str, Any]], today: str)
 
 def _activity_signal(row: dict[str, Any], training_rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
     today_obj = _date_obj(today)
-    steps = _num(row.get("steps"))
-    active = _num(row.get("active_minutes"))
-    zone = _num(row.get("active_zone_minutes"))
-    distance = _num(row.get("distance_miles"))
-    if distance is None and _num(row.get("distance_meters")) is not None:
-        distance = float(row["distance_meters"]) / 1609.344
+    steps = _positive_num(row.get("steps"))
+    active = _positive_num(row.get("active_minutes"))
+    zone = _positive_num(row.get("active_zone_minutes"))
+    distance = _positive_num(row.get("distance_miles"))
+    distance_meters = _positive_num(row.get("distance_meters"))
+    if distance is None and distance_meters is not None:
+        distance = distance_meters / 1609.344
     recent_training_minutes = 0.0
     recent_hard_sets = 0.0
     if today_obj is not None:
@@ -193,8 +303,9 @@ def _activity_signal(row: dict[str, Any], training_rows: list[dict[str, Any]], t
             sets = _num(item.get("sets")) or 0
             rpe = _num(item.get("rpe"))
             recent_hard_sets += sets if rpe is not None and rpe >= 7 else sets * 0.5 if sets else 0
-    load_score = (steps or 0) / 1000 + (active or 0) + (zone or 0) * 1.5 + (distance or 0) * 2 + recent_training_minutes / 20
-    high = bool((active or 0) >= 90 or (zone or 0) >= 45 or recent_training_minutes >= 240 or recent_hard_sets >= 35)
+    wearable_activity_present = any(value is not None for value in (steps, active, zone, distance))
+    load_score = (steps or 0) / 1000 + (active or 0) + (zone or 0) * 1.5 + (distance or 0) * 2 + recent_training_minutes / 20 if wearable_activity_present else None
+    high = bool(wearable_activity_present and ((active or 0) >= 90 or (zone or 0) >= 45 or recent_training_minutes >= 240 or recent_hard_sets >= 35))
     return {
         "steps": _round(steps, 0),
         "active_minutes": _round(active, 0),
@@ -203,7 +314,7 @@ def _activity_signal(row: dict[str, Any], training_rows: list[dict[str, Any]], t
         "recent_training_minutes": _round(recent_training_minutes, 0),
         "recent_hard_sets": _round(recent_hard_sets, 1),
         "load_score": _round(load_score, 1),
-        "status": "high" if high else "normal" if load_score > 0 else "insufficient_data",
+        "status": "high" if high else "normal" if wearable_activity_present else "insufficient_data",
         "high_load": high,
     }
 
@@ -217,9 +328,17 @@ def _missing_metric_warnings(row: dict[str, Any]) -> list[str]:
     ]
     warnings: list[str] = []
     for label, values in checks:
-        if all(_num(value) is None for value in values):
+        if all(_positive_num(value) is None for value in values):
             warnings.append(f"Google Health {label} metric is missing for this date.")
     return warnings
+
+
+def _fields_used(row: dict[str, Any]) -> dict[str, Any]:
+    return {field: row.get(field) for field in GOOGLE_HEALTH_SIGNAL_FIELDS if _value_present(row.get(field), zero_is_missing=True)}
+
+
+def _missing_fields(row: dict[str, Any]) -> list[str]:
+    return [field for field in GOOGLE_HEALTH_SIGNAL_FIELDS if not _value_present(row.get(field), zero_is_missing=True)]
 
 
 def _bodyweight_confirmation(body_rows: list[dict[str, Any]], today: str) -> dict[str, Any]:
@@ -282,10 +401,10 @@ def build_google_health_dashboard_signals(
     subjective = _subjective_recovery_signal(recovery_rows, day)
     activity = _activity_signal(row, training_rows, day)
     missing_metric_warnings = _missing_metric_warnings(row)
-    breathing_rate = _num(row.get("breathing_rate"))
-    spo2 = _num(row.get("spo2"))
+    breathing_rate = _positive_num(row.get("breathing_rate"))
+    spo2 = _positive_num(row.get("spo2"))
     skin_temperature = _num(row.get("skin_temperature"))
-    body_temperature = _num(row.get("body_temperature"))
+    body_temperature = _positive_num(row.get("body_temperature"))
     abnormal_signals: list[str] = []
     if rhr["abnormal"]:
         abnormal_signals.append("Resting HR elevated above baseline")
@@ -333,7 +452,7 @@ def build_google_health_dashboard_signals(
     }
 
     baseline_target = _num(targets.get("target_calories"))
-    calories_burned = _num(row.get("total_calories_burned")) or _num(row.get("calories_burned"))
+    calories_burned = _first_positive(row, "total_calories_burned", "calories_burned")
     intake = _num(nutrition_today.get("calories"))
     calorie_delta = intake - calories_burned if intake is not None and calories_burned is not None else None
     if calorie_delta is None:
@@ -364,7 +483,7 @@ def build_google_health_dashboard_signals(
         "logged_intake": _round(intake, 0),
         "intake_vs_burned": _round(calorie_delta, 0),
         "status": calorie_status,
-        "message": "Likely near maintenance from intake vs Google Health burn." if calorie_status == "likely_near_maintenance" else "Google Health burn is context only; saved target remains bodyweight-trend based.",
+        "message": "Wearable burn unavailable from Google Health." if calorie_status == "insufficient_data" else "Likely near maintenance from intake vs Google Health burn." if calorie_status == "likely_near_maintenance" else "Google Health burn is context only; saved target remains bodyweight-trend based.",
     }
     suggested_calorie_adjustment = {
         "adjustment": suggested_adjustment,
@@ -397,6 +516,13 @@ def build_google_health_dashboard_signals(
         "activity_load": activity,
         "debug": {
             "metric_rows_available": len(rows),
+            "selected_date": day,
+            "source_table": ", ".join(row.get("_source_tables") or ["wearable_metrics"]),
+            "source_tables": row.get("_source_tables") or ["wearable_metrics"],
+            "latest_raw_row": row.get("_raw_table_rows") or {"wearable_metrics": _compact_debug_row(row)},
+            "normalized_wearable_row": _compact_debug_row(row),
+            "fields_used": _fields_used(row),
+            "missing_fields": _missing_fields(row),
             "missing_metric_warnings": missing_metric_warnings,
             "partial_data": bool(missing_metric_warnings),
         },
