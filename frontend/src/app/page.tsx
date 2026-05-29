@@ -5,22 +5,38 @@ import {
   Apple,
   AlertTriangle,
   BarChart3,
+  Beef,
+  Candy,
   Check,
   ChevronDown,
+  CircleGauge,
+  Clock3,
   Copy,
+  CupSoda,
   Download,
+  Droplets,
   Dumbbell,
   ExternalLink,
+  Flame,
   Gauge,
+  GripVertical,
   HeartPulse,
+  Leaf,
+  Milk,
   Pencil,
+  Pill,
   Plus,
   RefreshCw,
+  Search,
   Settings,
+  Soup,
   Sparkles,
+  Star,
   Target,
   Trash2,
   Utensils,
+  WandSparkles,
+  Wheat,
   Weight,
   X,
   CircleMinus,
@@ -339,6 +355,30 @@ type WorkoutMarker = {
   workout_type: string;
   notes: string;
   created_at?: string;
+};
+
+type FoodTimelineItem =
+  | {
+      type: "food";
+      id: string;
+      sequence: number | null;
+      createdAt: string;
+      persistable: boolean;
+      entry: NutritionEntry;
+    }
+  | {
+      type: "workout_marker";
+      id: string;
+      sequence: number | null;
+      createdAt: string;
+      persistable: boolean;
+      marker: WorkoutMarker;
+    };
+
+type FoodTimelineReorderItem = {
+  type: "food" | "workout_marker";
+  id: string;
+  sequence: number;
 };
 
 type WearableMetricEntry = {
@@ -1865,7 +1905,9 @@ type FoodPresetIconType =
   | "yogurt"
   | "avocado"
   | "salmon"
-  | "peanut_butter";
+  | "peanut_butter"
+  | "sweet_potato"
+  | "milk_bottle";
 
 type MealTemplate = {
   template_name: string;
@@ -2474,7 +2516,7 @@ async function apiErrorMessage(response: Response) {
   return apiErrorMessageFromText(text, response.statusText);
 }
 
-async function apiSend<T>(path: string, method: "POST" | "PUT", body: unknown): Promise<T> {
+async function apiSend<T>(path: string, method: "POST" | "PUT" | "PATCH", body: unknown): Promise<T> {
   const response = await fetchWithTimeout(apiUrl(path), {
     method,
     credentials: "include",
@@ -2524,7 +2566,18 @@ function Card({ children, className }: Readonly<{ children: React.ReactNode; cla
   );
 }
 
-function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; title: string; action?: React.ReactNode }>) {
+function TitleWithIcon({ icon: Icon, children }: Readonly<{ icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }>) {
+  return (
+    <span className="inline-flex min-w-0 items-center gap-2">
+      <span className="accent-outline grid h-8 w-8 shrink-0 place-items-center rounded-lg border">
+        <Icon className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 truncate">{children}</span>
+    </span>
+  );
+}
+
+function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; title: React.ReactNode; action?: React.ReactNode }>) {
   return (
     <div className="mb-4 flex flex-wrap items-start justify-between gap-3 sm:gap-4">
       <div className="min-w-0">
@@ -3316,6 +3369,136 @@ function FoodIconPicker({
   );
 }
 
+function foodTimelineItemKey(item: FoodTimelineItem) {
+  return `${item.type}:${item.id}`;
+}
+
+function foodTimelineTimestamp(value: string | undefined) {
+  if (!value) return Number.POSITIVE_INFINITY;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
+}
+
+function buildFoodTimelineItems(entries: NutritionEntry[], markers: WorkoutMarker[]) {
+  const foodItems: FoodTimelineItem[] = entries.map((entry, index) => {
+    const id = entry.food_log_id || `food:${entry.date}:${entry.food_name}:${index}`;
+    return {
+      type: "food",
+      id,
+      sequence: finiteNumberOrNull(entry.logged_sequence ?? entry.created_order),
+      createdAt: entry.created_at ?? "",
+      persistable: Boolean(entry.food_log_id && !String(entry.food_log_id).startsWith("optimistic:")),
+      entry,
+    };
+  });
+  const markerItems: FoodTimelineItem[] = markers.map((marker, index) => {
+    const id = marker.marker_id || `marker:${marker.date}:${marker.created_at ?? ""}:${index}`;
+    return {
+      type: "workout_marker",
+      id,
+      sequence: finiteNumberOrNull(marker.marker_sequence ?? marker.created_order),
+      createdAt: marker.created_at ?? "",
+      persistable: Boolean(marker.marker_id),
+      marker,
+    };
+  });
+  return [...foodItems, ...markerItems].sort((a, b) => {
+    if (a.sequence !== null && b.sequence !== null && a.sequence !== b.sequence) return a.sequence - b.sequence;
+    if (a.sequence !== null && b.sequence === null) return -1;
+    if (a.sequence === null && b.sequence !== null) return 1;
+    const timeDelta = foodTimelineTimestamp(a.createdAt) - foodTimelineTimestamp(b.createdAt);
+    if (timeDelta !== 0) return timeDelta;
+    return foodTimelineItemKey(a).localeCompare(foodTimelineItemKey(b));
+  });
+}
+
+function applyFoodTimelineOrder(items: FoodTimelineItem[], orderIds: string[] | null) {
+  if (!orderIds?.length) return items;
+  const itemMap = new Map(items.map((item) => [foodTimelineItemKey(item), item]));
+  const ordered = orderIds.map((id) => itemMap.get(id)).filter((item): item is FoodTimelineItem => Boolean(item));
+  const orderedIds = new Set(orderIds);
+  const additions = items.filter((item) => !orderedIds.has(foodTimelineItemKey(item)));
+  return [...ordered, ...additions];
+}
+
+function moveFoodTimelineItem(items: FoodTimelineItem[], activeId: string, overId: string) {
+  const fromIndex = items.findIndex((item) => foodTimelineItemKey(item) === activeId);
+  const toIndex = items.findIndex((item) => foodTimelineItemKey(item) === overId);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return items;
+  const next = items.slice();
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
+}
+
+function foodTimelineSectionLabel(items: FoodTimelineItem[], index: number) {
+  if (!items.some((item) => item.type === "workout_marker")) return null;
+  const item = items[index];
+  const previous = items[index - 1];
+  if (item.type === "workout_marker") return "Workout";
+  if (!previous) return "Pre-workout";
+  if (previous.type === "workout_marker") return "Post-workout";
+  return null;
+}
+
+function foodTimelinePayload(items: FoodTimelineItem[]): FoodTimelineReorderItem[] {
+  return items
+    .filter((item) => item.persistable)
+    .map((item, index) => ({
+      type: item.type,
+      id: item.id,
+      sequence: index + 1,
+    }));
+}
+
+type FoodTypeIconKind = "supplement" | "shake" | "drink" | "snack" | "meal" | "food";
+
+function foodTypeIconKind(label: string | null | undefined, foodName: string | null | undefined, iconType?: string | null): FoodTypeIconKind {
+  const normalized = normalizeSearchText(`${label ?? ""} ${foodName ?? ""} ${iconType ?? ""}`);
+  if (normalized.includes("supplement") || normalized.includes("vitamin") || normalized.includes("creatine")) return "supplement";
+  if (normalized.includes("protein shake") || normalized.includes("shake") || normalized.includes("nurri") || normalized.includes("milk")) return "shake";
+  if (normalized.includes("drink") || normalized.includes("water") || normalized.includes("coffee") || normalized.includes("tea")) return "drink";
+  if (normalized.includes("snack") || normalized.includes("bar") || normalized.includes("crispy") || normalized.includes("treat")) return "snack";
+  if (normalized.includes("meal") || normalized.includes("bowl") || normalized.includes("plate")) return "meal";
+  return "food";
+}
+
+function FoodTypeGlyph({ kind, className }: Readonly<{ kind: FoodTypeIconKind; className?: string }>) {
+  if (kind === "supplement") return <Pill className={className} />;
+  if (kind === "shake") return <Milk className={className} />;
+  if (kind === "drink") return <CupSoda className={className} />;
+  if (kind === "snack") return <Candy className={className} />;
+  if (kind === "meal") return <Soup className={className} />;
+  return <Utensils className={className} />;
+}
+
+function FoodTypeBadge({
+  label,
+  foodName,
+  iconType,
+}: Readonly<{
+  label: string | null | undefined;
+  foodName: string | null | undefined;
+  iconType?: string | null;
+}>) {
+  const kind = foodTypeIconKind(label, foodName, iconType);
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">
+      <FoodTypeGlyph kind={kind} className="h-3.5 w-3.5 text-zinc-500" />
+      {label || "Food"}
+    </span>
+  );
+}
+
+function MacroIcon({ label, className }: Readonly<{ label: string; className?: string }>) {
+  if (label === "Calories") return <Flame className={className} />;
+  if (label === "Protein") return <Beef className={className} />;
+  if (label === "Carbs") return <Wheat className={className} />;
+  if (label === "Fat") return <Droplets className={className} />;
+  if (label === "Fiber") return <Leaf className={className} />;
+  return <CircleGauge className={className} />;
+}
+
 function FoodLogList({
   entries,
   emptyDescription,
@@ -3373,7 +3556,7 @@ function FoodLogList({
                 <div className="min-w-0">
                   <div className="flex flex-wrap items-center gap-2">
                     <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
-                    {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+                    {entry.meal_type ? <FoodTypeBadge label={entry.meal_type} foodName={entry.food_name} iconType={entry.iconType} /> : null}
                     {isOptimistic ? <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-xs font-medium text-emerald-100">Queued</span> : null}
                   </div>
                   {amountLabel ? <p className="mt-1 text-xs text-zinc-500">{amountLabel}</p> : null}
@@ -3440,6 +3623,276 @@ function FoodLogList({
                 </div>
               </div>
             ) : null}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function FoodTimelineList({
+  items,
+  emptyDescription,
+  onRemove,
+  removingId,
+  onEdit,
+  editingId,
+  editingIcon,
+  onEditingIconChange,
+  onCancelEdit,
+  onSaveIcon,
+  savingId,
+  draggingId,
+  savingOrder,
+  onDragStart,
+  onDragOverItem,
+  onDragEnd,
+}: Readonly<{
+  items: FoodTimelineItem[];
+  emptyDescription: string;
+  onRemove?: (entry: NutritionEntry) => void;
+  removingId?: string | null;
+  onEdit?: (entry: NutritionEntry) => void;
+  editingId?: string | null;
+  editingIcon?: FoodIconType | null;
+  onEditingIconChange?: (iconType: FoodIconType | null) => void;
+  onCancelEdit?: () => void;
+  onSaveIcon?: (entry: NutritionEntry) => void;
+  savingId?: string | null;
+  draggingId?: string | null;
+  savingOrder?: boolean;
+  onDragStart: (itemId: string) => void;
+  onDragOverItem: (itemId: string) => void;
+  onDragEnd: () => void;
+}>) {
+  if (!items.length) {
+    return (
+      <EmptyState
+        title="No food logged yet"
+        description={emptyDescription}
+        action="Use manual entry"
+        onAction={() => undefined}
+      />
+    );
+  }
+
+  const dragButton = (item: FoodTimelineItem) => {
+    const itemId = foodTimelineItemKey(item);
+    return (
+      <button
+        type="button"
+        draggable={item.persistable && !savingOrder}
+        onPointerDown={(event) => {
+          if (event.pointerType === "mouse" || !item.persistable || savingOrder) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          onDragStart(itemId);
+        }}
+        onPointerMove={(event) => {
+          if (event.pointerType === "mouse") return;
+          const target = document.elementFromPoint(event.clientX, event.clientY);
+          const row = target?.closest<HTMLElement>("[data-food-timeline-item-id]");
+          const overId = row?.dataset.foodTimelineItemId;
+          if (overId) onDragOverItem(overId);
+        }}
+        onPointerUp={(event) => {
+          if (event.pointerType === "mouse") return;
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          onDragEnd();
+        }}
+        onPointerCancel={(event) => {
+          if (event.pointerType === "mouse") return;
+          if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+            event.currentTarget.releasePointerCapture(event.pointerId);
+          }
+          onDragEnd();
+        }}
+        onDragStart={(event) => {
+          if (!item.persistable || savingOrder) {
+            event.preventDefault();
+            return;
+          }
+          event.stopPropagation();
+          event.dataTransfer.effectAllowed = "move";
+          event.dataTransfer.setData("text/plain", itemId);
+          onDragStart(itemId);
+        }}
+        onDragEnd={(event) => {
+          event.stopPropagation();
+          onDragEnd();
+        }}
+        disabled={!item.persistable || savingOrder}
+        className="mt-0.5 flex h-9 w-9 shrink-0 touch-none items-center justify-center rounded-lg border border-white/10 bg-zinc-950/60 text-zinc-500 transition hover:border-emerald-300/30 hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-35"
+        aria-label="Drag to reorder food timeline"
+        title={item.persistable ? "Drag to reorder" : "Save pending entry before reordering"}
+      >
+        <GripVertical className="h-4 w-4" />
+      </button>
+    );
+  };
+
+  return (
+    <div className="space-y-2" data-testid="food-timeline-list" aria-busy={savingOrder ? "true" : undefined}>
+      {items.map((item, index) => {
+        const itemId = foodTimelineItemKey(item);
+        const label = foodTimelineSectionLabel(items, index);
+        const isDragging = draggingId === itemId;
+        return (
+          <div key={itemId}>
+            {label ? (
+              <div className="mb-2 mt-3 flex items-center gap-2 first:mt-0">
+                <span className="h-px flex-1 bg-white/10" />
+                <span className="rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
+                  {label}
+                </span>
+                <span className="h-px flex-1 bg-white/10" />
+              </div>
+            ) : null}
+            <div
+              draggable={item.persistable && !savingOrder}
+              onDragStart={(event) => {
+                if (!item.persistable || savingOrder) {
+                  event.preventDefault();
+                  return;
+                }
+                event.dataTransfer.effectAllowed = "move";
+                event.dataTransfer.setData("text/plain", itemId);
+                onDragStart(itemId);
+              }}
+              onDragOver={(event) => {
+                event.preventDefault();
+                if (!savingOrder) onDragOverItem(itemId);
+              }}
+              onDrop={(event) => {
+                event.preventDefault();
+              }}
+              onDragEnd={onDragEnd}
+              className={cx("rounded-lg border border-white/10 bg-white/[0.035] p-3 transition duration-150", isDragging ? "scale-[0.99] opacity-60" : "opacity-100")}
+              data-testid={item.type === "food" ? "food-log-row" : "workout-marker-row"}
+              data-food-timeline-item-id={itemId}
+            >
+              {item.type === "workout_marker" ? (
+                <div className="flex min-w-0 items-start gap-3">
+                  {dragButton(item)}
+                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                    <Dumbbell className="h-5 w-5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="font-semibold text-white">Gym Marker</p>
+                      <span className="rounded-full bg-emerald-300/10 px-2 py-1 text-xs font-medium text-emerald-100">
+                        {item.marker.workout_type || "Workout"}
+                      </span>
+                      {item.marker.workout_time ? (
+                        <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{item.marker.workout_time}</span>
+                      ) : null}
+                    </div>
+                    <p className="mt-1 text-xs text-zinc-500">
+                      Drag this divider between foods to set pre-workout and post-workout nutrition.
+                    </p>
+                    {item.marker.notes ? <p className="mt-2 text-sm leading-5 text-zinc-400">{item.marker.notes}</p> : null}
+                  </div>
+                </div>
+              ) : (
+                <>
+                  {(() => {
+                    const entry = item.entry;
+                    const selectedIcon = normalizeFoodIconType(entry.iconType);
+                    const isOptimistic = String(entry.food_log_id ?? "").startsWith("optimistic:");
+                    const isEditing = Boolean(entry.food_log_id && editingId === entry.food_log_id);
+                    const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
+                    const amountLabel = foodAmountLabel(entry);
+                    return (
+                      <>
+                        <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+                          <div className="flex min-w-0 items-start gap-3">
+                            {dragButton(item)}
+                            {selectedIcon ? (
+                              <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                                <FoodIcon type={selectedIcon} className="h-5 w-5" />
+                              </span>
+                            ) : null}
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
+                                {entry.meal_type ? <FoodTypeBadge label={entry.meal_type} foodName={entry.food_name} iconType={entry.iconType} /> : null}
+                                {isOptimistic ? <span className="rounded-full border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 text-xs font-medium text-emerald-100">Queued</span> : null}
+                              </div>
+                              {amountLabel ? <p className="mt-1 text-xs text-zinc-500">{amountLabel}</p> : null}
+                            </div>
+                          </div>
+                          <div className="grid gap-2 sm:justify-items-end">
+                            <div className="flex flex-wrap gap-1.5 text-xs text-zinc-300 sm:justify-end">
+                              <span className="accent-outline rounded-full border px-2 py-1">{formatFoodAmount(entry.calories)} kcal</span>
+                              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">P {formatFoodAmount(entry.protein)}g</span>
+                              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">C {formatFoodAmount(entry.carbs)}g</span>
+                              <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">F {formatFoodAmount(entry.fat)}g</span>
+                            </div>
+                            <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
+                              {onEdit ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onEdit(entry)}
+                                  disabled={!entry.food_log_id || isOptimistic || isSaving}
+                                  className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                                  aria-label={`Edit ${entry.food_name || "food entry"}`}
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                  Edit
+                                </button>
+                              ) : null}
+                              {onRemove ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onRemove(entry)}
+                                  disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
+                                  className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                  aria-label={`Remove ${entry.food_name || "food entry"}`}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                  {removingId === entry.food_log_id ? "Removing..." : "Delete"}
+                                </button>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+
+                        {isEditing && onEditingIconChange && onCancelEdit && onSaveIcon ? (
+                          <div className="mt-4 border-t border-white/10 pt-4">
+                            <FoodIconPicker value={editingIcon ?? null} onChange={onEditingIconChange} />
+                            <div className="mt-3 flex flex-wrap justify-end gap-2">
+                              <button
+                                type="button"
+                                onClick={onCancelEdit}
+                                disabled={isSaving}
+                                className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => onSaveIcon(entry)}
+                                disabled={isSaving}
+                                className="accent-bg inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                              >
+                                <Check className="h-3.5 w-3.5" />
+                                {isSaving ? "Saving..." : "Save"}
+                              </button>
+                            </div>
+                          </div>
+                        ) : null}
+                      </>
+                    );
+                  })()}
+                </>
+              )}
+            </div>
           </div>
         );
       })}
@@ -3532,7 +3985,7 @@ function FoodHistoryList({ logs, nutritionHistory }: Readonly<{ logs: NutritionE
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="break-words font-semibold text-white">{entry.food_name || "Unnamed food"}</p>
-                        {entry.meal_type ? <span className="rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">{entry.meal_type}</span> : null}
+                        {entry.meal_type ? <FoodTypeBadge label={entry.meal_type} foodName={entry.food_name} iconType={entry.iconType} /> : null}
                       </div>
                       <p className="mt-1 text-sm text-zinc-400">{foodMacroSummary(entry)}</p>
                     </div>
@@ -3573,25 +4026,47 @@ const FOOD_PRESET_ICON_OPTIONS: Array<{ type: FoodPresetIconType; label: string 
   { type: "avocado", label: "Avocado" },
   { type: "salmon", label: "Salmon" },
   { type: "peanut_butter", label: "Peanut butter" },
+  { type: "sweet_potato", label: "Sweet potato" },
+  { type: "milk_bottle", label: "Bottle" },
 ];
 
 const FOOD_PRESET_ICON_TYPES = new Set<FoodPresetIconType>(FOOD_PRESET_ICON_OPTIONS.map((option) => option.type));
 
+function inferFoodPresetIconType(name: string | null | undefined): FoodPresetIconType {
+  const normalized = normalizeSearchText(String(name ?? ""));
+  if (normalized.includes("bagel")) return "bagel";
+  if (normalized.includes("oat")) return "oats";
+  if (normalized.includes("rice crispy") || normalized.includes("rice krisp")) return "rice_crispy_treat";
+  if (normalized.includes("rice")) return "rice";
+  if (normalized.includes("shake") || normalized.includes("nurri") || normalized.includes("fairlife") || normalized.includes("milk")) return "milk_bottle";
+  if (normalized.includes("bar") || normalized.includes("crispy") || normalized.includes("snack")) return "protein_bar";
+  if (normalized.includes("banana")) return "banana";
+  if (normalized.includes("egg")) return "eggs";
+  if (normalized.includes("yogurt")) return "yogurt";
+  if (normalized.includes("tuna")) return "tuna";
+  if (normalized.includes("salmon")) return "salmon";
+  if (normalized.includes("avocado")) return "avocado";
+  if (normalized.includes("peanut")) return "peanut_butter";
+  if (normalized.includes("sweet potato")) return "sweet_potato";
+  if (normalized.includes("chicken")) return "chicken";
+  return "meal_bowl";
+}
+
 function foodPresetIconType(shortcut: Pick<FoodShortcut, "icon_type" | "iconType" | "shortcut_name">): FoodPresetIconType {
   const selected = String(shortcut.icon_type || shortcut.iconType || "").trim() as FoodPresetIconType;
   if (FOOD_PRESET_ICON_TYPES.has(selected)) return selected;
-  return "meal_bowl";
+  return inferFoodPresetIconType(shortcut.shortcut_name);
 }
 
 const DEFAULT_PRESET_FOODS: PresetFoodShortcut[] = [
   { shortcut_id: "default-preset-kirkland-bagel", shortcut_name: "Kirkland Bagel", icon_type: "bagel", calories: 260, protein: 11, carbs: 54, fat: 2, fiber: 2, sodium: 450, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-built-puff-bar", shortcut_name: "Built Puff Bar", icon_type: "protein_bar", calories: 140, protein: 17, carbs: 15, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", icon_type: "protein_shake", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-nurri-shake", shortcut_name: "Nurri Shake", icon_type: "milk_bottle", calories: 150, protein: 30, carbs: 3, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-oats-overnight", shortcut_name: "Oats Overnight", icon_type: "oats", calories: 280, protein: 20, carbs: 35, fat: 7, fiber: 6, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-chicken-bowl", shortcut_name: "Chicken Bowl", icon_type: "meal_bowl", calories: 650, protein: 45, carbs: 70, fat: 20, fiber: 8, sodium: null, potassium: null, notes: "Seed preset. Edit to match your usual bowl.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-bibigo-rice", shortcut_name: "Bibigo Rice", icon_type: "rice", calories: 310, protein: 6, carbs: 68, fat: 1, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-tuna", shortcut_name: "Tuna", icon_type: "tuna", calories: 120, protein: 26, carbs: 0, fat: 1, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", icon_type: "protein_shake", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-fairlife-milk", shortcut_name: "Fairlife Milk", icon_type: "milk_bottle", calories: 80, protein: 13, carbs: 6, fat: 0, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-kirkland-chicken", shortcut_name: "Kirkland Chicken", icon_type: "chicken", calories: 140, protein: 22, carbs: 2, fat: 5, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-eggs", shortcut_name: "Eggs", icon_type: "eggs", calories: 140, protein: 12, carbs: 1, fat: 10, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-banana", shortcut_name: "Banana", icon_type: "banana", calories: 105, protein: 1, carbs: 27, fat: 0, fiber: 3, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
@@ -3600,7 +4075,7 @@ const DEFAULT_PRESET_FOODS: PresetFoodShortcut[] = [
   { shortcut_id: "default-preset-protein-shake", shortcut_name: "Protein Shake", icon_type: "protein_shake", calories: 160, protein: 30, carbs: 5, fat: 3, fiber: 0, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-peanut-butter", shortcut_name: "Peanut Butter", icon_type: "peanut_butter", calories: 190, protein: 7, carbs: 7, fat: 16, fiber: 2, sodium: null, potassium: null, notes: "Seed preset. Edit to match your label.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-chicken-breast", shortcut_name: "Chicken Breast", icon_type: "chicken", calories: 165, protein: 31, carbs: 0, fat: 4, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
-  { shortcut_id: "default-preset-sweet-potato", shortcut_name: "Sweet Potato", icon_type: "meal_bowl", calories: 115, protein: 2, carbs: 27, fat: 0, fiber: 4, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
+  { shortcut_id: "default-preset-sweet-potato", shortcut_name: "Sweet Potato", icon_type: "sweet_potato", calories: 115, protein: 2, carbs: 27, fat: 0, fiber: 4, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-salmon", shortcut_name: "Salmon", icon_type: "salmon", calories: 240, protein: 34, carbs: 0, fat: 12, fiber: 0, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
   { shortcut_id: "default-preset-avocado", shortcut_name: "Avocado", icon_type: "avocado", calories: 240, protein: 3, carbs: 12, fat: 22, fiber: 10, sodium: null, potassium: null, notes: "Seed preset.", created_at: "", source: "default_preset", isDefaultPreset: true },
 ];
@@ -3683,7 +4158,7 @@ function MacroDonutCard({
   if (!targets) {
     return (
       <Card className="min-w-0">
-        <SectionHeader eyebrow="Today" title={`Daily summary · ${dateLabel}`} />
+        <SectionHeader eyebrow="Today" title={<TitleWithIcon icon={Target}>Daily summary · {dateLabel}</TitleWithIcon>} />
         <p className="text-sm text-zinc-400">Set macro targets in Goals to see today&apos;s progress here.</p>
       </Card>
     );
@@ -3703,7 +4178,7 @@ function MacroDonutCard({
 
   return (
     <Card className="min-w-0 overflow-hidden">
-      <SectionHeader eyebrow="Today" title={`Daily summary · ${dateLabel}`} />
+      <SectionHeader eyebrow="Today" title={<TitleWithIcon icon={Target}>Daily summary · {dateLabel}</TitleWithIcon>} />
       <div className="grid gap-5 lg:grid-cols-[180px_minmax(0,1fr)] lg:items-center">
         <div className="flex items-center gap-5 lg:block">
           <div className="relative h-36 w-36 shrink-0 lg:mx-auto">
@@ -3770,7 +4245,10 @@ function MacroDonutCard({
             return (
               <div key={row.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
                 <div className="flex min-w-0 items-baseline justify-between gap-3 text-sm">
-                  <span className="font-medium text-zinc-200">{row.label}</span>
+                  <span className="inline-flex min-w-0 items-center gap-2 font-medium text-zinc-200">
+                    <MacroIcon label={row.label} className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                    {row.label}
+                  </span>
                   <span className="shrink-0 text-zinc-400">{consumed}{row.unit} / {target}{row.unit}</span>
                 </div>
                 <div className="mt-2 h-1.5 rounded-full bg-white/10">
@@ -3882,6 +4360,16 @@ function FoodPresetIcon({ type, className = "h-7 w-7" }: Readonly<{ type: FoodPr
           <path {...common} d="M11 10h10l-1 16h-8l-1-16Z" />
           <path {...common} d="M12 6h8v4h-8zM13 16h6M13.5 20h5" />
         </>
+      ) : iconType === "sweet_potato" ? (
+        <>
+          <path {...common} d="M9 20c-1.4-4.3 2.8-9.4 8.2-10.4 4.2-.8 7.1.9 7.7 3.6.8 3.4-2.8 7.9-8.2 9.1-3.5.8-6.6.1-7.7-2.3Z" />
+          <path {...common} d="M12.5 19.5c2.5-1 5.8-3.6 8.4-6.6M14.2 13.4c1.4.2 2.3.8 3 1.8" />
+        </>
+      ) : iconType === "milk_bottle" ? (
+        <>
+          <path {...common} d="M13 5h6v5l2 2v12a3 3 0 0 1-3 3h-4a3 3 0 0 1-3-3V12l2-2V5Z" />
+          <path {...common} d="M12.5 10h7M12 17h8M13.5 21h5M14 5V3.5h4V5" />
+        </>
       ) : (
         <>
           <path {...common} d="M7 15h18l-2 7a5 5 0 0 1-4.8 3.6h-4.4A5 5 0 0 1 9 22l-2-7Z" />
@@ -3930,9 +4418,134 @@ function FoodPresetIconPicker({
   );
 }
 
+type FoodPresetCategory = "Breakfast" | "Protein" | "Snack" | "Meal" | "Drink" | "Fruit" | "Carb" | "Fats" | "Seafood";
+
+const FOOD_PRESET_CATEGORY_TONES: Record<FoodPresetCategory, {
+  background: string;
+  borderColor: string;
+  accent: string;
+  iconBackground: string;
+  pillBackground: string;
+  pillColor: string;
+  glow: string;
+}> = {
+  Breakfast: {
+    background: "linear-gradient(145deg, rgba(146, 92, 20, 0.58), rgba(43, 31, 16, 0.92))",
+    borderColor: "rgba(251, 191, 36, 0.26)",
+    accent: "#fbbf24",
+    iconBackground: "rgba(251, 191, 36, 0.12)",
+    pillBackground: "rgba(251, 191, 36, 0.13)",
+    pillColor: "#fde68a",
+    glow: "rgba(251, 191, 36, 0.16)",
+  },
+  Protein: {
+    background: "linear-gradient(145deg, rgba(30, 64, 175, 0.52), rgba(15, 23, 42, 0.94))",
+    borderColor: "rgba(96, 165, 250, 0.28)",
+    accent: "#93c5fd",
+    iconBackground: "rgba(96, 165, 250, 0.12)",
+    pillBackground: "rgba(96, 165, 250, 0.13)",
+    pillColor: "#bfdbfe",
+    glow: "rgba(96, 165, 250, 0.15)",
+  },
+  Snack: {
+    background: "linear-gradient(145deg, rgba(159, 18, 57, 0.48), rgba(39, 18, 29, 0.94))",
+    borderColor: "rgba(251, 113, 133, 0.28)",
+    accent: "#fb7185",
+    iconBackground: "rgba(251, 113, 133, 0.13)",
+    pillBackground: "rgba(251, 113, 133, 0.14)",
+    pillColor: "#fecdd3",
+    glow: "rgba(251, 113, 133, 0.15)",
+  },
+  Meal: {
+    background: "linear-gradient(145deg, rgba(91, 33, 182, 0.46), rgba(24, 18, 43, 0.94))",
+    borderColor: "rgba(196, 181, 253, 0.27)",
+    accent: "#c4b5fd",
+    iconBackground: "rgba(196, 181, 253, 0.12)",
+    pillBackground: "rgba(196, 181, 253, 0.13)",
+    pillColor: "#ddd6fe",
+    glow: "rgba(196, 181, 253, 0.14)",
+  },
+  Drink: {
+    background: "linear-gradient(145deg, rgba(13, 148, 136, 0.42), rgba(15, 31, 35, 0.94))",
+    borderColor: "rgba(45, 212, 191, 0.27)",
+    accent: "#5eead4",
+    iconBackground: "rgba(45, 212, 191, 0.12)",
+    pillBackground: "rgba(45, 212, 191, 0.13)",
+    pillColor: "#99f6e4",
+    glow: "rgba(45, 212, 191, 0.14)",
+  },
+  Fruit: {
+    background: "linear-gradient(145deg, rgba(22, 101, 52, 0.48), rgba(17, 34, 25, 0.94))",
+    borderColor: "rgba(74, 222, 128, 0.26)",
+    accent: "#86efac",
+    iconBackground: "rgba(74, 222, 128, 0.12)",
+    pillBackground: "rgba(74, 222, 128, 0.13)",
+    pillColor: "#bbf7d0",
+    glow: "rgba(74, 222, 128, 0.14)",
+  },
+  Carb: {
+    background: "linear-gradient(145deg, rgba(154, 52, 18, 0.46), rgba(45, 29, 20, 0.94))",
+    borderColor: "rgba(251, 146, 60, 0.28)",
+    accent: "#fdba74",
+    iconBackground: "rgba(251, 146, 60, 0.12)",
+    pillBackground: "rgba(251, 146, 60, 0.13)",
+    pillColor: "#fed7aa",
+    glow: "rgba(251, 146, 60, 0.14)",
+  },
+  Fats: {
+    background: "linear-gradient(145deg, rgba(120, 53, 15, 0.48), rgba(39, 27, 17, 0.94))",
+    borderColor: "rgba(217, 119, 6, 0.28)",
+    accent: "#fbbf24",
+    iconBackground: "rgba(217, 119, 6, 0.12)",
+    pillBackground: "rgba(217, 119, 6, 0.13)",
+    pillColor: "#fde68a",
+    glow: "rgba(217, 119, 6, 0.14)",
+  },
+  Seafood: {
+    background: "linear-gradient(145deg, rgba(14, 116, 144, 0.44), rgba(14, 31, 41, 0.94))",
+    borderColor: "rgba(34, 211, 238, 0.26)",
+    accent: "#67e8f9",
+    iconBackground: "rgba(34, 211, 238, 0.12)",
+    pillBackground: "rgba(34, 211, 238, 0.13)",
+    pillColor: "#a5f3fc",
+    glow: "rgba(34, 211, 238, 0.14)",
+  },
+};
+
+function foodPresetCategory(shortcut: Pick<FoodShortcut, "shortcut_name" | "icon_type" | "iconType" | "protein" | "carbs" | "fat">): FoodPresetCategory {
+  const iconType = foodPresetIconType(shortcut);
+  const normalized = normalizeSearchText(shortcut.shortcut_name);
+  if (["oats", "eggs", "yogurt"].includes(iconType) || normalized.includes("breakfast")) return "Breakfast";
+  if (["protein_bar", "chicken"].includes(iconType) || Number(shortcut.protein) >= 25) return "Protein";
+  if (["protein_shake", "milk_bottle", "smoothie"].includes(iconType)) return "Drink";
+  if (["banana", "avocado"].includes(iconType)) return "Fruit";
+  if (["rice", "bagel", "sweet_potato"].includes(iconType)) return "Carb";
+  if (["rice_crispy_treat"].includes(iconType) || normalized.includes("snack") || normalized.includes("bar")) return "Snack";
+  if (["tuna", "salmon"].includes(iconType)) return "Seafood";
+  if (["peanut_butter"].includes(iconType) || Number(shortcut.fat) >= 15) return "Fats";
+  return "Meal";
+}
+
+function presetMacroText(item: Pick<FoodShortcut, "protein" | "carbs" | "fat">) {
+  return `${Math.round(Number(item.protein) || 0)}P · ${Math.round(Number(item.carbs) || 0)}C · ${Math.round(Number(item.fat) || 0)}F`;
+}
+
+function PresetStatusPill({ status }: Readonly<{ status?: QuickFoodLogStatus }>) {
+  const pendingCount = status?.pending ?? 0;
+  if (status?.error) {
+    return <span className="rounded-full border border-red-300/25 bg-red-300/15 px-2 py-1 text-[11px] font-semibold text-red-100">Retry</span>;
+  }
+  if (pendingCount > 0) {
+    return <span className="rounded-full border border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">{pendingCount > 1 ? `Adding ${pendingCount}` : "Adding"}</span>;
+  }
+  if (status?.added) {
+    return <span className="rounded-full border border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">Added</span>;
+  }
+  return null;
+}
+
 function PresetFoodTile({
   shortcut,
-  toneIndex,
   status,
   disabled,
   editing,
@@ -3940,57 +4553,56 @@ function PresetFoodTile({
   onClick,
 }: Readonly<{
   shortcut: PresetFoodShortcut;
-  toneIndex: number;
   status?: QuickFoodLogStatus;
   disabled?: boolean;
   editing: boolean;
   editMode: boolean;
   onClick: () => void;
 }>) {
-  const tone = FOOD_PRESET_TILE_TONES[toneIndex % FOOD_PRESET_TILE_TONES.length];
-  const pendingCount = status?.pending ?? 0;
-  const label = status?.error
-    ? "Retry"
-    : pendingCount > 1
-      ? `Adding ${pendingCount}`
-      : pendingCount === 1
-        ? "Adding..."
-        : status?.added
-          ? "Added"
-          : shortcut.shortcut_name;
+  const category = foodPresetCategory(shortcut);
+  const tone = FOOD_PRESET_CATEGORY_TONES[category];
+  const iconType = foodPresetIconType(shortcut);
   return (
     <button
       type="button"
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "group relative aspect-square min-w-0 rounded-lg border p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60",
-        editing ? "accent-outline" : "border-white/10",
+        "group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-xl border p-3 text-left text-white shadow-black/20 transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60",
+        editing ? "ring-1 ring-white/35" : "",
       )}
-      style={{ backgroundColor: tone.backgroundColor, borderColor: tone.borderColor }}
+      style={{
+        background: tone.background,
+        borderColor: editing ? tone.accent : tone.borderColor,
+        boxShadow: editing ? `0 0 0 1px ${tone.accent}, 0 18px 38px ${tone.glow}` : undefined,
+      }}
       title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
     >
-      {editMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-zinc-500" /> : null}
-      {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
-      {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
-      <span className="flex h-full flex-col items-center justify-center gap-2">
-        <span className="grid h-10 w-10 place-items-center rounded-lg border border-white/10 bg-black/20 text-zinc-300 transition group-hover:border-[var(--accent-border)] group-hover:text-[var(--accent-primary)]">
-          <FoodPresetIcon type={foodPresetIconType(shortcut)} className="h-6 w-6" />
+      <span className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-80" style={{ background: `linear-gradient(90deg, transparent, ${tone.accent}, transparent)` }} />
+      <span className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full opacity-20 blur-2xl transition group-hover:opacity-35" style={{ backgroundColor: tone.accent }} />
+      <span className="relative z-10 flex items-start justify-between gap-3">
+        <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
+          {category}
         </span>
-        <span className={cx("line-clamp-2 break-words leading-4", status?.error ? "text-red-100" : "")}>{label}</span>
+        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
+          <FoodPresetIcon type={iconType} className="h-6 w-6" />
+        </span>
+      </span>
+      <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
+        <span className="line-clamp-2 text-base font-semibold leading-5 tracking-normal text-white">{shortcut.shortcut_name}</span>
+        <span className="text-sm font-semibold text-white/90">{Math.round(Number(shortcut.calories) || 0)} kcal</span>
+        <span className="text-xs font-medium text-white/62">{presetMacroText(shortcut)}</span>
+      </span>
+      <span className="relative z-10 mt-3 flex items-center justify-between gap-2">
+        <PresetStatusPill status={status} />
+        <span className="ml-auto flex items-center gap-1.5 text-white/55">
+          {isDefaultPresetShortcut(shortcut) ? <Star className="h-3.5 w-3.5 fill-current opacity-60" /> : null}
+          {editMode ? <Pencil className="h-3.5 w-3.5" /> : status?.added ? <Check className="h-3.5 w-3.5 text-emerald-100" /> : null}
+        </span>
       </span>
     </button>
   );
 }
-
-const FOOD_PRESET_TILE_TONES = [
-  { backgroundColor: "rgba(74, 222, 128, 0.08)", borderColor: "rgba(74, 222, 128, 0.28)" },
-  { backgroundColor: "rgba(56, 189, 248, 0.08)", borderColor: "rgba(56, 189, 248, 0.28)" },
-  { backgroundColor: "rgba(168, 85, 247, 0.08)", borderColor: "rgba(168, 85, 247, 0.28)" },
-  { backgroundColor: "rgba(251, 146, 60, 0.08)", borderColor: "rgba(251, 146, 60, 0.28)" },
-  { backgroundColor: "rgba(244, 114, 182, 0.08)", borderColor: "rgba(244, 114, 182, 0.28)" },
-  { backgroundColor: "rgba(45, 212, 191, 0.08)", borderColor: "rgba(45, 212, 191, 0.28)" },
-] as const;
 
 function PresetFoodEditor({
   shortcut,
@@ -4066,11 +4678,19 @@ function SupplementsTile({
       )}
     >
       <div className="flex items-center justify-between gap-4">
-        <div className="min-w-0">
-          <p className="text-sm font-semibold text-white">Supplements</p>
+        <div className="flex min-w-0 items-start gap-3">
+          <span className={cx(
+            "mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg border transition",
+            taken ? "border-cyan-200/35 bg-cyan-200/12 text-cyan-100" : "border-white/10 bg-black/20 text-zinc-500 group-hover:text-zinc-300",
+          )}>
+            <Pill className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-white">Supplements</p>
           <p className={cx("mt-1 text-sm transition", taken ? "text-cyan-100" : "text-zinc-400")}>
             {taken ? "Taken today" : "Mark today’s supplements as taken"}
           </p>
+          </div>
         </div>
         <span
           className={cx(
@@ -5574,6 +6194,7 @@ function FoodPage({
   onLogFrequentFood,
   onDeleteFoodLog,
   onUpdateFoodLog,
+  onReorderFoodTimeline,
   onUpdateShortcut,
   onDeleteShortcut,
   onLogMealTemplate,
@@ -5632,6 +6253,7 @@ function FoodPage({
   onLogFrequentFood: (food: NutritionShortcutData["frequent_foods"][number]) => Promise<void> | void;
   onDeleteFoodLog: (entry: NutritionEntry) => Promise<void>;
   onUpdateFoodLog: (entry: NutritionEntry, updates: { iconType: FoodIconType | null }) => Promise<void>;
+  onReorderFoodTimeline: (date: string, orderedItems: FoodTimelineReorderItem[]) => Promise<void>;
   onUpdateShortcut: (shortcut: FoodShortcut) => Promise<void> | void;
   onDeleteShortcut: (shortcutId: string) => Promise<void> | void;
   onLogMealTemplate: (template: MealTemplateSummary) => Promise<void> | void;
@@ -5662,6 +6284,13 @@ function FoodPage({
   const [editingFoodLogId, setEditingFoodLogId] = useState<string | null>(null);
   const [editingFoodLogIcon, setEditingFoodLogIcon] = useState<FoodIconType | null>(null);
   const [savingFoodLogId, setSavingFoodLogId] = useState<string | null>(null);
+  const [timelineOrderIds, setTimelineOrderIds] = useState<string[] | null>(null);
+  const timelineOrderIdsRef = useRef<string[] | null>(null);
+  const [draggingTimelineId, setDraggingTimelineId] = useState<string | null>(null);
+  const draggingTimelineIdRef = useRef<string | null>(null);
+  const [savingTimelineOrder, setSavingTimelineOrder] = useState(false);
+  const [timelineFeedback, setTimelineFeedback] = useState<string | null>(null);
+  const [timelineError, setTimelineError] = useState<string | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
   const selectedDateMarkers = workoutMarkers
     .filter((marker) => (marker.date || "").slice(0, 10) === forms.nutrition.date)
@@ -5687,6 +6316,17 @@ function FoodPage({
       : `Workout marker placed after ${markerLoggedItemCount} logged item${markerLoggedItemCount === 1 ? "" : "s"}.`
     : "No workout marker logged for this date yet.";
   const selectedDateLabel = forms.nutrition.date === todayString() ? "today" : forms.nutrition.date;
+  const baseTimelineItems = useMemo(
+    () => buildFoodTimelineItems(selectedDateEntries, selectedDateMarkers),
+    [selectedDateEntries, selectedDateMarkers],
+  );
+  const selectedTimelineItems = useMemo(
+    () => applyFoodTimelineOrder(baseTimelineItems, timelineOrderIds),
+    [baseTimelineItems, timelineOrderIds],
+  );
+  useEffect(() => {
+    timelineOrderIdsRef.current = timelineOrderIds;
+  }, [timelineOrderIds]);
   const selectedDateTotals = selectedDateEntries.reduce(
     (totals, entry) => ({
       calories: totals.calories + (Number(entry.calories) || 0),
@@ -5786,6 +6426,48 @@ function FoodPage({
       setDeletingFoodLogId(null);
     }
   };
+  const saveTimelineOrder = async (items: FoodTimelineItem[]) => {
+    const orderedItems = foodTimelinePayload(items);
+    if (!orderedItems.length) return;
+    setSavingTimelineOrder(true);
+    setTimelineError(null);
+    setTimelineFeedback(null);
+    try {
+      await onReorderFoodTimeline(forms.nutrition.date, orderedItems);
+      setTimelineFeedback("Food timeline order saved.");
+      setTimelineOrderIds(null);
+      timelineOrderIdsRef.current = null;
+    } catch (error) {
+      setTimelineError(error instanceof Error ? error.message : "Food timeline order could not be saved.");
+    } finally {
+      setSavingTimelineOrder(false);
+      setDraggingTimelineId(null);
+      draggingTimelineIdRef.current = null;
+    }
+  };
+  const beginTimelineDrag = (itemId: string) => {
+    draggingTimelineIdRef.current = itemId;
+    setDraggingTimelineId(itemId);
+    setTimelineFeedback(null);
+    setTimelineError(null);
+  };
+  const reorderTimelineOverItem = (overId: string) => {
+    const activeId = draggingTimelineIdRef.current;
+    if (!activeId || activeId === overId) return;
+    const currentItems = applyFoodTimelineOrder(baseTimelineItems, timelineOrderIdsRef.current);
+    const nextItems = moveFoodTimelineItem(currentItems, activeId, overId);
+    const nextOrderIds = nextItems.map(foodTimelineItemKey);
+    timelineOrderIdsRef.current = nextOrderIds;
+    setTimelineOrderIds(nextOrderIds);
+  };
+  const finishTimelineDrag = () => {
+    const nextOrderIds = timelineOrderIdsRef.current;
+    setDraggingTimelineId(null);
+    draggingTimelineIdRef.current = null;
+    if (!nextOrderIds?.length) return;
+    const nextItems = applyFoodTimelineOrder(baseTimelineItems, nextOrderIds);
+    void saveTimelineOrder(nextItems);
+  };
 
   const compactMacroRows: CompactMacroRow[] = [
     { label: "Calories", unit: "", consumed: selectedDateTotals.calories, target: displayTargets?.target_calories ?? 0, bar: "accent-progress" },
@@ -5794,10 +6476,10 @@ function FoodPage({
     { label: "Fat", unit: "g", consumed: selectedDateTotals.fat, target: displayTargets?.fat_grams ?? 0, bar: "bg-amber-300" },
     ...(selectedDateTotals.fiber > 0 ? [{ label: "Fiber", unit: "g", consumed: selectedDateTotals.fiber, target: 30, bar: "bg-emerald-300" }] : []),
   ];
-  const shortcutTabs: Array<{ id: "saved" | "meals" | "frequent"; label: string; count: number }> = [
-    { id: "saved", label: "Saved foods", count: presetShortcuts.length },
-    { id: "meals", label: "Meals", count: templateSummaries.length },
-    { id: "frequent", label: "Frequent", count: frequentFoods.length },
+  const shortcutTabs: Array<{ id: "saved" | "meals" | "frequent"; label: string; count: number; icon: React.ComponentType<{ className?: string }> }> = [
+    { id: "saved", label: "Saved foods", count: presetShortcuts.length, icon: Utensils },
+    { id: "meals", label: "Meals", count: templateSummaries.length, icon: Soup },
+    { id: "frequent", label: "Frequent", count: frequentFoods.length, icon: Clock3 },
   ];
   const handleShortcutTileClick = async (shortcut: PresetFoodShortcut) => {
     if (presetEditMode) {
@@ -5900,15 +6582,16 @@ function FoodPage({
         <Card className="min-w-0">
           <SectionHeader
             eyebrow="Logged foods"
-            title={`Food logged for ${selectedDateLabel}`}
+            title={<TitleWithIcon icon={Utensils}>Food logged for {selectedDateLabel}</TitleWithIcon>}
             action={
               <div className="flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
                   onClick={(event) => onWorkoutMarkerSubmit(event as unknown as FormEvent)}
                   title={markerStatusText}
-                  className="inline-flex h-9 items-center rounded-lg border border-emerald-300/25 bg-emerald-300/[0.08] px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/[0.14]"
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-emerald-300/25 bg-emerald-300/[0.08] px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/[0.14]"
                 >
+                  <Dumbbell className="h-3.5 w-3.5" />
                   Gym Marker
                 </button>
                 <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
@@ -5919,8 +6602,10 @@ function FoodPage({
             }
           />
           {latestSelectedMarker ? <p className="mb-3 text-xs font-medium text-emerald-100/80">{markerStatusText}</p> : null}
-          <FoodLogList
-            entries={selectedDateEntries.slice().reverse()}
+          {timelineFeedback ? <p className="mb-3 text-xs font-medium text-emerald-100/80">{timelineFeedback}</p> : null}
+          {timelineError ? <p className="mb-3 text-xs font-medium text-red-200">{timelineError}</p> : null}
+          <FoodTimelineList
+            items={selectedTimelineItems}
             emptyDescription="Entries for this date will appear here immediately after saving."
             onRemove={(entry) => void removeFoodLogEntry(entry)}
             removingId={deletingFoodLogId}
@@ -5931,6 +6616,11 @@ function FoodPage({
             onCancelEdit={cancelFoodLogEdit}
             onSaveIcon={(entry) => void saveFoodLogIcon(entry)}
             savingId={savingFoodLogId}
+            draggingId={draggingTimelineId}
+            savingOrder={savingTimelineOrder}
+            onDragStart={beginTimelineDrag}
+            onDragOverItem={reorderTimelineOverItem}
+            onDragEnd={finishTimelineDrag}
           />
           {selectedDateEntries.length ? (
             <div className="mt-3 grid gap-3 rounded-lg border border-white/10 bg-zinc-950/50 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
@@ -6042,7 +6732,7 @@ function FoodPage({
       </div>
       <div className="order-first flex min-w-0 flex-col gap-4 xl:order-none">
       <Card className="order-3 min-w-0">
-        <SectionHeader eyebrow="Food" title="Manual food entry" />
+        <SectionHeader eyebrow="Food" title={<TitleWithIcon icon={Utensils}>Manual food entry</TitleWithIcon>} />
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
             <button
@@ -6051,7 +6741,10 @@ function FoodPage({
               onClick={() => setManualFoodMode(mode)}
               className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "accent-active" : "text-zinc-300 hover:bg-white/[0.04]")}
             >
-              {mode === "direct" ? "Direct macros" : "Serving-size scaling"}
+              <span className="inline-flex items-center justify-center gap-2">
+                {mode === "direct" ? <CircleGauge className="h-4 w-4" /> : <Soup className="h-4 w-4" />}
+                {mode === "direct" ? "Direct macros" : "Serving-size scaling"}
+              </span>
             </button>
           ))}
         </div>
@@ -6128,11 +6821,13 @@ function FoodPage({
             </>
           )}
           {manualError ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{manualError}</p> : null}
-          <button disabled={manualSaving} className="accent-bg h-11 rounded-lg text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
+          <button disabled={manualSaving} className="accent-bg inline-flex h-11 items-center justify-center gap-2 rounded-lg text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
+            <Plus className="h-4 w-4" />
             {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Add Food"}
           </button>
           {manualFoodMode === "serving" ? (
-            <button type="button" onClick={onSaveServingShortcut} className="h-11 rounded-lg border border-emerald-300/30 bg-emerald-300/10 text-sm font-semibold text-emerald-100">
+            <button type="button" onClick={onSaveServingShortcut} className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 text-sm font-semibold text-emerald-100">
+              <Plus className="h-4 w-4" />
               Save scaled food as shortcut
             </button>
           ) : null}
@@ -6291,7 +6986,7 @@ function FoodPage({
           </Card>
         ) : null}
         <Card className="order-2 min-w-0">
-          <SectionHeader eyebrow="AI text entry" title="Analyze food text" />
+          <SectionHeader eyebrow="AI text entry" title={<TitleWithIcon icon={WandSparkles}>AI Food Entry</TitleWithIcon>} />
           <form onSubmit={onParseFood} className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
               <TextInput label="Date" type="date" value={forms.nutrition.date} onChange={(value) => setForms((state) => ({ ...state, nutrition: { ...state.nutrition, date: value } }))} />
@@ -6307,7 +7002,8 @@ function FoodPage({
               />
               <span className="block text-xs text-zinc-600">{aiText.length}/4000</span>
             </label>
-            <button disabled={parseLoading || !aiText.trim() || !aiParsingConfigured} className="h-11 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+            <button disabled={parseLoading || !aiText.trim() || !aiParsingConfigured} className="inline-flex h-11 items-center gap-2 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+              <Sparkles className="h-4 w-4" />
               {parseLoading ? "Analyzing..." : "Analyze"}
             </button>
           </form>
@@ -6471,16 +7167,20 @@ function FoodPage({
                 </p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                <button className="accent-bg h-11 rounded-lg px-4 text-sm font-semibold">
+                <button className="accent-bg inline-flex h-11 items-center gap-2 rounded-lg px-4 text-sm font-semibold">
+                  <Plus className="h-4 w-4" />
                   Save to today
                 </button>
-                <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="h-11 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
+                <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
+                  <Utensils className="h-4 w-4" />
                   Save as Food Shortcut
                 </button>
-                <button type="button" onClick={(event) => onSaveMealTemplate(event as unknown as FormEvent)} className="h-11 rounded-lg border border-violet-300/30 bg-violet-300/10 px-4 text-sm font-semibold text-violet-100">
+                <button type="button" onClick={(event) => onSaveMealTemplate(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-violet-300/30 bg-violet-300/10 px-4 text-sm font-semibold text-violet-100">
+                  <Soup className="h-4 w-4" />
                   Save as Meal Template
                 </button>
-                <button type="button" onClick={(event) => onSaveAndLogToday(event as unknown as FormEvent)} className="h-11 rounded-lg bg-amber-300 px-4 text-sm font-semibold text-zinc-950">
+                <button type="button" onClick={(event) => onSaveAndLogToday(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg bg-amber-300 px-4 text-sm font-semibold text-zinc-950">
+                  <Star className="h-4 w-4" />
                   Save shortcut, meal, and log
                 </button>
               </div>
@@ -6494,7 +7194,7 @@ function FoodPage({
         <Card className="order-1 min-w-0">
           <SectionHeader
             eyebrow="Fast log"
-            title="Preset foods & meals"
+            title={<TitleWithIcon icon={Star}>Preset foods & meals</TitleWithIcon>}
             action={
               <div className="flex flex-wrap items-center justify-end gap-2">
                 {quickFoodPendingCount ? (
@@ -6518,32 +7218,61 @@ function FoodPage({
             }
           />
           <div className="space-y-4">
-            <div className="grid grid-cols-3 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
-              {shortcutTabs.map((tab) => (
-                <button
-                  key={tab.id}
-                  type="button"
-                  onClick={() => setShortcutTab(tab.id)}
-                  className={cx("rounded-md px-2 py-2 font-semibold transition", shortcutTab === tab.id ? "accent-active" : "text-zinc-300 hover:bg-white/[0.04]")}
-                >
-                  <span className="block truncate">{tab.label}</span>
-                  <span className={cx("mt-0.5 block text-[11px]", shortcutTab === tab.id ? "text-zinc-900" : "text-zinc-500")}>{tab.count}</span>
-                </button>
-              ))}
+            <div className="rounded-xl border border-white/10 bg-zinc-950/70 p-1 shadow-inner shadow-black/25">
+              <div className="grid grid-cols-3 gap-1 text-sm">
+                {shortcutTabs.map((tab) => {
+                  const TabIcon = tab.icon;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setShortcutTab(tab.id)}
+                      className={cx("rounded-lg px-2 py-2 font-semibold transition", shortcutTab === tab.id ? "accent-active shadow-lg shadow-black/20" : "text-zinc-300 hover:bg-white/[0.05]")}
+                    >
+                      <span className="flex items-center justify-center gap-1.5">
+                        <TabIcon className="h-3.5 w-3.5 shrink-0" />
+                        <span className="truncate">{tab.label}</span>
+                      </span>
+                      <span className={cx("mt-0.5 block text-[11px]", shortcutTab === tab.id ? "text-zinc-900" : "text-zinc-500")}>{tab.count}</span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
-            <TextInput label="Search saved items" value={shortcutQuery} placeholder="Bagel, shake, burrito" onChange={setShortcutQuery} />
+            <div className="space-y-2">
+              <label className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500" htmlFor="preset-food-search">Search library</label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+                <input
+                  id="preset-food-search"
+                  value={shortcutQuery}
+                  placeholder="Bagel, shake, burrito"
+                  onChange={(event) => setShortcutQuery(event.target.value)}
+                  className="h-11 w-full rounded-xl border border-white/10 bg-zinc-950/70 pl-10 pr-10 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-300/35 focus:bg-zinc-950"
+                />
+                {shortcutQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => setShortcutQuery("")}
+                    className="absolute right-2 top-1/2 inline-flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-lg text-zinc-500 transition hover:bg-white/[0.06] hover:text-zinc-200"
+                    aria-label="Clear preset search"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                ) : null}
+              </div>
+            </div>
             {shortcutTab === "saved" ? (
               filteredShortcuts.length ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
-                  {filteredShortcuts.map((shortcut, index) => {
+                <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 2xl:grid-cols-3">
+                  {filteredShortcuts.map((shortcut) => {
                     const editing = presetEditMode && editingShortcut?.shortcut_id === shortcut.shortcut_id;
                     const status = quickFoodLogStatuses[shortcutQuickLogKey(shortcut)];
                     return (
                       <PresetFoodTile
                         key={shortcut.shortcut_id}
                         shortcut={shortcut}
-                        toneIndex={index}
                         status={status}
                         disabled={Boolean(pendingPresetAction?.startsWith("edit:"))}
                         editing={editing}
@@ -6583,19 +7312,12 @@ function FoodPage({
             {shortcutTab === "meals" ? (
               filteredTemplateSummaries.length ? (
               <div className="space-y-4">
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+                <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 2xl:grid-cols-3">
                   {filteredTemplateSummaries.map((template) => {
                     const status = quickFoodLogStatuses[mealTemplateQuickLogKey(template.template_name)];
                     const pendingCount = status?.pending ?? 0;
-                    const label = status?.error
-                      ? "Retry"
-                      : pendingCount > 1
-                        ? `Adding ${pendingCount}`
-                        : pendingCount === 1
-                          ? "Adding..."
-                          : status?.added
-                            ? "Added"
-                            : template.template_name;
+                    const category: FoodPresetCategory = "Meal";
+                    const tone = FOOD_PRESET_CATEGORY_TONES[category];
                     return (
                       <button
                         key={template.template_name}
@@ -6603,16 +7325,36 @@ function FoodPage({
                         onClick={() => presetEditMode ? beginTemplateRename(template.template_name) : void logTemplate(template)}
                         disabled={pendingTemplateAction === `rename:${template.template_name}`}
                         className={cx(
-                          "group relative aspect-square min-w-0 rounded-lg border bg-violet-300/[0.045] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-violet-300/[0.075] disabled:cursor-not-allowed disabled:opacity-60",
-                          editingTemplateName === template.template_name ? "border-violet-200/60 shadow-[0_0_22px_rgba(196,181,253,0.12)]" : "border-violet-300/15",
+                          "group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-xl border p-3 text-left text-white transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60",
+                          editingTemplateName === template.template_name ? "ring-1 ring-white/35" : "",
                         )}
+                        style={{
+                          background: tone.background,
+                          borderColor: editingTemplateName === template.template_name ? tone.accent : tone.borderColor,
+                          boxShadow: editingTemplateName === template.template_name ? `0 0 0 1px ${tone.accent}, 0 18px 38px ${tone.glow}` : undefined,
+                        }}
                         title={presetEditMode ? `Rename ${template.template_name}` : `Add ${template.template_name} to today`}
                       >
-                        {presetEditMode ? <Pencil className="absolute right-2 top-2 h-3.5 w-3.5 text-violet-200/70" /> : null}
-                        {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
-                        {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
-                        <span className={cx("flex h-full items-center justify-center break-words leading-4", status?.error ? "text-red-100" : "")}>
-                          {label}
+                        <span className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-80" style={{ background: `linear-gradient(90deg, transparent, ${tone.accent}, transparent)` }} />
+                        <span className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full opacity-20 blur-2xl transition group-hover:opacity-35" style={{ backgroundColor: tone.accent }} />
+                        <span className="relative z-10 flex items-start justify-between gap-3">
+                          <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
+                            {template.foods} foods
+                          </span>
+                          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
+                            <FoodPresetIcon type="meal_bowl" className="h-6 w-6" />
+                          </span>
+                        </span>
+                        <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
+                          <span className="line-clamp-2 text-base font-semibold leading-5 text-white">{template.template_name}</span>
+                          <span className="text-sm font-semibold text-white/90">{Math.round(template.calories)} kcal</span>
+                          <span className="text-xs font-medium text-white/62">{presetMacroText(template)}</span>
+                        </span>
+                        <span className="relative z-10 mt-3 flex items-center justify-between gap-2">
+                          <PresetStatusPill status={status} />
+                          <span className="ml-auto text-white/55">
+                            {presetEditMode ? <Pencil className="h-3.5 w-3.5" /> : status?.added ? <Check className="h-3.5 w-3.5 text-emerald-100" /> : pendingCount > 1 ? <span className="text-[11px] font-semibold">{pendingCount}</span> : null}
+                          </span>
                         </span>
                       </button>
                     );
@@ -6652,33 +7394,58 @@ function FoodPage({
             ) : null}
             {shortcutTab === "frequent" ? (
               filteredFrequentFoods.length ? (
-                <div className="grid grid-cols-3 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+                <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 2xl:grid-cols-3">
                   {filteredFrequentFoods.map((food) => {
                     const status = quickFoodLogStatuses[frequentFoodQuickLogKey(food.food_name)];
                     const pendingCount = status?.pending ?? 0;
-                    const label = status?.error
-                      ? "Retry"
-                      : pendingCount > 1
-                        ? `Adding ${pendingCount}`
-                        : pendingCount === 1
-                          ? "Adding..."
-                          : status?.added
-                            ? "Added"
-                            : food.food_name;
+                    const shortcutLike = {
+                      shortcut_id: `frequent:${food.food_name}`,
+                      shortcut_name: food.food_name,
+                      icon_type: inferFoodPresetIconType(food.food_name),
+                      calories: food.calories,
+                      protein: food.protein,
+                      carbs: food.carbs,
+                      fat: food.fat,
+                      fiber: null,
+                      sodium: null,
+                      potassium: null,
+                      notes: "",
+                      created_at: "",
+                      source: "frequent_food",
+                    };
+                    const category = foodPresetCategory(shortcutLike);
+                    const tone = FOOD_PRESET_CATEGORY_TONES[category];
                     return (
                       <button
                         key={food.food_name}
                         type="button"
                         onClick={() => void handleFrequentTileClick(food)}
                         disabled={presetEditMode}
-                        className="relative aspect-square min-w-0 rounded-lg border border-white/10 bg-white/[0.035] p-2 text-center text-xs font-semibold text-white transition hover:-translate-y-0.5 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60"
+                        className="group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-xl border p-3 text-left text-white transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60"
+                        style={{ background: tone.background, borderColor: tone.borderColor }}
                         title={`Add ${food.food_name} to today`}
                       >
-                        {food.is_favorite ? <span className="absolute right-2 top-2 h-2 w-2 rounded-full bg-amber-300" /> : null}
-                        {status?.added ? <Check className="absolute right-2 top-2 h-3.5 w-3.5 text-emerald-200" /> : null}
-                        {pendingCount > 1 ? <span className="absolute left-2 top-2 rounded-full border border-white/10 bg-black/30 px-1.5 py-0.5 text-[10px] text-zinc-100">{pendingCount}</span> : null}
-                        <span className={cx("flex h-full items-center justify-center break-words leading-4", status?.error ? "text-red-100" : "")}>
-                          {label}
+                        <span className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-80" style={{ background: `linear-gradient(90deg, transparent, ${tone.accent}, transparent)` }} />
+                        <span className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full opacity-20 blur-2xl transition group-hover:opacity-35" style={{ backgroundColor: tone.accent }} />
+                        <span className="relative z-10 flex items-start justify-between gap-3">
+                          <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
+                            {category}
+                          </span>
+                          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
+                            <FoodPresetIcon type={shortcutLike.icon_type} className="h-6 w-6" />
+                          </span>
+                        </span>
+                        <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
+                          <span className="line-clamp-2 text-base font-semibold leading-5 text-white">{food.food_name}</span>
+                          <span className="text-sm font-semibold text-white/90">{Math.round(food.calories)} kcal</span>
+                          <span className="text-xs font-medium text-white/62">{presetMacroText(food)}</span>
+                        </span>
+                        <span className="relative z-10 mt-3 flex items-center justify-between gap-2">
+                          <PresetStatusPill status={status} />
+                          <span className="ml-auto flex items-center gap-1.5 text-white/55">
+                            {food.is_favorite ? <Star className="h-3.5 w-3.5 fill-current text-amber-200" /> : null}
+                            {status?.added ? <Check className="h-3.5 w-3.5 text-emerald-100" /> : pendingCount > 1 ? <span className="text-[11px] font-semibold">{pendingCount}</span> : null}
+                          </span>
                         </span>
                       </button>
                     );
@@ -14298,6 +15065,47 @@ function HomeContent() {
     }, "Workout marker saved.");
   }, [forms.nutrition.date, forms.workoutMarker, refreshWorkoutMarkersOnly, submitWithoutRefresh, workoutMarkers]);
 
+  const reorderFoodTimeline = useCallback(async (date: string, orderedItems: FoodTimelineReorderItem[]) => {
+    if (!orderedItems.length) return;
+    setMessage(null);
+    setApiError(null);
+    const result = await apiSend<{
+      status?: string;
+      message?: string;
+      items?: NutritionEntry[];
+      markers?: WorkoutMarker[];
+    }>("/api/nutrition/reorder", "PATCH", {
+      date,
+      ordered_items: orderedItems,
+    });
+    if (result.status === "error") {
+      throw new Error(result.message || "Food timeline order could not be saved.");
+    }
+    const updatedFoodItems = Array.isArray(result.items) ? result.items : null;
+    const updatedMarkerItems = Array.isArray(result.markers) ? result.markers : null;
+    if (updatedFoodItems) {
+      setNutritionLogs((current) => [
+        ...current.filter((entry) => entry.date !== date),
+        ...updatedFoodItems,
+      ]);
+    } else {
+      await refreshTodayFoodOnly(date);
+    }
+    if (updatedMarkerItems) {
+      setWorkoutMarkers((current) => [
+        ...current.filter((marker) => (marker.date || "").slice(0, 10) !== date),
+        ...updatedMarkerItems,
+      ]);
+    } else {
+      await refreshWorkoutMarkersOnly().catch(() => undefined);
+    }
+    await Promise.all([
+      refreshDashboardCoreOnly(date).catch(() => undefined),
+      apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS).then(setTrainingReadiness).catch(() => undefined),
+    ]);
+    setMessage(result.message || "Food timeline order saved.");
+  }, [refreshDashboardCoreOnly, refreshTodayFoodOnly, refreshWorkoutMarkersOnly]);
+
   const submitWearableMetric = useCallback((event: FormEvent) => {
     void submitWithoutRefresh(event, async () => {
       const payload = Object.fromEntries(
@@ -15307,6 +16115,7 @@ function HomeContent() {
             await apiSend(`/api/nutrition/logs/${encodeURIComponent(entry.food_log_id)}`, "PUT", updates);
           }, "Food icon updated.", entry.date)
         }
+        onReorderFoodTimeline={reorderFoodTimeline}
         onUpdateShortcut={(shortcut) =>
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", shortcutMutationPayload(shortcut));

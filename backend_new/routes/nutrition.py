@@ -678,6 +678,84 @@ def delete_nutrition_log(food_log_id: str) -> dict[str, Any]:
     return result
 
 
+@router.patch("/api/nutrition/reorder")
+def patch_nutrition_timeline_order(payload: dict[str, Any]) -> dict[str, Any]:
+    selected_date = _normalize_history_date(str(payload.get("date") or _today_iso()))
+    raw_items = payload.get("ordered_items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise HTTPException(status_code=400, detail="ordered_items must include at least one food or workout marker.")
+
+    validated: list[tuple[str, str, float, dict[str, Any]]] = []
+    errors: list[dict[str, Any]] = []
+    for index, raw_item in enumerate(raw_items, start=1):
+        if not isinstance(raw_item, dict):
+            errors.append({"index": index - 1, "message": "Timeline item must be an object."})
+            continue
+        item_type = str(raw_item.get("type") or raw_item.get("item_type") or "").strip().lower()
+        if item_type in {"marker", "workout"}:
+            item_type = "workout_marker"
+        item_id = str(raw_item.get("id") or raw_item.get("item_id") or "").strip()
+        sequence = _order_number(raw_item.get("sequence")) or float(index)
+        if item_type not in {"food", "workout_marker"}:
+            errors.append({"index": index - 1, "message": "Timeline item type must be food or workout_marker."})
+            continue
+        if not item_id:
+            errors.append({"index": index - 1, "message": "Timeline item id is required."})
+            continue
+
+        table = "food_logs" if item_type == "food" else "workout_markers"
+        key_field = "food_log_id" if item_type == "food" else "marker_id"
+        existing_rows = _valid_json_rows(fetch_json_rows_for_value(table, key_field, item_id, limit=1))
+        if not existing_rows:
+            errors.append({"index": index - 1, "message": f"{item_type} item was not found.", "id": item_id})
+            continue
+        existing = existing_rows[0]
+        existing_date = str(existing.get("date") or "")[:10]
+        if existing_date != selected_date:
+            errors.append({"index": index - 1, "message": "Timeline item does not belong to the selected date.", "id": item_id, "date": existing_date})
+            continue
+        validated.append((item_type, item_id, sequence, existing))
+
+    if errors:
+        raise HTTPException(status_code=400, detail={"message": "Food timeline order could not be saved.", "errors": errors})
+
+    now = utc_now_iso()
+    updated_food = 0
+    updated_markers = 0
+    for item_type, item_id, sequence, existing in validated:
+        item = dict(existing)
+        item["created_order"] = sequence
+        item["updated_at"] = now
+        if item_type == "food":
+            item["logged_sequence"] = sequence
+            saved = upsert_json_row("food_logs", "food_log_id", item_id, item)
+            updated_food += 1
+        else:
+            item["marker_sequence"] = sequence
+            saved = upsert_json_row("workout_markers", "marker_id", item_id, item)
+            updated_markers += 1
+        if isinstance(saved, dict) and "_db_error" in saved:
+            raise HTTPException(status_code=500, detail={"message": "Food timeline order could not be saved.", "diagnostics": saved["_db_error"]})
+
+    _invalidate_nutrition_logs_cache()
+    today_payload = get_nutrition_today(selected_date)
+    markers = [
+        marker
+        for marker in get_workout_markers()["items"]
+        if str(marker.get("date") or "")[:10] == selected_date
+    ]
+    return {
+        "status": "ok",
+        "date": selected_date,
+        "updated_rows": len(validated),
+        "food_updates": updated_food,
+        "marker_updates": updated_markers,
+        "items": today_payload.get("items", []),
+        "markers": markers,
+        "message": "Food timeline order saved.",
+    }
+
+
 @router.get("/api/nutrition/history")
 def get_nutrition_history(limit: int = 500) -> dict[str, Any]:
     finalized = [
