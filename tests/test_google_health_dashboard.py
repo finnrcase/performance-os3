@@ -159,6 +159,52 @@ def test_google_health_missing_heart_signals_lower_confidence_without_penalty():
     assert result["recovery_readiness"]["missing_heart_signals"] is True
 
 
+def test_google_health_readiness_merges_same_day_metric_rows():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "metric_id": "google_health:2026-05-27",
+                "sleep_hours": 8,
+                "total_sleep_minutes": 480,
+                "sleep_efficiency": 92,
+            },
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "metric_id": "google_health:2026-05-27-heart",
+                "resting_hr": 62,
+                "resting_hr_baseline": 55,
+                "hrv": 35,
+                "breathing_rate": 16,
+                "spo2": 98,
+            },
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "metric_id": "google_health:2026-05-27-activity",
+                "steps": 9200,
+                "active_minutes": 60,
+                "active_zone_minutes": 20,
+            },
+        ],
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "ok"
+    assert result["sleep_quality"]["duration_hours"] == 8
+    assert result["resting_hr_vs_baseline"]["status"] == "high"
+    assert result["activity_load"]["steps"] == 9200
+    assert result["recovery_readiness"]["missing_heart_signals"] is False
+    assert result["debug"]["fields_used"]["active_zone_minutes"] == 20
+
+
 def test_google_health_zero_sensor_values_are_unavailable_not_real_metrics():
     result = build_google_health_dashboard_signals(
         wearable_rows=[

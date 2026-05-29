@@ -4629,12 +4629,16 @@ function Dashboard({
   const runCalories = finiteNumberOrNull(runSummary.calories_burned);
   const runHeartRate = finiteNumberOrNull(runSummary.average_heart_rate);
   const todayVolume = finiteNumberOrNull(lift?.today_volume);
-  const recoveryScore = finiteNumberOrNull(recovery?.latest_score);
-  const extraRunReasoning = stringList(recovery?.extra_run_readiness?.reasoning);
   const googleHealth = data?.google_health;
   const googleHealthReady = googleHealth?.status === "ok";
   const sleepQuality = googleHealth?.sleep_quality;
   const recoveryReadiness = googleHealth?.recovery_readiness;
+  const recoveryScore = finiteNumberOrNull(recoveryReadiness?.score) ?? finiteNumberOrNull(recovery?.latest_score);
+  const recoveryClassification = googleHealthReady && recoveryReadiness?.label ? recoveryReadiness.label : stringOrFallback(recovery?.classification, "sync pending");
+  const recoverySource = googleHealthReady ? stringOrFallback(googleHealth?.source, "google_health") : stringOrFallback(recovery?.source, "recovery");
+  const recoveryMessage = googleHealthReady && recoveryReadiness?.message ? recoveryReadiness.message : stringOrFallback(recovery?.message, "Recovery data sync pending.");
+  const recoveryConnected = googleHealthReady || Boolean(recovery?.connected);
+  const extraRunReasoning = stringList(recovery?.extra_run_readiness?.reasoning);
   const sicknessWarning = googleHealth?.sickness_warning;
   const restingHrSignal = googleHealth?.resting_hr_vs_baseline;
   const calorieBurnSignal = googleHealth?.calories_burned_vs_intake;
@@ -4820,18 +4824,18 @@ function Dashboard({
           <SectionHeader
             eyebrow="Recovery"
             title="Readiness"
-            action={!recovery?.connected ? <button onClick={() => setActivePage("settings")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Connect</button> : <button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Open</button>}
+            action={!recoveryConnected ? <button onClick={() => setActivePage("settings")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Connect</button> : <button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Open</button>}
           />
-          {recoveryScore !== null || recovery?.connected ? (
+          {recoveryScore !== null || recoveryConnected ? (
             <div>
               <div className="flex items-start justify-between gap-3">
                 <div>
                   <p className="text-3xl font-semibold text-white">{recoveryScore !== null ? Math.round(recoveryScore) : "--"}</p>
-                  <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{stringOrFallback(recovery?.classification, "sync pending")}</p>
+                  <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{recoveryClassification}</p>
                 </div>
-                <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{stringOrFallback(recovery?.source, "recovery")}</p>
+                <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{recoverySource}</p>
               </div>
-              <p className="mt-4 text-sm leading-6 text-zinc-400">{stringOrFallback(recovery?.message, "Recovery data sync pending.")}</p>
+              <p className="mt-4 text-sm leading-6 text-zinc-400">{recoveryMessage}</p>
             </div>
           ) : (
             <p className="text-sm leading-6 text-zinc-400">No recovery data yet</p>

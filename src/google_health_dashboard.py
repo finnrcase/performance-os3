@@ -173,9 +173,14 @@ def merge_google_health_rows(
             if not day:
                 continue
             target = by_date.setdefault(day, {"date": day, "source": "google_health", "_source_tables": [], "_raw_table_rows": {}})
-            if table not in target["_source_tables"]:
-                target["_source_tables"].append(table)
-            target["_raw_table_rows"][table] = _compact_debug_row(raw)
+            source_tables = raw.get("_source_tables") if isinstance(raw.get("_source_tables"), list) else [table]
+            for source_table in source_tables:
+                if source_table not in target["_source_tables"]:
+                    target["_source_tables"].append(source_table)
+            if isinstance(raw.get("_raw_table_rows"), dict):
+                target["_raw_table_rows"].update(raw["_raw_table_rows"])
+            else:
+                target["_raw_table_rows"][table] = _compact_debug_row(raw)
             for key, value in raw.items():
                 _merge_row_value(target, key, value)
 
@@ -404,7 +409,7 @@ def build_google_health_dashboard_signals(
 ) -> dict[str, Any]:
     """Return dashboard-ready wearable recovery and calorie context."""
     day = _date_text(today)
-    all_rows = [dict(row) for row in wearable_rows if isinstance(row, dict)]
+    all_rows = merge_google_health_rows(wearable_rows=[dict(row) for row in wearable_rows if isinstance(row, dict)])
     rows = [row for row in all_rows if google_health_row_has_metrics(row)]
     placeholder_rows = [row for row in all_rows if not google_health_row_has_metrics(row)]
     row = _same_day_row(rows, day)
