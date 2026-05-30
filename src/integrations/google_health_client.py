@@ -15,7 +15,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 
-from src.wearables import WEARABLE_METRIC_COLUMNS, normalize_wearable_metric_rows
+from src.wearables import (
+    WEARABLE_METRIC_COLUMNS,
+    clean_heart_rate_value,
+    clean_hrv_value,
+    normalize_wearable_metric_rows,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -114,6 +119,15 @@ GOOGLE_HEALTH_METRIC_FIELDS = [
     "skin_temperature",
     "body_temperature",
 ]
+GOOGLE_HEALTH_HEART_RATE_FIELDS = {
+    "resting_hr",
+    "resting_hr_baseline",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
+}
+GOOGLE_HEALTH_HRV_FIELDS = {"hrv"}
 
 
 class GoogleHealthIntegrationError(RuntimeError):
@@ -513,6 +527,54 @@ def _rounded(value: Any, digits: int = 1) -> float | None:
     return round(parsed, digits)
 
 
+def _count_mapping_increment(mapping: dict[str, int], key: str) -> None:
+    mapping[key] = int(mapping.get(key) or 0) + 1
+
+
+def _clean_hr_sample(row: dict[str, Any], field: str, value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str) and not value.strip():
+        return None
+    row["_raw_hr_samples_received"] = int(row.get("_raw_hr_samples_received") or 0) + 1
+    _count_mapping_increment(row.setdefault("_raw_hr_samples_received_by_field", {}), field)
+    cleaned = clean_heart_rate_value(value)
+    if cleaned is None:
+        row["_invalid_hr_samples_dropped"] = int(row.get("_invalid_hr_samples_dropped") or 0) + 1
+        _count_mapping_increment(row.setdefault("_invalid_hr_samples_dropped_by_field", {}), field)
+        return None
+    row["_clean_hr_samples_used"] = int(row.get("_clean_hr_samples_used") or 0) + 1
+    _count_mapping_increment(row.setdefault("_clean_hr_samples_used_by_field", {}), field)
+    return cleaned
+
+
+def _clean_hr_diagnostics_from_rows(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "raw_hr_samples_received": 0,
+        "invalid_hr_samples_dropped": 0,
+        "clean_hr_samples_used": 0,
+    }
+    by_field = {
+        "raw_hr_samples_received_by_field": {},
+        "invalid_hr_samples_dropped_by_field": {},
+        "clean_hr_samples_used_by_field": {},
+    }
+    for row in rows:
+        totals["raw_hr_samples_received"] += int(row.get("_raw_hr_samples_received") or 0)
+        totals["invalid_hr_samples_dropped"] += int(row.get("_invalid_hr_samples_dropped") or 0)
+        totals["clean_hr_samples_used"] += int(row.get("_clean_hr_samples_used") or 0)
+        for key in by_field:
+            source = row.get(f"_{key}") if isinstance(row.get(f"_{key}"), dict) else {}
+            for field, count in source.items():
+                by_field[key][field] = int(by_field[key].get(field) or 0) + int(count or 0)
+    return {**totals, **by_field, "valid_bpm_range": {"min": 30, "max": 220}}
+
+
 def _as_int(value: Any) -> int | None:
     parsed = _rounded(value, 0)
     return int(parsed) if parsed is not None else None
@@ -539,9 +601,17 @@ def _metric_present(value: Any) -> bool:
     return parsed > 0
 
 
+def _metric_field_present(field: str, value: Any) -> bool:
+    if field in GOOGLE_HEALTH_HEART_RATE_FIELDS:
+        return clean_heart_rate_value(value) is not None
+    if field in GOOGLE_HEALTH_HRV_FIELDS:
+        return clean_hrv_value(value) is not None
+    return _metric_present(value)
+
+
 def populated_metric_count(row: dict[str, Any] | None) -> int:
     sample = row if isinstance(row, dict) else {}
-    return sum(1 for field in GOOGLE_HEALTH_METRIC_FIELDS if _metric_present(sample.get(field)))
+    return sum(1 for field in GOOGLE_HEALTH_METRIC_FIELDS if _metric_field_present(field, sample.get(field)))
 
 
 def has_populated_metrics(row: dict[str, Any] | None) -> bool:
@@ -567,7 +637,7 @@ def _field_count_summary(rows: list[dict[str, Any]]) -> dict[str, int]:
 
 def _row_metric_fields(row: dict[str, Any] | None) -> set[str]:
     sample = row if isinstance(row, dict) else {}
-    return {field for field in GOOGLE_HEALTH_METRIC_FIELDS if _metric_present(sample.get(field))}
+    return {field for field in GOOGLE_HEALTH_METRIC_FIELDS if _metric_field_present(field, sample.get(field))}
 
 
 def _average(values: list[float]) -> float | None:
@@ -621,6 +691,12 @@ def _new_daily_row(day: str) -> dict[str, Any]:
         "_heart_averages": [],
         "_heart_mins": [],
         "_heart_maxes": [],
+        "_raw_hr_samples_received": 0,
+        "_invalid_hr_samples_dropped": 0,
+        "_clean_hr_samples_used": 0,
+        "_invalid_hr_samples_dropped_by_field": {},
+        "_clean_hr_samples_used_by_field": {},
+        "_raw_hr_samples_received_by_field": {},
     }
 
 
@@ -1047,10 +1123,10 @@ def _apply_health_rollup(row: dict[str, Any], data_type: str, point: dict[str, A
         row["_seen_active_zone_minutes"] = minutes is not None
     elif data_type == "heart-rate" and isinstance(point.get("heartRate"), dict):
         heart = point["heartRate"]
-        row["average_hr"] = _rounded(heart.get("beatsPerMinuteAvg"))
-        row["max_hr"] = _rounded(heart.get("beatsPerMinuteMax"))
+        row["average_hr"] = _clean_hr_sample(row, "average_hr", heart.get("beatsPerMinuteAvg"))
+        row["max_hr"] = _clean_hr_sample(row, "max_hr", heart.get("beatsPerMinuteMax"))
         if row.get("resting_hr") is None:
-            row["resting_hr"] = _rounded(heart.get("beatsPerMinuteMin"))
+            row["resting_hr"] = _clean_hr_sample(row, "resting_hr", heart.get("beatsPerMinuteMin"))
 
 
 def _sleep_stage_key(stage_type: str) -> str:
@@ -1097,10 +1173,10 @@ def _apply_sleep_point(row: dict[str, Any], sleep: dict[str, Any]) -> None:
 
 def _apply_health_point(row: dict[str, Any], data_type: str, point: dict[str, Any]) -> None:
     if data_type == "daily-resting-heart-rate" and isinstance(point.get("dailyRestingHeartRate"), dict):
-        row["resting_hr"] = _rounded(point["dailyRestingHeartRate"].get("beatsPerMinute"))
+        row["resting_hr"] = _clean_hr_sample(row, "resting_hr", point["dailyRestingHeartRate"].get("beatsPerMinute"))
     elif data_type == "daily-heart-rate-variability" and isinstance(point.get("dailyHeartRateVariability"), dict):
         hrv = point["dailyHeartRateVariability"]
-        row["hrv"] = _rounded(
+        row["hrv"] = clean_hrv_value(
             hrv.get("averageHeartRateVariabilityMilliseconds")
             or hrv.get("deepSleepRootMeanSquareOfSuccessiveDifferencesMilliseconds")
         )
@@ -1149,6 +1225,11 @@ def _point_day(data_type: str, point: dict[str, Any]) -> str:
 
 
 def _finalize_health_daily_row(row: dict[str, Any]) -> dict[str, Any]:
+    for field in ("resting_hr", "resting_hr_baseline", "average_hr", "max_hr", "workout_average_hr", "workout_max_hr"):
+        row[field] = clean_heart_rate_value(row.get(field))
+    row["hrv"] = clean_hrv_value(row.get("hrv"))
+    if row.get("resting_hr") is None or row.get("resting_hr_baseline") is None:
+        row["resting_hr_deviation"] = None
     if row.get("total_sleep_minutes") is not None:
         sleep_minutes = float(row.get("total_sleep_minutes") or 0)
         awake_minutes = float(row.get("awake_minutes") or 0)
@@ -1173,10 +1254,11 @@ def _with_resting_hr_baselines(items: list[dict[str, Any]]) -> list[dict[str, An
     history: list[float] = []
     enriched: list[dict[str, Any]] = []
     for row in sorted((dict(item) for item in items), key=lambda item: str(item.get("date") or "")):
-        rhr = _rounded(row.get("resting_hr"))
+        rhr = clean_heart_rate_value(row.get("resting_hr"))
+        row["resting_hr"] = rhr
         baseline = _average(history[-7:])
         if rhr is not None and baseline is not None and len(history[-7:]) >= 3:
-            row["resting_hr_baseline"] = _rounded(baseline)
+            row["resting_hr_baseline"] = clean_heart_rate_value(baseline)
             row["resting_hr_deviation"] = _rounded(rhr - baseline)
         else:
             row["resting_hr_baseline"] = None
@@ -1202,6 +1284,11 @@ def build_google_health_records(items: list[dict[str, Any]] | pd.DataFrame | Non
         day = str(row.get("date") or "")[:10]
         if not day:
             continue
+        for field in ("resting_hr", "resting_hr_baseline", "average_hr", "max_hr", "workout_average_hr", "workout_max_hr"):
+            row[field] = clean_heart_rate_value(row.get(field))
+        row["hrv"] = clean_hrv_value(row.get("hrv"))
+        if row.get("resting_hr") is None or row.get("resting_hr_baseline") is None:
+            row["resting_hr_deviation"] = None
         source = str(row.get("source") or GOOGLE_HEALTH_PROVIDER_ID)
         daily_summary = {
             "summary_id": f"google_health_daily:{day}",
@@ -1526,7 +1613,11 @@ def fetch_daily_metrics(
                 continue
             row = _row_for_day(rows_by_day, day)
             before_fields = _row_metric_fields(row)
+            before_hr_counts = _clean_hr_diagnostics_from_rows([row])
             _apply_health_rollup(row, data_type, point)
+            after_hr_counts = _clean_hr_diagnostics_from_rows([row])
+            for key in ("raw_hr_samples_received", "invalid_hr_samples_dropped", "clean_hr_samples_used"):
+                audit[key] = int(audit.get(key) or 0) + max(0, int(after_hr_counts.get(key) or 0) - int(before_hr_counts.get(key) or 0))
             added_fields = sorted(_row_metric_fields(row) - before_fields)
             if added_fields:
                 audit["applied_datapoint_count"] += 1
@@ -1618,7 +1709,11 @@ def fetch_daily_metrics(
                 continue
             row = _row_for_day(rows_by_day, day)
             before_fields = _row_metric_fields(row)
+            before_hr_counts = _clean_hr_diagnostics_from_rows([row])
             _apply_health_point(row, data_type, point)
+            after_hr_counts = _clean_hr_diagnostics_from_rows([row])
+            for key in ("raw_hr_samples_received", "invalid_hr_samples_dropped", "clean_hr_samples_used"):
+                audit[key] = int(audit.get(key) or 0) + max(0, int(after_hr_counts.get(key) or 0) - int(before_hr_counts.get(key) or 0))
             added_fields = sorted(_row_metric_fields(row) - before_fields)
             if added_fields:
                 audit["applied_datapoint_count"] += 1
@@ -1630,6 +1725,7 @@ def fetch_daily_metrics(
                 audit["dropped_reasons"]["no_supported_fields"] = int(audit["dropped_reasons"].get("no_supported_fields", 0)) + 1
         normalization_audit[data_type] = audit
 
+    clean_hr_diagnostics = _clean_hr_diagnostics_from_rows([row for _, row in sorted(rows_by_day.items())])
     all_items = [_finalize_health_daily_row(row) for _, row in sorted(rows_by_day.items())]
     all_items = _with_resting_hr_baselines(all_items)
     for row in all_items:
@@ -1647,6 +1743,11 @@ def fetch_daily_metrics(
     items = [row for row in all_items if has_populated_metrics(row)]
     empty_items = [row for row in all_items if not has_populated_metrics(row)]
     empty_date_rows = [str(row.get("date") or "")[:10] for row in empty_items if str(row.get("date") or "").strip()]
+
+    if int(clean_hr_diagnostics.get("invalid_hr_samples_dropped") or 0):
+        warnings.append(
+            f"Dropped {int(clean_hr_diagnostics.get('invalid_hr_samples_dropped') or 0)} invalid heart-rate sample(s) outside the clean BPM range."
+        )
 
     if not items:
         recommended_next_action = GOOGLE_HEALTH_NO_SOURCES_MESSAGE
@@ -1739,6 +1840,10 @@ def fetch_daily_metrics(
         "empty_date_rows_count": len(empty_date_rows),
         "populated_metric_counts_by_day": populated_metric_counts_by_day(all_items),
         "populated_fields_by_metric": populated_by_metric,
+        "clean_hr_diagnostics": clean_hr_diagnostics,
+        "raw_hr_samples_received": int(clean_hr_diagnostics.get("raw_hr_samples_received") or 0),
+        "invalid_hr_samples_dropped": int(clean_hr_diagnostics.get("invalid_hr_samples_dropped") or 0),
+        "clean_hr_samples_used": int(clean_hr_diagnostics.get("clean_hr_samples_used") or 0),
         "normalization_audit": normalization_audit,
         "data_available": bool(items),
         "recommended_next_action": recommended_next_action,

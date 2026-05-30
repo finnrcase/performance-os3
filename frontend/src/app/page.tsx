@@ -10,7 +10,6 @@ import {
   Check,
   ChevronDown,
   CircleGauge,
-  Clock3,
   Copy,
   CupSoda,
   Download,
@@ -381,6 +380,8 @@ type FoodTimelineReorderItem = {
   sequence: number;
 };
 
+type FoodTimelineDropPosition = "before" | "after";
+
 type WearableMetricEntry = {
   metric_id: string;
   date: string;
@@ -499,7 +500,13 @@ type GoogleHealthDashboardSignals = {
   };
   sleep_quality?: {
     score?: number | null;
+    score_status?: string;
     status?: string;
+    provisional?: boolean;
+    baseline_state?: string;
+    baseline_label?: string;
+    needed_nights?: number | null;
+    sample_nights?: number | null;
     duration_hours?: number | null;
     rem_minutes?: number | null;
     deep_minutes?: number | null;
@@ -510,9 +517,19 @@ type GoogleHealthDashboardSignals = {
   };
   recovery_readiness?: {
     score?: number | null;
+    provisional_score?: number | null;
     status?: string;
     label?: string;
     message?: string;
+    provisional?: boolean;
+    baseline_status?: {
+      state?: string;
+      label?: string;
+      description?: string;
+      sample_nights?: number;
+      needed_nights?: number;
+      ready?: boolean;
+    };
   };
   sickness_warning?: {
     status?: string;
@@ -527,11 +544,19 @@ type GoogleHealthDashboardSignals = {
     baseline?: number | null;
     deviation?: number | null;
     status?: string;
+    message?: string;
+    baseline_label?: string;
+    needed_nights?: number | null;
+    sample_nights?: number | null;
   };
   hrv?: {
     hrv?: number | null;
     baseline?: number | null;
     status?: string;
+    message?: string;
+    baseline_label?: string;
+    needed_nights?: number | null;
+    sample_nights?: number | null;
   };
   health?: {
     breathing_rate?: number | null;
@@ -3421,13 +3446,19 @@ function applyFoodTimelineOrder(items: FoodTimelineItem[], orderIds: string[] | 
   return [...ordered, ...additions];
 }
 
-function moveFoodTimelineItem(items: FoodTimelineItem[], activeId: string, overId: string) {
+function moveFoodTimelineItem(items: FoodTimelineItem[], activeId: string, overId: string, position: FoodTimelineDropPosition = "before") {
   const fromIndex = items.findIndex((item) => foodTimelineItemKey(item) === activeId);
   const toIndex = items.findIndex((item) => foodTimelineItemKey(item) === overId);
   if (fromIndex < 0 || toIndex < 0 || fromIndex === toIndex) return items;
   const next = items.slice();
   const [moved] = next.splice(fromIndex, 1);
-  next.splice(toIndex, 0, moved);
+  let insertIndex = position === "after" ? toIndex + 1 : toIndex;
+  if (fromIndex < insertIndex) insertIndex -= 1;
+  insertIndex = Math.max(0, Math.min(next.length, insertIndex));
+  next.splice(insertIndex, 0, moved);
+  const originalOrder = items.map(foodTimelineItemKey).join("|");
+  const nextOrder = next.map(foodTimelineItemKey).join("|");
+  if (originalOrder === nextOrder) return items;
   return next;
 }
 
@@ -3435,10 +3466,14 @@ function foodTimelineSectionLabel(items: FoodTimelineItem[], index: number) {
   if (!items.some((item) => item.type === "workout_marker")) return null;
   const item = items[index];
   const previous = items[index - 1];
-  if (item.type === "workout_marker") return "Workout";
-  if (!previous) return "Pre-workout";
-  if (previous.type === "workout_marker") return "Post-workout";
+  if (!previous) return { title: "Pre-workout foods", detail: "Above the marker" };
+  if (previous.type === "workout_marker" && item.type === "food") return { title: "Post-workout foods", detail: "Below the marker" };
   return null;
+}
+
+function foodTimelineDropPositionFromPointer(row: HTMLElement, clientY: number): FoodTimelineDropPosition {
+  const bounds = row.getBoundingClientRect();
+  return clientY > bounds.top + bounds.height / 2 ? "after" : "before";
 }
 
 function foodTimelinePayload(items: FoodTimelineItem[]): FoodTimelineReorderItem[] {
@@ -3662,7 +3697,7 @@ function FoodTimelineList({
   draggingId?: string | null;
   savingOrder?: boolean;
   onDragStart: (itemId: string) => void;
-  onDragOverItem: (itemId: string) => void;
+  onDragOverItem: (itemId: string, position?: FoodTimelineDropPosition) => void;
   onDragEnd: () => void;
 }>) {
   if (!items.length) {
@@ -3681,23 +3716,23 @@ function FoodTimelineList({
     return (
       <button
         type="button"
-        draggable={item.persistable && !savingOrder}
+        draggable={false}
         onPointerDown={(event) => {
-          if (event.pointerType === "mouse" || !item.persistable || savingOrder) return;
+          if (!item.persistable || savingOrder) return;
           event.preventDefault();
           event.stopPropagation();
           event.currentTarget.setPointerCapture(event.pointerId);
           onDragStart(itemId);
         }}
         onPointerMove={(event) => {
-          if (event.pointerType === "mouse") return;
+          if (!item.persistable || savingOrder) return;
           const target = document.elementFromPoint(event.clientX, event.clientY);
           const row = target?.closest<HTMLElement>("[data-food-timeline-item-id]");
           const overId = row?.dataset.foodTimelineItemId;
-          if (overId) onDragOverItem(overId);
+          if (overId && row) onDragOverItem(overId, foodTimelineDropPositionFromPointer(row, event.clientY));
         }}
         onPointerUp={(event) => {
-          if (event.pointerType === "mouse") return;
+          if (!item.persistable || savingOrder) return;
           event.preventDefault();
           event.stopPropagation();
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -3706,28 +3741,14 @@ function FoodTimelineList({
           onDragEnd();
         }}
         onPointerCancel={(event) => {
-          if (event.pointerType === "mouse") return;
+          if (!item.persistable || savingOrder) return;
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
           }
           onDragEnd();
         }}
-        onDragStart={(event) => {
-          if (!item.persistable || savingOrder) {
-            event.preventDefault();
-            return;
-          }
-          event.stopPropagation();
-          event.dataTransfer.effectAllowed = "move";
-          event.dataTransfer.setData("text/plain", itemId);
-          onDragStart(itemId);
-        }}
-        onDragEnd={(event) => {
-          event.stopPropagation();
-          onDragEnd();
-        }}
         disabled={!item.persistable || savingOrder}
-        className="mt-0.5 flex h-9 w-9 shrink-0 touch-none items-center justify-center rounded-lg border border-white/10 bg-zinc-950/60 text-zinc-500 transition hover:border-emerald-300/30 hover:text-emerald-100 disabled:cursor-not-allowed disabled:opacity-35"
+        className="mt-0.5 flex h-9 w-9 shrink-0 touch-none cursor-grab items-center justify-center rounded-lg border border-white/10 bg-zinc-950/60 text-zinc-500 transition hover:border-emerald-300/30 hover:text-emerald-100 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-35"
         aria-label="Drag to reorder food timeline"
         title={item.persistable ? "Drag to reorder" : "Save pending entry before reordering"}
       >
@@ -3745,12 +3766,15 @@ function FoodTimelineList({
         return (
           <div key={itemId}>
             {label ? (
-              <div className="mb-2 mt-3 flex items-center gap-2 first:mt-0">
-                <span className="h-px flex-1 bg-white/10" />
-                <span className="rounded-full border border-white/10 bg-zinc-950/70 px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-500">
-                  {label}
-                </span>
-                <span className="h-px flex-1 bg-white/10" />
+              <div className="mb-2 mt-4 grid gap-1 first:mt-0">
+                <div className="flex items-center gap-2">
+                  <span className="h-px flex-1 bg-white/10" />
+                  <span className="rounded-full border border-white/10 bg-zinc-950/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300">
+                    {label.title}
+                  </span>
+                  <span className="h-px flex-1 bg-white/10" />
+                </div>
+                <p className="text-center text-[11px] font-medium text-zinc-500">{label.detail}</p>
               </div>
             ) : null}
             <div
@@ -3766,13 +3790,19 @@ function FoodTimelineList({
               }}
               onDragOver={(event) => {
                 event.preventDefault();
-                if (!savingOrder) onDragOverItem(itemId);
+                if (!savingOrder) onDragOverItem(itemId, foodTimelineDropPositionFromPointer(event.currentTarget, event.clientY));
               }}
               onDrop={(event) => {
                 event.preventDefault();
               }}
               onDragEnd={onDragEnd}
-              className={cx("rounded-lg border border-white/10 bg-white/[0.035] p-3 transition duration-150", isDragging ? "scale-[0.99] opacity-60" : "opacity-100")}
+              className={cx(
+                item.type === "workout_marker"
+                  ? "rounded-xl border border-emerald-300/25 bg-emerald-300/[0.055] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
+                  : "rounded-lg border border-white/10 bg-white/[0.035] p-3",
+                "transition duration-150",
+                isDragging ? "scale-[0.99] opacity-60" : "opacity-100",
+              )}
               data-testid={item.type === "food" ? "food-log-row" : "workout-marker-row"}
               data-food-timeline-item-id={itemId}
             >
@@ -3784,7 +3814,7 @@ function FoodTimelineList({
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <p className="font-semibold text-white">Gym Marker</p>
+                      <p className="font-semibold text-white">Gym / workout marker</p>
                       <span className="rounded-full bg-emerald-300/10 px-2 py-1 text-xs font-medium text-emerald-100">
                         {item.marker.workout_type || "Workout"}
                       </span>
@@ -3793,7 +3823,7 @@ function FoodTimelineList({
                       ) : null}
                     </div>
                     <p className="mt-1 text-xs text-zinc-500">
-                      Drag this divider between foods to set pre-workout and post-workout nutrition.
+                      Movable divider: foods above are pre-workout, foods below are post-workout.
                     </p>
                     {item.marker.notes ? <p className="mt-2 text-sm leading-5 text-zinc-400">{item.marker.notes}</p> : null}
                   </div>
@@ -4279,7 +4309,7 @@ function FoodPresetIcon({ type, className = "h-7 w-7" }: Readonly<{ type: FoodPr
     stroke: "currentColor",
     strokeLinecap: "round" as const,
     strokeLinejoin: "round" as const,
-    strokeWidth: 1.8,
+    strokeWidth: 2.15,
   };
   return (
     <svg viewBox="0 0 32 32" aria-hidden="true" className={className}>
@@ -4544,6 +4574,27 @@ function PresetStatusPill({ status }: Readonly<{ status?: QuickFoodLogStatus }>)
   return null;
 }
 
+function FoodPresetCardIcon({
+  type,
+  tone,
+}: Readonly<{
+  type: FoodPresetIconType | string | null | undefined;
+  tone: (typeof FOOD_PRESET_CATEGORY_TONES)[FoodPresetCategory];
+}>) {
+  return (
+    <span
+      className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-white/20 bg-black/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_10px_24px_rgba(0,0,0,0.2)] transition duration-200 group-hover:scale-110 group-hover:border-white/30 group-active:scale-95"
+      style={{
+        color: tone.accent,
+        background: `linear-gradient(145deg, rgba(255, 255, 255, 0.12), ${tone.iconBackground})`,
+        filter: `drop-shadow(0 0 10px ${tone.glow})`,
+      }}
+    >
+      <FoodPresetIcon type={type} className="h-8 w-8 drop-shadow-sm" />
+    </span>
+  );
+}
+
 function PresetFoodTile({
   shortcut,
   status,
@@ -4584,9 +4635,7 @@ function PresetFoodTile({
         <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
           {category}
         </span>
-        <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
-          <FoodPresetIcon type={iconType} className="h-6 w-6" />
-        </span>
+        <FoodPresetCardIcon type={iconType} tone={tone} />
       </span>
       <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
         <span className="line-clamp-2 text-base font-semibold leading-5 tracking-normal text-white">{shortcut.shortcut_name}</span>
@@ -5006,6 +5055,9 @@ function dashboardHealthTone(status?: string) {
   if (["watch", "yellow", "fair", "near_estimated_burn", "suggest_adjustment"].includes(normalized)) {
     return "border-amber-300/25 bg-amber-300/[0.08] text-amber-100";
   }
+  if (["learning", "early_data", "learning_baseline"].includes(normalized)) {
+    return "border-sky-300/25 bg-sky-300/[0.08] text-sky-100";
+  }
   if (["clear", "green", "good", "normal", "likely_near_maintenance", "hold"].includes(normalized)) {
     return "border-emerald-300/25 bg-emerald-300/[0.08] text-emerald-100";
   }
@@ -5253,7 +5305,7 @@ function Dashboard({
   const googleHealthReady = googleHealth?.status === "ok";
   const sleepQuality = googleHealth?.sleep_quality;
   const recoveryReadiness = googleHealth?.recovery_readiness;
-  const recoveryScore = finiteNumberOrNull(recoveryReadiness?.score) ?? finiteNumberOrNull(recovery?.latest_score);
+  const recoveryScore = googleHealthReady ? finiteNumberOrNull(recoveryReadiness?.score) : finiteNumberOrNull(recovery?.latest_score);
   const recoveryClassification = googleHealthReady && recoveryReadiness?.label ? recoveryReadiness.label : stringOrFallback(recovery?.classification, "sync pending");
   const recoverySource = googleHealthReady ? stringOrFallback(googleHealth?.source, "google_health") : stringOrFallback(recovery?.source, "recovery");
   const recoveryMessage = googleHealthReady && recoveryReadiness?.message ? recoveryReadiness.message : stringOrFallback(recovery?.message, "Recovery data sync pending.");
@@ -5273,8 +5325,14 @@ function Dashboard({
   const caloriesDelta = finiteNumberOrNull(calorieBurnSignal?.intake_vs_burned);
   const calorieAdjustment = finiteNumberOrNull(calorieAdjustmentSignal?.adjustment) ?? 0;
   const sleepUnavailable = sleepQuality?.status === "insufficient_data" || finiteNumberOrNull(sleepQuality?.duration_hours) === null;
+  const sleepLearning = Boolean(sleepQuality?.provisional || ["early_data", "learning_baseline"].includes(String(sleepQuality?.status || "")));
   const restingHrUnavailable = restingHrSignal?.status === "insufficient_data" || finiteNumberOrNull(restingHrSignal?.resting_hr) === null;
+  const restingHrLearning = finiteNumberOrNull(restingHrSignal?.resting_hr) !== null && finiteNumberOrNull(restingHrSignal?.baseline) === null;
+  const restingHrUnavailableLabel = String(restingHrSignal?.message || "").toLowerCase().includes("insufficient clean hr data")
+    ? "insufficient clean HR data"
+    : "Resting HR unavailable";
   const hrvUnavailable = googleHealth?.hrv?.status === "insufficient_data" || finiteNumberOrNull(googleHealth?.hrv?.hrv) === null;
+  const hrvLearning = finiteNumberOrNull(googleHealth?.hrv?.hrv) !== null && finiteNumberOrNull(googleHealth?.hrv?.baseline) === null;
   const activityUnavailable = activityLoadSignal?.status === "insufficient_data";
   const vitalsUnavailable = [healthVitals?.spo2, healthVitals?.breathing_rate, healthVitals?.skin_temperature, healthVitals?.body_temperature].every((value) => finiteNumberOrNull(value) === null);
   const compactDebugJson = (value: unknown) => JSON.stringify(value ?? {}, null, 2);
@@ -5492,13 +5550,13 @@ function Dashboard({
                 <DashboardHealthSignalTile
                   title="Sleep Quality"
                   value={sleepUnavailable ? "Sleep data unavailable" : sleepQuality?.score !== null && sleepQuality?.score !== undefined ? `${sleepQuality.score}/100` : "--"}
-                  detail={sleepUnavailable ? "The wearable provider did not provide sleep duration or stages for this date." : `${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}`}
+                  detail={sleepUnavailable ? "The wearable provider did not provide sleep duration or stages for this date." : `${sleepLearning ? `${sleepQuality?.baseline_label || "Learning"} · ` : ""}${formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)} sleep · REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")} · Eff ${formatDashboardNumber(sleepQuality?.efficiency, "%")}${sleepLearning && sleepQuality?.needed_nights !== null && sleepQuality?.needed_nights !== undefined ? ` · Need ${sleepQuality.needed_nights} more night${sleepQuality.needed_nights === 1 ? "" : "s"}` : ""}`}
                   status={sleepQuality?.status}
                   icon={HeartPulse}
                 />
                 <DashboardHealthSignalTile
                   title="Recovery Readiness"
-                  value={recoveryReadiness?.score !== null && recoveryReadiness?.score !== undefined ? `${recoveryReadiness.score}/100` : "--"}
+                  value={recoveryReadiness?.provisional ? "Learning" : recoveryReadiness?.score !== null && recoveryReadiness?.score !== undefined ? `${recoveryReadiness.score}/100` : "--"}
                   detail={recoveryReadiness?.message || "Recovery readiness uses sleep, HR, vitals, and training load."}
                   status={recoveryReadiness?.status}
                   icon={Gauge}
@@ -5512,8 +5570,8 @@ function Dashboard({
                 />
                 <DashboardHealthSignalTile
                   title="Resting HR vs Baseline"
-                  value={restingHrUnavailable ? "Resting HR unavailable" : `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
-                  detail={restingHrUnavailable ? `HRV ${hrvUnavailable ? "unavailable" : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}` : `Deviation ${formatDashboardNumber(restingHrSignal?.deviation, " bpm", 1)} · HRV ${hrvUnavailable ? "unavailable" : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}`}
+                  value={restingHrLearning ? `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / Learning` : restingHrUnavailable ? restingHrUnavailableLabel : `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
+                  detail={restingHrLearning ? `Learning baseline · Need ${restingHrSignal?.needed_nights ?? "--"} more night${restingHrSignal?.needed_nights === 1 ? "" : "s"} · HRV ${hrvUnavailable ? "unavailable" : hrvLearning ? `${formatDashboardNumber(googleHealth?.hrv?.hrv)} / Learning` : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}` : restingHrUnavailable ? `HRV ${hrvUnavailable ? "unavailable" : hrvLearning ? `${formatDashboardNumber(googleHealth?.hrv?.hrv)} / Learning` : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}` : `Deviation ${formatDashboardNumber(restingHrSignal?.deviation, " bpm", 1)} · HRV ${hrvUnavailable ? "unavailable" : hrvLearning ? `${formatDashboardNumber(googleHealth?.hrv?.hrv)} / Learning` : `${formatDashboardNumber(googleHealth?.hrv?.hrv)} vs ${formatDashboardNumber(googleHealth?.hrv?.baseline)}`}`}
                   status={restingHrSignal?.status}
                   icon={HeartPulse}
                 />
@@ -6273,7 +6331,7 @@ function FoodPage({
 }>) {
   const [showFoodHistory, setShowFoodHistory] = useState(false);
   const [shortcutQuery, setShortcutQuery] = useState("");
-  const [shortcutTab, setShortcutTab] = useState<"saved" | "meals" | "frequent">("saved");
+  const [shortcutTab] = useState<"saved" | "meals" | "frequent">("saved");
   const [presetEditMode, setPresetEditMode] = useState(false);
   const [editingShortcut, setEditingShortcut] = useState<PresetFoodShortcut | null>(null);
   const [pendingPresetAction, setPendingPresetAction] = useState<string | null>(null);
@@ -6291,6 +6349,8 @@ function FoodPage({
   const [savingTimelineOrder, setSavingTimelineOrder] = useState(false);
   const [timelineFeedback, setTimelineFeedback] = useState<string | null>(null);
   const [timelineError, setTimelineError] = useState<string | null>(null);
+  const manualFoodEntryRef = useRef<HTMLDivElement | null>(null);
+  const aiFoodEntryRef = useRef<HTMLDivElement | null>(null);
   const selectedDateEntries = logs.filter((entry) => entry.date === forms.nutrition.date);
   const selectedDateMarkers = workoutMarkers
     .filter((marker) => (marker.date || "").slice(0, 10) === forms.nutrition.date)
@@ -6451,12 +6511,14 @@ function FoodPage({
     setTimelineFeedback(null);
     setTimelineError(null);
   };
-  const reorderTimelineOverItem = (overId: string) => {
+  const reorderTimelineOverItem = (overId: string, position: FoodTimelineDropPosition = "before") => {
     const activeId = draggingTimelineIdRef.current;
     if (!activeId || activeId === overId) return;
     const currentItems = applyFoodTimelineOrder(baseTimelineItems, timelineOrderIdsRef.current);
-    const nextItems = moveFoodTimelineItem(currentItems, activeId, overId);
+    const nextItems = moveFoodTimelineItem(currentItems, activeId, overId, position);
     const nextOrderIds = nextItems.map(foodTimelineItemKey);
+    const currentOrderIds = currentItems.map(foodTimelineItemKey);
+    if (nextOrderIds.join("|") === currentOrderIds.join("|")) return;
     timelineOrderIdsRef.current = nextOrderIds;
     setTimelineOrderIds(nextOrderIds);
   };
@@ -6476,11 +6538,15 @@ function FoodPage({
     { label: "Fat", unit: "g", consumed: selectedDateTotals.fat, target: displayTargets?.fat_grams ?? 0, bar: "bg-amber-300" },
     ...(selectedDateTotals.fiber > 0 ? [{ label: "Fiber", unit: "g", consumed: selectedDateTotals.fiber, target: 30, bar: "bg-emerald-300" }] : []),
   ];
-  const shortcutTabs: Array<{ id: "saved" | "meals" | "frequent"; label: string; count: number; icon: React.ComponentType<{ className?: string }> }> = [
-    { id: "saved", label: "Saved foods", count: presetShortcuts.length, icon: Utensils },
-    { id: "meals", label: "Meals", count: templateSummaries.length, icon: Soup },
-    { id: "frequent", label: "Frequent", count: frequentFoods.length, icon: Clock3 },
-  ];
+  const openQuickEntryPanel = (panel: "manual" | "ai") => {
+    if (panel === "manual") {
+      setManualFoodMode("direct");
+      manualFoodEntryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+      return;
+    }
+    aiFoodEntryRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    window.setTimeout(() => document.getElementById("ai-food-entry-textarea")?.focus(), 350);
+  };
   const handleShortcutTileClick = async (shortcut: PresetFoodShortcut) => {
     if (presetEditMode) {
       setEditingShortcut({ ...shortcut });
@@ -6731,7 +6797,8 @@ function FoodPage({
         ) : null}
       </div>
       <div className="order-first flex min-w-0 flex-col gap-4 xl:order-none">
-      <Card className="order-3 min-w-0">
+      <div ref={manualFoodEntryRef} className="order-3 scroll-mt-24">
+      <Card className="min-w-0">
         <SectionHeader eyebrow="Food" title={<TitleWithIcon icon={Utensils}>Manual food entry</TitleWithIcon>} />
         <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
           {(["direct", "serving"] as const).map((mode) => (
@@ -6833,6 +6900,7 @@ function FoodPage({
           ) : null}
         </form>
       </Card>
+      </div>
       <div className="contents">
         <Card className="hidden">
           <SectionHeader eyebrow="Targets" title="Macro progress" />
@@ -6985,7 +7053,8 @@ function FoodPage({
             )}
           </Card>
         ) : null}
-        <Card className="order-2 min-w-0">
+        <div ref={aiFoodEntryRef} className="order-2 scroll-mt-24">
+        <Card className="min-w-0">
           <SectionHeader eyebrow="AI text entry" title={<TitleWithIcon icon={WandSparkles}>AI Food Entry</TitleWithIcon>} />
           <form onSubmit={onParseFood} className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -6994,6 +7063,7 @@ function FoodPage({
             <label className="block space-y-2 text-sm text-zinc-400">
               <span>Food list</span>
               <textarea
+                id="ai-food-entry-textarea"
                 className="accent-focus min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
                 value={aiText}
                 maxLength={4000}
@@ -7187,6 +7257,7 @@ function FoodPage({
             </form>
           ) : null}
         </Card>
+        </div>
         <Card className="hidden">
           <SectionHeader eyebrow="Log" title="Recent saved foods" />
           <FoodLogList entries={logs.slice(-5).reverse()} emptyDescription="Manual food entries will appear here after saving." />
@@ -7218,26 +7289,33 @@ function FoodPage({
             }
           />
           <div className="space-y-4">
-            <div className="rounded-xl border border-white/10 bg-zinc-950/70 p-1 shadow-inner shadow-black/25">
-              <div className="grid grid-cols-3 gap-1 text-sm">
-                {shortcutTabs.map((tab) => {
-                  const TabIcon = tab.icon;
-                  return (
-                    <button
-                      key={tab.id}
-                      type="button"
-                      onClick={() => setShortcutTab(tab.id)}
-                      className={cx("rounded-lg px-2 py-2 font-semibold transition", shortcutTab === tab.id ? "accent-active shadow-lg shadow-black/20" : "text-zinc-300 hover:bg-white/[0.05]")}
-                    >
-                      <span className="flex items-center justify-center gap-1.5">
-                        <TabIcon className="h-3.5 w-3.5 shrink-0" />
-                        <span className="truncate">{tab.label}</span>
-                      </span>
-                      <span className={cx("mt-0.5 block text-[11px]", shortcutTab === tab.id ? "text-zinc-900" : "text-zinc-500")}>{tab.count}</span>
-                    </button>
-                  );
-                })}
-              </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <button
+                type="button"
+                onClick={() => openQuickEntryPanel("manual")}
+                className="group flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-3 text-left transition hover:-translate-y-0.5 hover:border-emerald-300/25 hover:bg-emerald-300/[0.06]"
+              >
+                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-100 transition group-hover:scale-105">
+                  <Pencil className="h-5 w-5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block font-semibold text-white">Manual food entry</span>
+                  <span className="mt-0.5 block text-sm text-zinc-400">Add custom macros</span>
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => openQuickEntryPanel("ai")}
+                className="group flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-3 text-left transition hover:-translate-y-0.5 hover:border-violet-300/25 hover:bg-violet-300/[0.06]"
+              >
+                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-violet-300/20 bg-violet-300/10 text-violet-100 transition group-hover:scale-105">
+                  <WandSparkles className="h-5 w-5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block font-semibold text-white">AI text entry</span>
+                  <span className="mt-0.5 block text-sm text-zinc-400">Describe what you ate</span>
+                </span>
+              </button>
             </div>
             <div className="space-y-2">
               <label className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500" htmlFor="preset-food-search">Search library</label>
@@ -7341,9 +7419,7 @@ function FoodPage({
                           <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
                             {template.foods} foods
                           </span>
-                          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
-                            <FoodPresetIcon type="meal_bowl" className="h-6 w-6" />
-                          </span>
+                          <FoodPresetCardIcon type="meal_bowl" tone={tone} />
                         </span>
                         <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
                           <span className="line-clamp-2 text-base font-semibold leading-5 text-white">{template.template_name}</span>
@@ -7431,9 +7507,7 @@ function FoodPage({
                           <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
                             {category}
                           </span>
-                          <span className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-white/10 bg-black/20 transition group-hover:scale-105" style={{ color: tone.accent, backgroundColor: tone.iconBackground }}>
-                            <FoodPresetIcon type={shortcutLike.icon_type} className="h-6 w-6" />
-                          </span>
+                          <FoodPresetCardIcon type={shortcutLike.icon_type} tone={tone} />
                         </span>
                         <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
                           <span className="line-clamp-2 text-base font-semibold leading-5 text-white">{food.food_name}</span>
@@ -7971,12 +8045,17 @@ function RecoveryPage({
   const lightMinutes = finiteNumberOrNull(sleepQuality?.light_minutes) ?? finiteNumberOrNull(latestWearable?.light_sleep_minutes) ?? finiteNumberOrNull(latestSleep?.lightSleepMinutes);
   const awakeMinutes = finiteNumberOrNull(sleepQuality?.awake_minutes) ?? finiteNumberOrNull(latestWearable?.awake_minutes) ?? finiteNumberOrNull(latestSleep?.awakeMinutes);
   const sleepEfficiency = finiteNumberOrNull(sleepQuality?.efficiency) ?? finiteNumberOrNull(latestWearable?.sleep_efficiency) ?? finiteNumberOrNull(latestSleep?.efficiencyPercent);
-  const recoveryReadinessScore = finiteNumberOrNull(recoveryReadiness?.score) ?? finiteNumberOrNull(dashboardRecovery?.latest_score);
+  const recoveryReadinessScore = googleHealthReady ? finiteNumberOrNull(recoveryReadiness?.score) : finiteNumberOrNull(dashboardRecovery?.latest_score);
   const restingHr = finiteNumberOrNull(restingHrSignal?.resting_hr) ?? finiteNumberOrNull(latestWearable?.resting_hr) ?? finiteNumberOrNull(latestSleep?.restingHeartRate);
   const restingHrBaseline = finiteNumberOrNull(restingHrSignal?.baseline) ?? finiteNumberOrNull(latestWearable?.resting_hr_baseline);
   const restingHrDeviation = finiteNumberOrNull(restingHrSignal?.deviation) ?? finiteNumberOrNull(latestWearable?.resting_hr_deviation);
+  const restingHrLearning = restingHr !== null && restingHrBaseline === null;
+  const restingHrUnavailableLabel = String(restingHrSignal?.message || "").toLowerCase().includes("insufficient clean hr data")
+    ? "insufficient clean HR data"
+    : "Resting HR unavailable";
   const hrvValue = finiteNumberOrNull(hrvSignal?.hrv) ?? finiteNumberOrNull(latestWearable?.hrv) ?? finiteNumberOrNull(latestSleep?.hrv);
   const hrvBaseline = finiteNumberOrNull(hrvSignal?.baseline);
+  const hrvLearning = hrvValue !== null && hrvBaseline === null;
   const hasHeartRecoverySignal = restingHr !== null || hrvValue !== null;
   const activeMinutes = finiteNumberOrNull(activityLoadSignal?.active_minutes) ?? finiteNumberOrNull(latestWearable?.active_minutes);
   const activeZoneMinutes = finiteNumberOrNull(activityLoadSignal?.active_zone_minutes) ?? finiteNumberOrNull(latestWearable?.active_zone_minutes);
@@ -8095,11 +8174,11 @@ function RecoveryPage({
     { label: "Projected monthly gain", value: formatSignedAnalyticsNumber(projectedMonthlyGain, " lb", 1), detail: "Projected from current weekly bodyweight velocity.", status: projectedMonthlyGain !== null ? "normal" : "insufficient_data", icon: BarChart3 },
   ];
   const recoverySummaryCards = [
-    { label: "Recovery Readiness", value: recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
+    { label: "Recovery Readiness", value: recoveryReadiness?.provisional ? "Learning" : recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
     { label: "Sleep Quality", value: sleepScore !== null ? `${Math.round(sleepScore)}/100` : "--", detail: `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`, status: sleepQuality?.status, icon: HeartPulse },
     { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: HeartPulse },
-    { label: "Resting HR vs baseline", value: restingHr === null ? "Resting HR unavailable" : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "The wearable provider did not provide resting HR; this is not penalized." : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
-    { label: "HRV vs baseline", value: hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvSignal?.status, icon: Gauge },
+    { label: "Resting HR vs baseline", value: restingHrLearning ? `${formatAnalyticsNumber(restingHr, " bpm")} / Learning` : restingHr === null ? restingHrUnavailableLabel : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "Clean resting HR samples are not available; this is not penalized." : restingHrLearning ? `Learning baseline · Need ${restingHrSignal?.needed_nights ?? "--"} more night${restingHrSignal?.needed_nights === 1 ? "" : "s"}.` : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
+    { label: "HRV vs baseline", value: hrvLearning ? `${formatAnalyticsNumber(hrvValue)} / Learning` : hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvLearning ? `Learning baseline · Need ${hrvSignal?.needed_nights ?? "--"} more night${hrvSignal?.needed_nights === 1 ? "" : "s"}.` : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvSignal?.status, icon: Gauge },
     { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status, icon: BarChart3 },
     { label: "Sickness warning", value: sicknessLabel, detail: sicknessWarning?.message || trainingReadiness?.sickness_warning?.message || "Conservative, non-diagnostic recovery stress signal.", status: sicknessStatus, icon: AlertTriangle },
     { label: "Recovery confidence", value: recoveryConfidence, detail: recoveryConfidenceDetail, status: recoveryConfidence.includes("measured") ? "good" : recoveryConfidence.includes("partial") ? "watch" : "insufficient_data", icon: Sparkles },

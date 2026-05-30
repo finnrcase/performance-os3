@@ -1284,6 +1284,10 @@ def _integration_payload(*, external_checks: bool = False) -> dict[str, Any]:
             "phone_app_data_note": google_health_meta.get("phone_app_data_note", ""),
             "available_data_types": google_health_meta.get("available_data_types", []),
             "empty_date_rows_count": google_health_meta.get("empty_date_rows_count", 0),
+            "clean_hr_diagnostics": google_health_meta.get("clean_hr_diagnostics", {}),
+            "raw_hr_samples_received": google_health_meta.get("raw_hr_samples_received", 0),
+            "invalid_hr_samples_dropped": google_health_meta.get("invalid_hr_samples_dropped", 0),
+            "clean_hr_samples_used": google_health_meta.get("clean_hr_samples_used", 0),
         },
         "fitbit": {
             "configured": base["fitbit"]["configured"],
@@ -2039,6 +2043,8 @@ GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS = [
     "hrv",
     "average_hr",
     "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
     "steps",
     "active_minutes",
     "active_zone_minutes",
@@ -2053,6 +2059,35 @@ GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS = [
     "skin_temperature",
     "body_temperature",
 ]
+GOOGLE_HEALTH_HEART_RATE_FIELDS = {
+    "resting_hr",
+    "resting_hr_baseline",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
+}
+GOOGLE_HEALTH_HRV_FIELDS = {"hrv"}
+
+
+def _google_health_clean_hr(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed < 30 or parsed > 220:
+        return None
+    return parsed
+
+
+def _google_health_clean_hrv(value: Any) -> float | None:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed <= 0:
+        return None
+    return parsed
 
 
 def _google_health_metric_present(value: Any) -> bool:
@@ -2071,9 +2106,17 @@ def _google_health_metric_present(value: Any) -> bool:
     return parsed > 0
 
 
+def _google_health_metric_field_present(field: str, value: Any) -> bool:
+    if field in GOOGLE_HEALTH_HEART_RATE_FIELDS:
+        return _google_health_clean_hr(value) is not None
+    if field in GOOGLE_HEALTH_HRV_FIELDS:
+        return _google_health_clean_hrv(value) is not None
+    return _google_health_metric_present(value)
+
+
 def _google_health_row_field_counts(row: dict[str, Any] | None) -> dict[str, int]:
     sample = row if isinstance(row, dict) else {}
-    populated = sum(1 for field in GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS if _google_health_metric_present(sample.get(field)))
+    populated = sum(1 for field in GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS if _google_health_metric_field_present(field, sample.get(field)))
     return {
         "fields_populated_count": populated,
         "fields_missing_count": len(GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS) - populated,
@@ -2148,7 +2191,7 @@ def _google_health_populated_fields_by_day(rows: list[dict[str, Any]]) -> dict[s
         day = _google_health_text(row.get("date"))[:10]
         if not day:
             continue
-        fields = [field for field in GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS if _google_health_metric_present(row.get(field))]
+        fields = [field for field in GOOGLE_HEALTH_SYNC_SAMPLE_FIELDS if _google_health_metric_field_present(field, row.get(field))]
         by_day[day] = {
             "fields_populated_count": len(fields),
             "fields": fields,
@@ -2448,6 +2491,10 @@ def debug_google_health_sources() -> dict[str, Any]:
         "populated_fields_by_day": populated_fields_by_day,
         "fields_populated_count": sync.get("fields_populated_count", 0),
         "fields_missing_count": sync.get("fields_missing_count", 0),
+        "clean_hr_diagnostics": sync.get("clean_hr_diagnostics", {}),
+        "raw_hr_samples_received": sync.get("raw_hr_samples_received", 0),
+        "invalid_hr_samples_dropped": sync.get("invalid_hr_samples_dropped", 0),
+        "clean_hr_samples_used": sync.get("clean_hr_samples_used", 0),
         "empty_row_counts": {
             "empty_date_rows_count": sync.get("empty_date_rows_count", 0),
             "empty_date_rows": sync.get("empty_date_rows", []),
@@ -2620,6 +2667,7 @@ def debug_google_health_raw(
     live_exact_endpoint_urls: list[str] = []
     live_google_health_api_requests: list[dict[str, Any]] = []
     live_fitness_api_requests: list[dict[str, Any]] = []
+    live_clean_hr_diagnostics: dict[str, Any] = {}
     identity_access_token = _google_health_text(tokens.get("access_token"))
     if live and metadata.get("connected"):
         try:
@@ -2633,6 +2681,7 @@ def debug_google_health_raw(
             live_exact_endpoint_urls = fetched.get("exact_endpoint_urls") if isinstance(fetched.get("exact_endpoint_urls"), list) else []
             live_google_health_api_requests = fetched.get("google_health_api_requests") if isinstance(fetched.get("google_health_api_requests"), list) else []
             live_fitness_api_requests = fetched.get("fitness_api_requests") if isinstance(fetched.get("fitness_api_requests"), list) else []
+            live_clean_hr_diagnostics = fetched.get("clean_hr_diagnostics") if isinstance(fetched.get("clean_hr_diagnostics"), dict) else {}
             source = "live_health_api_probe"
         except Exception as exc:
             live_error = str(exc)[:500]
@@ -2684,6 +2733,10 @@ def debug_google_health_raw(
         "live_error": live_error,
         "raw_responses": raw_responses,
         "normalization_audit": normalization_audit,
+        "clean_hr_diagnostics": live_clean_hr_diagnostics if live else sync.get("clean_hr_diagnostics", {}),
+        "raw_hr_samples_received": int((live_clean_hr_diagnostics if live else sync).get("raw_hr_samples_received") or 0),
+        "invalid_hr_samples_dropped": int((live_clean_hr_diagnostics if live else sync).get("invalid_hr_samples_dropped") or 0),
+        "clean_hr_samples_used": int((live_clean_hr_diagnostics if live else sync).get("clean_hr_samples_used") or 0),
         "raw_response_counts_by_metric": raw_counts_by_metric,
         "populated_fields_by_day": populated_fields_by_day,
         "empty_placeholder_rows_count": int(sync.get("empty_date_rows_count") or 0),
@@ -2798,6 +2851,10 @@ def debug_google_health_ingestion(
         "disallowed_scope_endpoint_count": len(disallowed_scope_errors),
         "raw_responses": raw_responses,
         "raw_response_counts_by_metric": _google_health_raw_counts_by_metric(raw_responses),
+        "clean_hr_diagnostics": fetched.get("clean_hr_diagnostics") if isinstance(fetched.get("clean_hr_diagnostics"), dict) else sync.get("clean_hr_diagnostics", {}),
+        "raw_hr_samples_received": int(fetched.get("raw_hr_samples_received") or sync.get("raw_hr_samples_received") or 0),
+        "invalid_hr_samples_dropped": int(fetched.get("invalid_hr_samples_dropped") or sync.get("invalid_hr_samples_dropped") or 0),
+        "clean_hr_samples_used": int(fetched.get("clean_hr_samples_used") or sync.get("clean_hr_samples_used") or 0),
         "normalized_items_count": len(fetched.get("items") or []),
         "normalized_field_count": int(fetched.get("fields_populated_count") or 0),
         "normalized_missing_field_count": int(fetched.get("fields_missing_count") or 0),
@@ -2871,6 +2928,10 @@ def debug_wearables_provider_status() -> dict[str, Any]:
             "populated_fields_by_day": google_sources.get("populated_fields_by_day", {}),
             "empty_placeholder_rows_count": google_sources.get("empty_placeholder_rows_count", 0),
             "last_successful_populated_metric_date": google_sources.get("last_successful_populated_metric_date", ""),
+            "clean_hr_diagnostics": google_sources.get("clean_hr_diagnostics", {}),
+            "raw_hr_samples_received": google_sources.get("raw_hr_samples_received", 0),
+            "invalid_hr_samples_dropped": google_sources.get("invalid_hr_samples_dropped", 0),
+            "clean_hr_samples_used": google_sources.get("clean_hr_samples_used", 0),
             "diagnostic": google_sources.get("diagnostic", {}),
         },
         "google_fit_legacy": {
@@ -3059,6 +3120,7 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "fields_populated_count": int(fetched.get("fields_populated_count") or sum(_google_health_row_field_counts(row)["fields_populated_count"] for row in populated_rows)),
             "fields_missing_count": int(fetched.get("fields_missing_count") or 0),
         }
+        clean_hr_diagnostics = fetched.get("clean_hr_diagnostics") if isinstance(fetched.get("clean_hr_diagnostics"), dict) else {}
         for row in populated_rows:
             row_date = _google_health_text(row.get("date"))[:10]
             if not row_date:
@@ -3135,6 +3197,10 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
                 "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
                 "normalization_audit": fetched.get("normalization_audit") or {},
+                "clean_hr_diagnostics": clean_hr_diagnostics,
+                "raw_hr_samples_received": int(fetched.get("raw_hr_samples_received") or clean_hr_diagnostics.get("raw_hr_samples_received") or 0),
+                "invalid_hr_samples_dropped": int(fetched.get("invalid_hr_samples_dropped") or clean_hr_diagnostics.get("invalid_hr_samples_dropped") or 0),
+                "clean_hr_samples_used": int(fetched.get("clean_hr_samples_used") or clean_hr_diagnostics.get("clean_hr_samples_used") or 0),
                 "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
                 "api_path": fetched.get("api_path", "google_health_v4"),
                 "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
@@ -3212,6 +3278,10 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
                 "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
                 "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
                 "normalization_audit": fetched.get("normalization_audit") or {},
+                "clean_hr_diagnostics": clean_hr_diagnostics,
+                "raw_hr_samples_received": int(fetched.get("raw_hr_samples_received") or clean_hr_diagnostics.get("raw_hr_samples_received") or 0),
+                "invalid_hr_samples_dropped": int(fetched.get("invalid_hr_samples_dropped") or clean_hr_diagnostics.get("invalid_hr_samples_dropped") or 0),
+                "clean_hr_samples_used": int(fetched.get("clean_hr_samples_used") or clean_hr_diagnostics.get("clean_hr_samples_used") or 0),
                 "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
                 "api_path": fetched.get("api_path", "google_health_v4"),
                 "api_path_label": fetched.get("api_path_label", "Google Health API v4"),
@@ -3277,6 +3347,10 @@ def sync_google_health(payload: dict[str, Any] | None = None) -> dict[str, Any]:
             "raw_aggregate_responses": fetched.get("raw_aggregate_responses") or {},
             "raw_health_responses": fetched.get("raw_health_responses") or fetched.get("raw_aggregate_responses") or {},
             "normalization_audit": fetched.get("normalization_audit") or {},
+            "clean_hr_diagnostics": clean_hr_diagnostics,
+            "raw_hr_samples_received": int(fetched.get("raw_hr_samples_received") or clean_hr_diagnostics.get("raw_hr_samples_received") or 0),
+            "invalid_hr_samples_dropped": int(fetched.get("invalid_hr_samples_dropped") or clean_hr_diagnostics.get("invalid_hr_samples_dropped") or 0),
+            "clean_hr_samples_used": int(fetched.get("clean_hr_samples_used") or clean_hr_diagnostics.get("clean_hr_samples_used") or 0),
             "api_base_url": fetched.get("api_base_url", "https://health.googleapis.com"),
             "api_path": fetched.get("api_path", "google_health_v4"),
             "api_path_label": fetched.get("api_path_label", "Google Health API v4"),

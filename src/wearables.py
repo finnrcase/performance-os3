@@ -112,6 +112,103 @@ ACTIVITY_LOAD_COLUMNS = [
     "workout_minutes",
     "cardio_load",
 ]
+WEARABLE_HEART_RATE_COLUMNS = [
+    "resting_hr",
+    "resting_hr_baseline",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
+]
+WEARABLE_RAW_HEART_RATE_COLUMNS = [
+    "resting_hr",
+    "average_hr",
+    "max_hr",
+    "workout_average_hr",
+    "workout_max_hr",
+]
+WEARABLE_HRV_COLUMNS = ["hrv"]
+HEART_RATE_MIN_BPM = 30
+HEART_RATE_MAX_BPM = 220
+
+
+def _finite_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, str) and not value.strip():
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(parsed) or not np.isfinite(parsed):
+        return None
+    return parsed
+
+
+def clean_heart_rate_value(value, *, digits: int = 1) -> float | None:
+    """Return a clean heart-rate BPM value or None for invalid sensor samples."""
+    parsed = _finite_float(value)
+    if parsed is None or parsed < HEART_RATE_MIN_BPM or parsed > HEART_RATE_MAX_BPM:
+        return None
+    return round(parsed, digits)
+
+
+def clean_hrv_value(value, *, digits: int = 1) -> float | None:
+    """Return a clean HRV value; HRV may be below 30, but zero is invalid."""
+    parsed = _finite_float(value)
+    if parsed is None or parsed <= 0:
+        return None
+    return round(parsed, digits)
+
+
+def heart_rate_cleaning_summary(rows: pd.DataFrame | list[dict] | None) -> dict:
+    """Count raw, invalid, and clean heart-rate BPM samples in wearable rows."""
+    frame = pd.DataFrame(rows).copy() if rows is not None else pd.DataFrame()
+    by_field: dict[str, dict[str, int]] = {}
+    totals = {
+        "raw_hr_samples_received": 0,
+        "invalid_hr_samples_dropped": 0,
+        "clean_hr_samples_used": 0,
+    }
+    for column in WEARABLE_RAW_HEART_RATE_COLUMNS:
+        if column not in frame.columns:
+            continue
+        field_counts = {"raw": 0, "invalid": 0, "clean": 0}
+        for value in frame[column].tolist():
+            if value is None:
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except (TypeError, ValueError):
+                pass
+            if isinstance(value, str) and not value.strip():
+                continue
+            field_counts["raw"] += 1
+            totals["raw_hr_samples_received"] += 1
+            if clean_heart_rate_value(value) is None:
+                field_counts["invalid"] += 1
+                totals["invalid_hr_samples_dropped"] += 1
+            else:
+                field_counts["clean"] += 1
+                totals["clean_hr_samples_used"] += 1
+        if field_counts["raw"]:
+            by_field[column] = field_counts
+    return {
+        **totals,
+        "invalid_hr_samples_dropped_by_field": {
+            field: counts["invalid"] for field, counts in by_field.items() if counts["invalid"]
+        },
+        "clean_hr_samples_used_by_field": {field: counts["clean"] for field, counts in by_field.items() if counts["clean"]},
+        "raw_hr_samples_received_by_field": {field: counts["raw"] for field, counts in by_field.items()},
+        "valid_bpm_range": {"min": HEART_RATE_MIN_BPM, "max": HEART_RATE_MAX_BPM},
+    }
 
 
 def _metric_value_present(value) -> bool:
@@ -135,8 +232,16 @@ def _metric_value_present(value) -> bool:
     return parsed > 0
 
 
+def _metric_value_present_for_column(column: str, value) -> bool:
+    if column in WEARABLE_HEART_RATE_COLUMNS:
+        return clean_heart_rate_value(value) is not None
+    if column in WEARABLE_HRV_COLUMNS:
+        return clean_hrv_value(value) is not None
+    return _metric_value_present(value)
+
+
 def _populated_metric_count(row: pd.Series | dict) -> int:
-    return sum(1 for column in WEARABLE_NUMERIC_COLUMNS if _metric_value_present(row.get(column)))
+    return sum(1 for column in WEARABLE_NUMERIC_COLUMNS if _metric_value_present_for_column(column, row.get(column)))
 
 
 def _empty_wearable_metrics() -> pd.DataFrame:
@@ -214,6 +319,13 @@ def normalize_wearable_metric_rows(
     )
     for column in WEARABLE_NUMERIC_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
+    for column in WEARABLE_HEART_RATE_COLUMNS:
+        df[column] = df[column].apply(clean_heart_rate_value)
+    for column in WEARABLE_HRV_COLUMNS:
+        df[column] = df[column].apply(clean_hrv_value)
+    missing_resting_hr = pd.to_numeric(df["resting_hr"], errors="coerce").isna()
+    missing_resting_baseline = pd.to_numeric(df["resting_hr_baseline"], errors="coerce").isna()
+    df.loc[missing_resting_hr | missing_resting_baseline, "resting_hr_deviation"] = pd.NA
     df["populated_metric_count"] = df.apply(_populated_metric_count, axis=1).astype(int)
     existing_placeholder = (
         df["placeholder"]
@@ -296,6 +408,7 @@ def add_wearable_metric_entry(
 def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataFrame, dict]:
     raw = pd.DataFrame(wearable_df).copy() if wearable_df is not None else _empty_wearable_metrics()
     missing_columns = [column for column in WEARABLE_METRIC_COLUMNS if column not in raw.columns]
+    hr_cleaning = heart_rate_cleaning_summary(raw)
     df = _normalize_wearable_metrics(raw)
     diagnostics = {
         "rows": int(len(raw)),
@@ -305,6 +418,8 @@ def _aggregate_daily_metrics(wearable_df: pd.DataFrame | None) -> tuple[pd.DataF
         "valid_rows": 0,
         "message": "No wearable metrics available yet.",
         "connected_but_no_metrics": False,
+        "heart_rate_cleaning": hr_cleaning,
+        **hr_cleaning,
     }
     if df.empty or "date" not in df.columns:
         return pd.DataFrame(), diagnostics
@@ -564,6 +679,15 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
     sleep = _metric_trend(daily, "sleep_hours", higher_is_better=True)
     resting_hr = _metric_trend(daily, "resting_hr", higher_is_better=False)
     hrv = _metric_trend(daily, "hrv", higher_is_better=True)
+    clean_hr_samples = int(diagnostics.get("clean_hr_samples_used") or 0)
+    raw_hr_samples = int(diagnostics.get("raw_hr_samples_received") or 0)
+    resting_hr["message"] = (
+        "insufficient clean HR data"
+        if resting_hr["latest"] is None
+        else "Clean resting HR data available."
+    )
+    if raw_hr_samples and not clean_hr_samples:
+        resting_hr["message"] = "insufficient clean HR data"
     activity = _activity_trend(daily)
     sleep_stages = {
         "rem_sleep_minutes": _rounded(latest_row.get("rem_sleep_minutes")),
@@ -605,6 +729,8 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
         flags.append("Body temperature is elevated.")
     if not flags:
         flags.append("Wearable recovery signals are stable.")
+    if resting_hr["message"] == "insufficient clean HR data" and "insufficient clean HR data" not in flags:
+        flags.append("insufficient clean HR data")
 
     return {
         "status": "ok",

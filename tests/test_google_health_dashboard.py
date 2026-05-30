@@ -31,7 +31,9 @@ def test_google_health_dashboard_flags_sickness_without_diagnosis():
     assert result["sickness_warning"]["status"] == "warning"
     assert "Possible sickness" in result["sickness_warning"]["label"]
     assert result["sickness_warning"]["disclaimer"] == "This is not a diagnosis."
-    assert result["recovery_readiness"]["status"] == "red"
+    assert result["recovery_readiness"]["status"] == "learning_baseline"
+    assert result["recovery_readiness"]["label"] == "Learning"
+    assert result["recovery_readiness"]["provisional_score"] < 60
 
 
 def test_google_health_calories_are_context_until_bodyweight_confirms():
@@ -154,9 +156,59 @@ def test_google_health_missing_heart_signals_lower_confidence_without_penalty():
     assert result["status"] == "ok"
     assert result["resting_hr_vs_baseline"]["status"] == "insufficient_data"
     assert result["hrv"]["status"] == "insufficient_data"
-    assert result["recovery_readiness"]["score"] == 100
-    assert result["recovery_readiness"]["confidence"] == "low"
+    assert result["recovery_readiness"]["score"] is None
+    assert result["recovery_readiness"]["provisional_score"] == 100
+    assert result["recovery_readiness"]["label"] == "Learning"
+    assert result["recovery_readiness"]["confidence"] == "learning"
     assert result["recovery_readiness"]["missing_heart_signals"] is True
+
+
+def test_google_health_first_week_shows_learning_with_same_night_sleep_score():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-26",
+                "source": "google_health",
+                "sleep_hours": 7.1,
+                "sleep_efficiency": 88,
+                "rem_sleep_minutes": 82,
+                "deep_sleep_minutes": 65,
+                "resting_hr": 57,
+                "hrv": 52,
+                "steps": 8200,
+            },
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "sleep_hours": 7.8,
+                "sleep_efficiency": 91,
+                "rem_sleep_minutes": 96,
+                "deep_sleep_minutes": 74,
+                "awake_minutes": 28,
+                "resting_hr": 56,
+                "hrv": 55,
+                "steps": 8700,
+                "active_minutes": 48,
+            },
+        ],
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "ok"
+    assert result["sleep_quality"]["score"] is not None
+    assert result["sleep_quality"]["status"] == "early_data"
+    assert result["sleep_quality"]["provisional"] is True
+    assert result["sleep_quality"]["needed_nights"] == 5
+    assert result["recovery_readiness"]["score"] is None
+    assert result["recovery_readiness"]["provisional_score"] is not None
+    assert result["recovery_readiness"]["label"] == "Learning"
+    assert result["resting_hr_vs_baseline"]["baseline_label"] == "Learning baseline"
+    assert result["hrv"]["baseline_label"] == "Learning baseline"
 
 
 def test_google_health_readiness_merges_same_day_metric_rows():
@@ -199,7 +251,8 @@ def test_google_health_readiness_merges_same_day_metric_rows():
 
     assert result["status"] == "ok"
     assert result["sleep_quality"]["duration_hours"] == 8
-    assert result["resting_hr_vs_baseline"]["status"] == "high"
+    assert result["resting_hr_vs_baseline"]["status"] == "early_data"
+    assert result["resting_hr_vs_baseline"]["baseline_label"] == "Learning baseline"
     assert result["activity_load"]["steps"] == 9200
     assert result["recovery_readiness"]["missing_heart_signals"] is False
     assert result["debug"]["fields_used"]["active_zone_minutes"] == 20
@@ -236,6 +289,36 @@ def test_google_health_zero_sensor_values_are_unavailable_not_real_metrics():
     assert result["reason"] == "connected_no_wearable_metrics"
     assert result["message"] == "Connected, but no wearable metrics are available yet."
     assert result["debug"]["placeholder_rows_ignored"] == 1
+
+
+def test_google_health_dashboard_treats_out_of_range_hr_as_insufficient_clean_data():
+    result = build_google_health_dashboard_signals(
+        wearable_rows=[
+            {
+                "date": "2026-05-27",
+                "source": "google_health",
+                "resting_hr": 0,
+                "resting_hr_baseline": 250,
+                "average_hr": 29,
+                "max_hr": 221,
+                "steps": 8000,
+                "active_minutes": 45,
+            }
+        ],
+        recovery_rows=[],
+        training_rows=[],
+        nutrition_today={"calories": 2600},
+        targets={"target_calories": 2800},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "ok"
+    assert result["resting_hr_vs_baseline"]["status"] == "insufficient_data"
+    assert result["resting_hr_vs_baseline"]["message"] == "insufficient clean HR data"
+    assert result["recovery_readiness"]["missing_heart_signals"] is True
+    assert result["debug"]["clean_hr_diagnostics"]["invalid_hr_samples_dropped"] == 3
+    assert "resting_hr" in result["debug"]["missing_fields"]
 
 
 def test_google_health_dashboard_merges_split_google_health_tables():

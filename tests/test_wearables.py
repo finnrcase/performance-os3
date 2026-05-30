@@ -6,6 +6,7 @@ from src.wearables import (
     add_wearable_metric_entry,
     calculate_training_readiness_signals,
     calculate_wearable_recovery_signals,
+    heart_rate_cleaning_summary,
     load_wearable_metrics,
     normalize_wearable_metric_rows,
     save_wearable_metrics,
@@ -82,6 +83,52 @@ def test_provider_agnostic_wearable_normalization_adds_provider_and_raw_payload(
     assert row["raw_payload"] == '{"record_count":4,"source_file":"export.xml"}'
 
 
+def test_wearable_normalization_nulls_invalid_heart_rate_values():
+    normalized = normalize_wearable_metric_rows(
+        [
+            {
+                "date": "2026-05-24",
+                "source": "google_health",
+                "resting_hr": 0,
+                "average_hr": 29,
+                "max_hr": 221,
+                "workout_average_hr": 140,
+                "workout_max_hr": 185,
+                "resting_hr_baseline": 0,
+                "resting_hr_deviation": 8,
+                "hrv": 0,
+                "steps": 9000,
+            }
+        ],
+        source="google_health",
+    )
+
+    row = normalized.iloc[0]
+    assert row["resting_hr"] is None
+    assert row["average_hr"] is None
+    assert row["max_hr"] is None
+    assert row["resting_hr_baseline"] is None
+    assert row["resting_hr_deviation"] is None
+    assert row["hrv"] is None
+    assert row["workout_average_hr"] == 140
+    assert row["workout_max_hr"] == 185
+    assert row["populated_metric_count"] == 3
+
+
+def test_heart_rate_cleaning_summary_counts_raw_invalid_and_clean_samples():
+    summary = heart_rate_cleaning_summary(
+        [
+            {"resting_hr": 0, "average_hr": 29, "max_hr": 221},
+            {"resting_hr": 58, "average_hr": 90, "max_hr": 170},
+        ]
+    )
+
+    assert summary["raw_hr_samples_received"] == 6
+    assert summary["invalid_hr_samples_dropped"] == 3
+    assert summary["clean_hr_samples_used"] == 3
+    assert summary["invalid_hr_samples_dropped_by_field"] == {"resting_hr": 1, "average_hr": 1, "max_hr": 1}
+
+
 def test_calculate_wearable_recovery_signals_empty_and_missing_columns():
     empty_signals = calculate_wearable_recovery_signals(pd.DataFrame())
     partial_signals = calculate_wearable_recovery_signals(
@@ -93,6 +140,34 @@ def test_calculate_wearable_recovery_signals_empty_and_missing_columns():
     assert partial_signals["status"] == "ok"
     assert partial_signals["latest"]["sleep_hours"] == 6.5
     assert "source" in partial_signals["diagnostics"]["missing_columns"]
+
+
+def test_invalid_hr_samples_do_not_skew_recovery_trends_or_readiness():
+    rows = []
+    for index in range(10):
+        day = pd.Timestamp("2026-05-15") + pd.Timedelta(days=index)
+        rows.append(
+            {
+                "metric_id": f"watch-off-{index}",
+                "date": day.date().isoformat(),
+                "source": "google_health",
+                "sleep_hours": 7.5,
+                "resting_hr": 0 if index >= 7 else 58,
+                "average_hr": 0 if index >= 7 else 88,
+                "max_hr": 0 if index >= 7 else 165,
+                "steps": 8000,
+                "active_minutes": 55,
+            }
+        )
+
+    signals = calculate_wearable_recovery_signals(pd.DataFrame(rows))
+    readiness = calculate_training_readiness_signals(pd.DataFrame(rows))
+
+    assert signals["resting_hr"]["latest"] == 58
+    assert signals["diagnostics"]["invalid_hr_samples_dropped"] == 9
+    assert signals["diagnostics"]["clean_hr_samples_used"] == 21
+    assert readiness["run_recommendation"]["label"] == "Run OK"
+    assert not any("Resting HR is running above baseline" in signal for signal in readiness["signals"])
 
 
 def test_calculate_wearable_recovery_signals_trends():

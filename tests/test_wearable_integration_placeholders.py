@@ -256,6 +256,47 @@ def test_google_health_api_v4_response_normalizes_daily_metrics(monkeypatch):
     assert fetched["fields_populated_count"] > 0
 
 
+def test_google_health_heart_rate_ingestion_drops_invalid_zero_samples(monkeypatch):
+    day = {"year": 2024, "month": 5, "day": 16}
+    monkeypatch.setenv("GOOGLE_HEALTH_API_BASE_URL", "https://health.googleapis.com")
+
+    def fake_get_json(url, _access_token, **_kwargs):
+        if "/pairedDevices" in url:
+            return {"pairedDevices": [{"displayName": "Pixel Watch"}]}
+        if "/dataTypes/daily-resting-heart-rate/" in url:
+            return {"dataPoints": [{"dailyRestingHeartRate": {"date": day, "beatsPerMinute": 0}}]}
+        if "/dataTypes/daily-heart-rate-variability/" in url:
+            return {"dataPoints": [{"dailyHeartRateVariability": {"date": day, "averageHeartRateVariabilityMilliseconds": 0}}]}
+        return {"dataPoints": []}
+
+    def fake_post_json(url, _body, _access_token, **_kwargs):
+        if "/dataTypes/steps/" in url:
+            value = {"steps": {"countSum": "7000"}}
+        elif "/dataTypes/heart-rate/" in url:
+            value = {"heartRate": {"beatsPerMinuteAvg": 0, "beatsPerMinuteMax": 250, "beatsPerMinuteMin": 28}}
+        else:
+            value = {}
+        return {"rollupDataPoints": [{"civilStartTime": {"date": day}, **value}]}
+
+    monkeypatch.setattr(google_health_client, "_get_json", fake_get_json)
+    monkeypatch.setattr(google_health_client, "_post_json", fake_post_json)
+
+    fetched = google_health_client.fetch_daily_metrics("token", start_date="2024-05-16", end_date="2024-05-16")
+    normalized = google_health_client.normalize_daily_metrics(fetched["items"])
+
+    assert len(normalized) == 1
+    assert normalized.iloc[0]["resting_hr"] is None
+    assert normalized.iloc[0]["average_hr"] is None
+    assert normalized.iloc[0]["max_hr"] is None
+    assert normalized.iloc[0]["hrv"] is None
+    assert int(normalized.iloc[0]["steps"]) == 7000
+    assert fetched["clean_hr_diagnostics"]["raw_hr_samples_received"] == 4
+    assert fetched["clean_hr_diagnostics"]["invalid_hr_samples_dropped"] == 4
+    assert fetched["clean_hr_diagnostics"]["clean_hr_samples_used"] == 0
+    assert fetched["normalization_audit"]["heart-rate"]["invalid_hr_samples_dropped"] == 3
+    assert "resting_hr" not in fetched["records"]["heart"][0] or fetched["records"]["heart"][0]["resting_hr"] is None
+
+
 def test_google_health_optional_heart_rate_warning_is_nonfatal(monkeypatch):
     requested_urls = []
     day = {"year": 2024, "month": 5, "day": 16}
