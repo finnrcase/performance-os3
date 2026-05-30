@@ -29,11 +29,48 @@ def test_google_health_dashboard_flags_sickness_without_diagnosis():
 
     assert result["status"] == "ok"
     assert result["sickness_warning"]["status"] == "warning"
+    assert result["sickness_warning"]["severity"] == "strong"
     assert "Possible sickness" in result["sickness_warning"]["label"]
     assert result["sickness_warning"]["disclaimer"] == "This is not a diagnosis."
+    assert result["sickness_warning"]["confidence"] in {"medium", "high"}
+    assert result["sickness_warning"]["top_contributors"]
+    assert "Hydrate and include electrolytes." in result["sickness_warning"]["suggested_actions"]
+    assert "wearable signals look off" in result["sickness_warning"]["notification_copy"]
     assert result["recovery_readiness"]["status"] == "learning_baseline"
     assert result["recovery_readiness"]["label"] == "Learning"
     assert result["recovery_readiness"]["provisional_score"] < 60
+
+
+def test_google_health_sickness_warning_stays_clear_without_meaningful_signal():
+    rows = [
+        {
+            "date": f"2026-05-{21 + index:02d}",
+            "source": "google_health",
+            "sleep_hours": 7.8,
+            "sleep_efficiency": 90,
+            "resting_hr": 55,
+            "hrv": 70,
+            "steps": 8500,
+            "active_minutes": 45,
+        }
+        for index in range(7)
+    ]
+    result = build_google_health_dashboard_signals(
+        wearable_rows=rows,
+        recovery_rows=[],
+        training_rows=[{"date": "2026-05-27", "sets": 20, "rpe": 8, "duration_minutes": 95}],
+        nutrition_today={"calories": 2750, "carbs": 260, "protein": 180},
+        targets={"target_calories": 2800, "protein_grams": 180},
+        body_rows=[],
+        today="2026-05-27",
+    )
+
+    assert result["status"] == "ok"
+    assert result["sickness_warning"]["status"] == "clear"
+    assert result["sickness_warning"]["severity"] == "normal"
+    assert result["sickness_warning"]["abnormal_signals"] == []
+    assert result["sickness_warning"]["suggested_actions"] == []
+    assert result["sickness_warning"]["notification_copy"] == ""
 
 
 def test_google_health_calories_are_context_until_bodyweight_confirms():

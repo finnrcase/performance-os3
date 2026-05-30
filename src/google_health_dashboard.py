@@ -523,6 +523,22 @@ def _activity_signal(row: dict[str, Any], training_rows: list[dict[str, Any]], t
     }
 
 
+def _nutrition_recovery_actions(nutrition_today: dict[str, Any], targets: dict[str, Any]) -> list[str]:
+    actions: list[str] = []
+    calories = _num(nutrition_today.get("calories"))
+    target_calories = _num(targets.get("target_calories"))
+    carbs = _num(nutrition_today.get("carbs")) or _num(nutrition_today.get("carb_grams"))
+    protein = _num(nutrition_today.get("protein")) or _num(nutrition_today.get("protein_grams"))
+    target_protein = _num(targets.get("protein_grams"))
+    if target_calories is not None and calories is not None and calories < target_calories - 350:
+        actions.append("Eat enough today; avoid stacking a large calorie deficit on recovery stress.")
+    if carbs is not None and carbs < 180:
+        actions.append("Bring carbs up if training feels flat or you are doing a hard run.")
+    if target_protein is not None and protein is not None and protein < target_protein * 0.8:
+        actions.append("Prioritize protein with meals while recovery signals normalize.")
+    return actions
+
+
 def _missing_metric_warnings(row: dict[str, Any]) -> list[str]:
     checks = [
         ("sleep", [row.get("sleep_hours"), row.get("total_sleep_minutes")]),
@@ -628,6 +644,7 @@ def build_google_health_dashboard_signals(
     skin_temperature = _num(row.get("skin_temperature"))
     body_temperature = _positive_num(row.get("body_temperature"))
     abnormal_signals: list[str] = []
+    confounders: list[str] = []
     if rhr["abnormal"]:
         abnormal_signals.append("Resting HR elevated above baseline")
     if hrv["abnormal"]:
@@ -644,6 +661,18 @@ def build_google_health_dashboard_signals(
         abnormal_signals.append("Body temperature elevated")
     if subjective["abnormal"]:
         abnormal_signals.append("Poor recovery reported")
+    steps_value = _num(activity.get("steps"))
+    active_value = _num(activity.get("active_minutes"))
+    low_activity_signal = bool(
+        (steps_value is not None and steps_value <= 3000)
+        or (active_value is not None and active_value <= 15)
+    )
+    if low_activity_signal and abnormal_signals and not activity["high_load"]:
+        abnormal_signals.append("Unusually low activity with recovery stress")
+    if activity["high_load"]:
+        confounders.append("Recent hard training or high activity load may explain some recovery stress.")
+    if activity["recent_hard_sets"] and float(activity["recent_hard_sets"]) >= 35:
+        confounders.append("Recent hard sets are elevated; interpret illness risk alongside training fatigue.")
     vitals_or_heart_available = any(
         value is not None
         for value in (
@@ -658,21 +687,86 @@ def build_google_health_dashboard_signals(
             subjective.get("sleep_quality"),
         )
     )
+    vitals_signal_present = any(
+        signal in abnormal_signals
+        for signal in (
+            "Breathing rate elevated",
+            "SpO2 lower than normal",
+            "Skin temperature elevated vs baseline",
+            "Body temperature elevated",
+        )
+    )
+    strong_sickness_pattern = bool(
+        len(abnormal_signals) >= 3
+        or (rhr["abnormal"] and hrv["abnormal"])
+        or (vitals_signal_present and len(abnormal_signals) >= 2)
+    )
     sickness_status = (
         "warning"
-        if len(abnormal_signals) >= 2
+        if strong_sickness_pattern
         else "watch"
         if abnormal_signals
         else "clear"
         if vitals_or_heart_available
         else "insufficient_data"
     )
+    sickness_severity = "strong" if sickness_status == "warning" else "mild" if sickness_status == "watch" else "normal" if sickness_status == "clear" else "unavailable"
+    sickness_confidence = (
+        "high"
+        if sickness_severity == "strong" and len(abnormal_signals) >= 3 and not confounders
+        else "medium"
+        if sickness_severity in {"mild", "strong"}
+        else "low"
+        if sickness_status == "insufficient_data"
+        else "normal"
+    )
+    suggested_actions = []
+    if sickness_severity in {"mild", "strong"}:
+        if sleep["poor_sleep"]:
+            suggested_actions.append("Prioritize 8-9h sleep tonight.")
+        if activity["high_load"]:
+            suggested_actions.append("Reduce training intensity or skip the hard run today.")
+        suggested_actions.extend(_nutrition_recovery_actions(nutrition_today, targets))
+        suggested_actions.extend([
+            "Hydrate and include electrolytes.",
+            "Eat enough carbs and protein.",
+            "Choose vitamin C from food or a normal supplement dose.",
+            "Use zinc only if you already tolerate it; avoid excessive dosing.",
+            "Avoid alcohol while signals are off.",
+        ])
+    deduped_actions = list(dict.fromkeys(suggested_actions))
+    short_signal_labels = {
+        "Resting HR elevated above baseline": "HR up",
+        "HRV suppressed below baseline": "HRV down",
+        "Poor sleep quality": "sleep poor",
+        "Breathing rate elevated": "breathing rate up",
+        "SpO2 lower than normal": "SpO2 low",
+        "Skin temperature elevated vs baseline": "temperature up",
+        "Body temperature elevated": "temperature up",
+        "Poor recovery reported": "fatigue high",
+        "Unusually low activity with recovery stress": "activity unusually low",
+    }
+    short_contributors = [short_signal_labels.get(signal, signal) for signal in abnormal_signals[:3]]
+    contributor_text = ", ".join(short_contributors) if short_contributors else "recovery markers changed"
+    notification_copy = (
+        f"Your wearable signals look off: {contributor_text}. Consider reducing training and prioritizing recovery today."
+        if sickness_severity == "strong"
+        else f"One recovery signal looks off: {contributor_text}. Keep training flexible and prioritize recovery today."
+        if sickness_severity == "mild"
+        else ""
+    )
     sickness_warning = {
         "status": sickness_status,
-        "label": "Possible sickness / elevated recovery risk" if sickness_status == "warning" else "Recovery watch" if sickness_status == "watch" else "No sickness pattern detected" if sickness_status == "clear" else "Sickness pattern unavailable",
+        "severity": sickness_severity,
+        "label": "Possible sickness pattern detected" if sickness_status == "warning" else "Possible recovery dip / early illness signal" if sickness_status == "watch" else "No sickness pattern detected" if sickness_status == "clear" else "Sickness pattern unavailable",
         "message": "Consider reducing intensity today. Prioritize sleep, hydration, and easy movement." if sickness_status == "warning" else "One recovery marker is off; keep intensity honest." if sickness_status == "watch" else "No multi-signal sickness pattern from available wearable data." if sickness_status == "clear" else "No wearable vitals are available to evaluate sickness/recovery stress.",
         "abnormal_signals": abnormal_signals,
+        "top_contributors": abnormal_signals[:3],
         "signal_count": len(abnormal_signals),
+        "confidence": sickness_confidence,
+        "confounders": confounders,
+        "suggested_actions": deduped_actions,
+        "notification_copy": notification_copy,
         "disclaimer": "This is not a diagnosis.",
     }
     readiness_score = 100.0

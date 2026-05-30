@@ -533,10 +533,16 @@ type GoogleHealthDashboardSignals = {
   };
   sickness_warning?: {
     status?: string;
+    severity?: string;
     label?: string;
     message?: string;
     abnormal_signals?: string[];
+    top_contributors?: string[];
     signal_count?: number;
+    confidence?: string;
+    confounders?: string[];
+    suggested_actions?: string[];
+    notification_copy?: string;
     disclaimer?: string;
   };
   resting_hr_vs_baseline?: {
@@ -2190,6 +2196,7 @@ function stringList(value: unknown, fallback: string[] = []) {
 
 const ACCENT_THEME_STORAGE_KEY = "performance-os-accent-theme";
 const DAILY_NUTRITION_HISTORY_EXPANDED_KEY = "performance-os-daily-nutrition-history-expanded";
+const SICKNESS_ALERT_STORAGE_KEY = "performance-os-sickness-alert-v1";
 
 const accentThemeOptions: Array<{ id: AccentTheme; label: string; swatch: string }> = [
   { id: "lime", label: "Lime", swatch: "bg-lime-300" },
@@ -5093,6 +5100,179 @@ function DashboardHealthSignalTile({
   );
 }
 
+function sicknessAlertLevel(warning?: GoogleHealthDashboardSignals["sickness_warning"] | null) {
+  const severity = String(warning?.severity || "").toLowerCase();
+  const status = String(warning?.status || "").toLowerCase();
+  if (severity === "strong" || status === "warning") return "strong";
+  if (severity === "mild" || status === "watch") return "mild";
+  if (status === "insufficient_data" || severity === "unavailable") return "unavailable";
+  return "normal";
+}
+
+function sicknessIsoDate(value?: string | null) {
+  const parsed = String(value || "").slice(0, 10);
+  return /^\d{4}-\d{2}-\d{2}$/.test(parsed) ? parsed : new Date().toISOString().slice(0, 10);
+}
+
+function addIsoDays(value: string, days: number) {
+  const date = new Date(`${value}T00:00:00`);
+  date.setDate(date.getDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function daysBetweenIso(start: string, end: string) {
+  const startMs = new Date(`${start}T00:00:00`).getTime();
+  const endMs = new Date(`${end}T00:00:00`).getTime();
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return 0;
+  return Math.max(0, Math.floor((endMs - startMs) / 86_400_000));
+}
+
+type StoredSicknessAlertState = {
+  lastLevel?: string;
+  dismissedDate?: string;
+  remindAfter?: string;
+  strongFirstDate?: string;
+  lastNotificationKey?: string;
+  strongPersistenceNotifiedForStartDate?: string;
+};
+
+function readStoredSicknessAlertState(): StoredSicknessAlertState {
+  try {
+    return JSON.parse(window.localStorage.getItem(SICKNESS_ALERT_STORAGE_KEY) || "{}") as StoredSicknessAlertState;
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredSicknessAlertState(next: StoredSicknessAlertState) {
+  window.localStorage.setItem(SICKNESS_ALERT_STORAGE_KEY, JSON.stringify(next));
+}
+
+function SicknessDashboardBanner({
+  warning,
+  date,
+  onOpenRecovery,
+}: Readonly<{
+  warning?: GoogleHealthDashboardSignals["sickness_warning"] | null;
+  date?: string | null;
+  onOpenRecovery: () => void;
+}>) {
+  const level = sicknessAlertLevel(warning);
+  const alertDate = sicknessIsoDate(date);
+  const [hidden, setHidden] = useState(true);
+  const [showNotificationCopy, setShowNotificationCopy] = useState(false);
+
+  useEffect(() => {
+    if (level === "normal" || level === "unavailable") {
+      const stored = readStoredSicknessAlertState();
+      writeStoredSicknessAlertState({ ...stored, lastLevel: "normal", strongFirstDate: undefined });
+      setHidden(true);
+      setShowNotificationCopy(false);
+      return;
+    }
+
+    const stored = readStoredSicknessAlertState();
+    const hiddenForDate = stored.dismissedDate === alertDate || Boolean(stored.remindAfter && alertDate < stored.remindAfter);
+    const strongFirstDate = level === "strong"
+      ? stored.lastLevel === "strong" && stored.strongFirstDate
+        ? stored.strongFirstDate
+        : alertDate
+      : undefined;
+    const strongPersists = level === "strong" && strongFirstDate ? daysBetweenIso(strongFirstDate, alertDate) >= 1 : false;
+    const stateChangedToMild = level === "mild" && (!stored.lastLevel || stored.lastLevel === "normal" || stored.lastLevel === "unavailable");
+    const stateChangedToStrong = level === "strong" && stored.lastLevel !== "strong";
+    const persistenceNotification = strongPersists && stored.strongPersistenceNotifiedForStartDate !== strongFirstDate;
+    const notificationKey = `${alertDate}:${level}:${persistenceNotification ? "persisting" : "change"}`;
+    const shouldNotify = !hiddenForDate
+      && (stateChangedToMild || stateChangedToStrong || persistenceNotification)
+      && stored.lastNotificationKey !== notificationKey;
+    const next: StoredSicknessAlertState = {
+      ...stored,
+      lastLevel: level,
+      strongFirstDate,
+      lastNotificationKey: shouldNotify ? notificationKey : stored.lastNotificationKey,
+      strongPersistenceNotifiedForStartDate: persistenceNotification ? strongFirstDate : stored.strongPersistenceNotifiedForStartDate,
+    };
+    writeStoredSicknessAlertState(next);
+    setHidden(hiddenForDate);
+    setShowNotificationCopy(shouldNotify);
+  }, [alertDate, level]);
+
+  if (hidden || level === "normal" || level === "unavailable") return null;
+
+  const isStrong = level === "strong";
+  const contributors = stringList(warning?.top_contributors, stringList(warning?.abnormal_signals)).slice(0, 3);
+  const actions = stringList(warning?.suggested_actions).slice(0, 5);
+  const confounders = stringList(warning?.confounders).slice(0, 2);
+  const notificationCopy = warning?.notification_copy || "Your wearable signals look off. Consider reducing training and prioritizing recovery today.";
+
+  const dismissToday = () => {
+    const stored = readStoredSicknessAlertState();
+    writeStoredSicknessAlertState({ ...stored, dismissedDate: alertDate });
+    setHidden(true);
+  };
+  const remindTomorrow = () => {
+    const stored = readStoredSicknessAlertState();
+    writeStoredSicknessAlertState({ ...stored, remindAfter: addIsoDays(alertDate, 1) });
+    setHidden(true);
+  };
+
+  return (
+    <div className={cx(
+      "col-span-full rounded-lg border p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]",
+      isStrong
+        ? "border-orange-300/35 bg-[linear-gradient(135deg,rgba(251,146,60,0.18),rgba(244,63,94,0.09))] text-orange-50"
+        : "border-amber-300/30 bg-amber-300/[0.09] text-amber-50",
+    )}>
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className={cx("grid h-9 w-9 place-items-center rounded-lg border", isStrong ? "border-orange-200/35 bg-orange-300/15" : "border-amber-200/30 bg-amber-300/12")}>
+              <AlertTriangle className="h-4 w-4" />
+            </span>
+            <div>
+              <p className="text-sm font-semibold uppercase tracking-[0.14em] opacity-75">{isStrong ? "Recovery alert" : "Recovery watch"}</p>
+              <h3 className="text-lg font-semibold text-white">{warning?.label || (isStrong ? "Possible sickness pattern detected" : "Possible recovery dip / early illness signal")}</h3>
+            </div>
+          </div>
+          <p className="mt-3 max-w-3xl text-sm leading-6 text-zinc-100/85">{warning?.message || "Consider reducing intensity today and prioritizing recovery."}</p>
+          {showNotificationCopy ? (
+            <p className="mt-3 max-w-3xl rounded-lg border border-white/10 bg-black/15 p-3 text-sm font-semibold text-white">{notificationCopy}</p>
+          ) : null}
+          <div className="mt-3 flex flex-wrap gap-2">
+            {contributors.map((signal) => (
+              <span key={signal} className="rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs text-zinc-50">{signal}</span>
+            ))}
+            {warning?.confidence ? (
+              <span className="rounded-full border border-white/10 bg-white/[0.06] px-2.5 py-1 text-xs capitalize text-zinc-100">{warning.confidence} confidence</span>
+            ) : null}
+          </div>
+          {confounders.length ? <p className="mt-2 text-xs leading-5 text-zinc-200/75">{confounders.join(" ")}</p> : null}
+          {actions.length ? (
+            <div className="mt-4 grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+              {actions.map((action) => (
+                <span key={action} className="rounded-lg border border-white/10 bg-black/10 px-3 py-2 text-xs leading-5 text-zinc-100">{action}</span>
+              ))}
+            </div>
+          ) : null}
+          <p className="mt-3 text-[11px] text-zinc-300/75">{warning?.disclaimer || "This is not a medical diagnosis."}</p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
+          <button onClick={onOpenRecovery} className="h-9 rounded-lg border border-white/15 bg-white/[0.06] px-3 text-sm font-semibold text-white transition hover:bg-white/[0.1]">
+            Open recovery
+          </button>
+          <button onClick={remindTomorrow} className="h-9 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.06]">
+            Remind tomorrow
+          </button>
+          <button onClick={dismissToday} aria-label="Dismiss sickness alert today" className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 text-zinc-100 transition hover:bg-white/[0.06]">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function statusBadgeClass(status: string) {
   if (status === "green") {
     return "border-emerald-300/25 bg-emerald-300/10 text-emerald-100";
@@ -5373,6 +5553,11 @@ function Dashboard({
           </div>
         </Card>
       ) : null}
+      <SicknessDashboardBanner
+        warning={sicknessWarning}
+        date={googleHealth?.date || data?.date}
+        onOpenRecovery={() => setActivePage("recovery")}
+      />
       {targetDecisionNotice ? (
         <div className={cx(
           "col-span-full rounded-lg border px-4 py-3 text-sm shadow-[0_12px_40px_rgba(0,0,0,0.18)] backdrop-blur",
@@ -5561,13 +5746,15 @@ function Dashboard({
                   status={recoveryReadiness?.status}
                   icon={Gauge}
                 />
-                <DashboardHealthSignalTile
-                  title="Sickness Warning"
-                  value={sicknessWarning?.label || "No sickness pattern detected"}
-                  detail={sicknessWarning?.message || "No multi-signal sickness pattern from available wearable data."}
-                  status={sicknessWarning?.status}
-                  icon={AlertTriangle}
-                />
+                {sicknessAlertLevel(sicknessWarning) === "normal" || sicknessAlertLevel(sicknessWarning) === "unavailable" ? null : (
+                  <DashboardHealthSignalTile
+                    title="Sickness Warning"
+                    value={sicknessWarning?.label || "Possible recovery dip / early illness signal"}
+                    detail={sicknessWarning?.message || "Wearable recovery signals are off today."}
+                    status={sicknessWarning?.status}
+                    icon={AlertTriangle}
+                  />
+                )}
                 <DashboardHealthSignalTile
                   title="Resting HR vs Baseline"
                   value={restingHrLearning ? `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / Learning` : restingHrUnavailable ? restingHrUnavailableLabel : `${formatDashboardNumber(restingHrSignal?.resting_hr, " bpm")} / ${formatDashboardNumber(restingHrSignal?.baseline, " bpm")}`}
@@ -8082,6 +8269,7 @@ function RecoveryPage({
   const sicknessStatus = sicknessWarning?.status
     ?? trainingReadiness?.sickness_warning?.status
     ?? (localSicknessSignals.length >= 2 ? "warning" : localSicknessSignals.length === 1 ? "watch" : "clear");
+  const sicknessLevel = sicknessAlertLevel(sicknessWarning ?? { status: sicknessStatus });
   const sicknessLabel = sicknessWarning?.label
     ?? trainingReadiness?.sickness_warning?.label
     ?? (sicknessStatus === "warning" ? "Elevated Recovery Risk" : sicknessStatus === "watch" ? "Watch" : "Clear");
@@ -8297,29 +8485,33 @@ function RecoveryPage({
         <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
           {recoverySummaryCards.map((card) => <AnalyticsStatTile key={card.label} {...card} />)}
         </div>
-        <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessStatus))}>
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-            <div>
-              <p className="text-sm font-semibold text-white">{sicknessLabel}</p>
-              <p className="mt-2 text-sm leading-6 text-zinc-300">
-                {sicknessStatus === "warning"
-                  ? "Possible elevated recovery stress. Consider reducing intensity today and prioritize hydration and sleep."
-                  : sicknessStatus === "watch"
-                    ? "One recovery signal is outside baseline. Keep intensity flexible and watch how you feel."
-                    : "No multi-signal sickness pattern from available wearable data."}
-              </p>
-              <p className="mt-1 text-[11px] text-zinc-500">{sicknessWarning?.disclaimer || trainingReadiness?.sickness_warning?.disclaimer || "This is not a medical diagnosis."}</p>
+        {sicknessLevel === "normal" || sicknessLevel === "unavailable" ? (
+          <p className="rounded-lg border border-white/10 bg-white/[0.025] p-3 text-sm leading-6 text-zinc-400">
+            No sickness pattern detected from available wearable data.
+          </p>
+        ) : (
+          <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessStatus))}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p className="text-sm font-semibold text-white">{sicknessLabel}</p>
+                <p className="mt-2 text-sm leading-6 text-zinc-300">
+                  {sicknessStatus === "warning"
+                    ? "Possible elevated recovery stress. Consider reducing intensity today and prioritize hydration and sleep."
+                    : "One recovery signal is outside baseline. Keep intensity flexible and watch how you feel."}
+                </p>
+                <p className="mt-1 text-[11px] text-zinc-500">{sicknessWarning?.disclaimer || trainingReadiness?.sickness_warning?.disclaimer || "This is not a medical diagnosis."}</p>
+              </div>
+              <span className="w-fit rounded-full border border-white/10 bg-black/15 px-3 py-1 text-xs font-semibold capitalize text-zinc-100">
+                {sicknessStatus.replaceAll("_", " ")}
+              </span>
             </div>
-            <span className="w-fit rounded-full border border-white/10 bg-black/15 px-3 py-1 text-xs font-semibold capitalize text-zinc-100">
-              {sicknessStatus.replaceAll("_", " ")}
-            </span>
+            {sicknessSignals.length ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {sicknessSignals.slice(0, 7).map((signal) => <span key={signal} className="rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs text-zinc-100">{signal}</span>)}
+              </div>
+            ) : null}
           </div>
-          {sicknessSignals.length ? (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {sicknessSignals.slice(0, 7).map((signal) => <span key={signal} className="rounded-full border border-white/10 bg-black/15 px-2.5 py-1 text-xs text-zinc-100">{signal}</span>)}
-            </div>
-          ) : null}
-        </div>
+        )}
         {wearableFlags.length ? <p className="rounded-lg border border-white/10 bg-white/[0.025] p-3 text-sm leading-6 text-zinc-300">{wearableFlags[0]}</p> : null}
         <div className="grid gap-4 lg:grid-cols-2">
           <AnalyticsChartBlock title="Sleep duration trend" empty={!sleepDurationData.length}>
