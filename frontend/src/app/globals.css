@@ -51,14 +51,14 @@
   --sidebar-accent-foreground: oklch(0.205 0 0);
   --sidebar-border: oklch(0.922 0 0);
   --sidebar-ring: oklch(0.708 0 0);
-  --ios-surface: rgba(255, 255, 255, 0.078);
-  --ios-surface-strong: rgba(255, 255, 255, 0.12);
-  --ios-surface-muted: rgba(255, 255, 255, 0.045);
-  --ios-border: rgba(255, 255, 255, 0.13);
-  --ios-border-strong: rgba(255, 255, 255, 0.2);
-  --ios-shadow: 0 20px 70px -46px rgba(0, 0, 0, 0.9), 0 1px 0 rgba(255, 255, 255, 0.06) inset;
-  --ios-radius: 24px;
-  --ios-radius-sm: 18px;
+  --ios-surface: rgba(255, 255, 255, 0.095);
+  --ios-surface-strong: rgba(255, 255, 255, 0.145);
+  --ios-surface-muted: rgba(255, 255, 255, 0.058);
+  --ios-border: rgba(255, 255, 255, 0.16);
+  --ios-border-strong: rgba(255, 255, 255, 0.26);
+  --ios-shadow: 0 34px 110px -66px rgba(0, 0, 0, 0.98), 0 1px 0 rgba(255, 255, 255, 0.11) inset, 0 0 0 1px rgba(255, 255, 255, 0.035) inset;
+  --ios-radius: 30px;
+  --ios-radius-sm: 22px;
 }
 
 [data-accent-theme="pink"] {
@@ -274,11 +274,16 @@ button {
 .apple-health-card {
   border-radius: var(--ios-radius);
   box-shadow: var(--ios-shadow);
-  backdrop-filter: blur(22px) saturate(145%);
+  backdrop-filter: blur(26px) saturate(165%);
+  position: relative;
 }
 
 .apple-health-card-subtle {
   border-radius: var(--ios-radius-sm);
+  box-shadow:
+    0 18px 60px -50px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(255, 255, 255, 0.075) inset;
+  backdrop-filter: blur(18px) saturate(140%);
 }
 
 .apple-health-tap {
@@ -290,9 +295,12 @@ button {
 }
 
 .apple-health-tap:hover {
-  transform: translateY(-1px);
+  transform: translateY(-2px);
   border-color: var(--ios-border-strong);
   background-color: var(--ios-surface);
+  box-shadow:
+    0 22px 70px -58px rgba(0, 0, 0, 0.95),
+    0 1px 0 rgba(255, 255, 255, 0.1) inset;
 }
 
 .apple-health-tap:active {

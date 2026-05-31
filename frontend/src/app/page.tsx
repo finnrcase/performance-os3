@@ -63,6 +63,12 @@ import {
 } from "recharts";
 import { Component, FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
+import { Alert as ShadAlert } from "@/components/ui/alert";
+import { Badge as ShadBadge } from "@/components/ui/badge";
+import { Button as ShadButton } from "@/components/ui/button";
+import { Card as ShadCard, CardContent as ShadCardContent } from "@/components/ui/card";
+import { Progress as ShadProgress } from "@/components/ui/progress";
+import { Separator as ShadSeparator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -2599,9 +2605,17 @@ async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
 
 function AppleHealthCard({ children, className }: Readonly<{ children: React.ReactNode; className?: string }>) {
   return (
-    <section className={cx("apple-health-card border border-white/10 bg-white/[0.065] p-5 text-zinc-100", className)}>
-      {children}
-    </section>
+    <ShadCard
+      data-premium-card
+      className={cx(
+        "apple-health-card !block !gap-0 !rounded-[30px] !py-0 border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.105),rgba(255,255,255,0.052)_48%,rgba(255,255,255,0.03))] p-5 text-zinc-100 ring-1 ring-white/[0.06]",
+        className,
+      )}
+    >
+      <ShadCardContent className="px-0">
+        {children}
+      </ShadCardContent>
+    </ShadCard>
   );
 }
 
@@ -2620,20 +2634,26 @@ function MetricIcon({
 }>) {
   return (
     <span className={cx(
-      "grid shrink-0 place-items-center rounded-2xl border shadow-[0_10px_30px_-20px_currentColor]",
-      size === "sm" ? "h-8 w-8" : size === "lg" ? "h-12 w-12" : "h-10 w-10",
+      "grid shrink-0 place-items-center rounded-[22px] border bg-black/20 shadow-[0_12px_34px_-20px_currentColor,inset_0_1px_0_rgba(255,255,255,0.16)] ring-1 ring-white/[0.055] backdrop-blur transition duration-200",
+      size === "sm" ? "h-9 w-9" : size === "lg" ? "h-14 w-14" : "h-11 w-11",
       tone || "accent-outline",
     )}>
-      <Icon className={cx(size === "sm" ? "h-4 w-4" : size === "lg" ? "h-5 w-5" : "h-[18px] w-[18px]")} strokeWidth={2.2} />
+      <Icon className={cx(size === "sm" ? "h-[18px] w-[18px]" : size === "lg" ? "h-6 w-6" : "h-5 w-5")} strokeWidth={2.45} />
     </span>
   );
 }
 
 function StatusBadge({ children, status }: Readonly<{ children: React.ReactNode; status?: string }>) {
   return (
-    <span className={cx("inline-flex w-fit items-center rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", dashboardHealthTone(status))}>
+    <ShadBadge
+      variant="outline"
+      className={cx(
+        "inline-flex h-auto w-fit items-center rounded-full border px-3 py-1.5 text-[11px] font-bold uppercase tracking-[0.12em] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur capitalize",
+        dashboardHealthTone(status),
+      )}
+    >
       {children}
-    </span>
+    </ShadBadge>
   );
 }
 
@@ -2643,9 +2663,9 @@ function TrendPill({ children, tone = "normal" }: Readonly<{ children: React.Rea
 
 function WarningBanner({ children, tone = "watch", className }: Readonly<{ children: React.ReactNode; tone?: string; className?: string }>) {
   return (
-    <div className={cx("rounded-[22px] border p-4 shadow-[0_18px_50px_-38px_rgba(0,0,0,0.8)]", dashboardHealthTone(tone), className)}>
+    <ShadAlert className={cx("rounded-[28px] border p-5 shadow-[0_24px_80px_-48px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.12)] backdrop-blur", dashboardHealthTone(tone), className)}>
       {children}
-    </div>
+    </ShadAlert>
   );
 }
 
@@ -2662,8 +2682,8 @@ function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; 
   return (
     <div className="mb-5 flex flex-wrap items-start justify-between gap-3 sm:gap-4">
       <div className="min-w-0">
-        {eyebrow ? <p className="accent-text mb-1.5 text-[11px] font-bold uppercase tracking-[0.2em]">{eyebrow}</p> : null}
-        <h2 className="text-xl font-semibold tracking-[-0.01em] text-white">{title}</h2>
+        {eyebrow ? <p className="accent-text mb-2 text-[11px] font-black uppercase tracking-[0.24em]">{eyebrow}</p> : null}
+        <h2 className="text-[1.35rem] font-semibold leading-tight tracking-[-0.025em] text-white sm:text-2xl">{title}</h2>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
     </div>
@@ -2822,13 +2842,14 @@ function DebugReportButton({
 }>) {
   const report = buildErrorDebugReport({ title, message, stack, componentStack, userAction, stateSummary });
   return (
-    <button
+    <ShadButton
       type="button"
+      variant="outline"
       onClick={() => void copyDebugReport(report)}
-      className="mt-4 rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.04]"
+      className="mt-4 rounded-2xl border-white/10 bg-white/[0.04] px-3 py-2 text-sm font-semibold text-zinc-100 hover:bg-white/[0.08]"
     >
       Copy debug report
-    </button>
+    </ShadButton>
   );
 }
 
@@ -3037,11 +3058,11 @@ function MetricCard({
   accent: string;
 }>) {
   return (
-    <Card className="apple-health-tap min-h-[150px]">
+    <Card className="apple-health-tap min-h-[158px] overflow-hidden border-white/[0.14] bg-[radial-gradient(circle_at_18%_0%,rgba(255,255,255,0.095),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.11),rgba(255,255,255,0.035))]">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{title}</p>
-          <p className="apple-health-number mt-3 text-3xl font-semibold tracking-[-0.025em] text-white">{value}</p>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-zinc-500">{title}</p>
+          <p className="apple-health-number mt-3 text-4xl font-semibold tracking-[-0.045em] text-white">{value}</p>
           <p className="mt-2 text-sm leading-6 text-zinc-400">{detail}</p>
         </div>
         <MetricIcon icon={Icon} tone={accent} size="lg" />
@@ -3169,6 +3190,14 @@ function macroIconAccent(label: string) {
   return "accent-outline";
 }
 
+function macroProgressIndicatorClass(label: string) {
+  const kind = macroMoleculeKind(label);
+  if (kind === "protein") return "[&_[data-slot=progress-indicator]]:bg-teal-300 [&_[data-slot=progress-indicator]]:shadow-[0_0_18px_rgba(45,212,191,0.5)]";
+  if (kind === "carbs") return "[&_[data-slot=progress-indicator]]:bg-blue-300 [&_[data-slot=progress-indicator]]:shadow-[0_0_18px_rgba(96,165,250,0.5)]";
+  if (kind === "fat") return "[&_[data-slot=progress-indicator]]:bg-amber-300 [&_[data-slot=progress-indicator]]:shadow-[0_0_18px_rgba(251,191,36,0.5)]";
+  return "[&_[data-slot=progress-indicator]]:bg-emerald-300 [&_[data-slot=progress-indicator]]:shadow-[0_0_18px_rgba(190,242,100,0.5)]";
+}
+
 type MacroProgress = {
   label: string;
   unit: string;
@@ -3198,17 +3227,17 @@ function buildMacroProgress(label: string, unit: string, eaten: number, target: 
 function MacroProgressCard({ macro }: Readonly<{ macro: MacroProgress }>) {
   const moleculeKind = macroMoleculeKind(macro.label);
   return (
-    <div className="apple-health-card-subtle apple-health-tap group border border-white/10 bg-white/[0.045] p-4">
+    <div className="apple-health-card-subtle apple-health-tap group border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.085),rgba(255,255,255,0.032))] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           {moleculeKind ? (
-            <div className={cx("rounded-2xl border p-2.5 transition group-hover:bg-white/[0.045]", macroIconAccent(macro.label))}>
+            <div className={cx("rounded-[22px] border p-3 shadow-[0_12px_30px_-22px_currentColor,inset_0_1px_0_rgba(255,255,255,0.14)] transition group-hover:scale-105 group-hover:bg-white/[0.055]", macroIconAccent(macro.label))}>
               <MacroMoleculeIcon kind={moleculeKind} />
             </div>
           ) : null}
           <div>
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{macro.label}</p>
-            <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">
+            <p className="text-[11px] font-black uppercase tracking-[0.18em] text-zinc-500">{macro.label}</p>
+            <p className="apple-health-number mt-2 text-3xl font-semibold tracking-[-0.04em] text-white">
               {Math.round(macro.eaten)}
               <span className="text-sm font-medium text-zinc-500"> / {Math.round(macro.target)}{macro.unit}</span>
             </p>
@@ -3218,9 +3247,14 @@ function MacroProgressCard({ macro }: Readonly<{ macro: MacroProgress }>) {
           {macro.over > 0 ? `+${Math.round(macro.over)}${macro.unit} over` : `${Math.round(macro.left)}${macro.unit} left`}
         </TrendPill>
       </div>
-      <div className="mt-4 h-2 rounded-full bg-white/10">
-        <div className={cx("h-2 rounded-full", macro.accent)} style={{ width: `${macro.percent}%` }} />
-      </div>
+      <ShadProgress
+        value={macro.percent}
+        aria-label={`${macro.label} progress`}
+        className={cx(
+          "mt-4 h-2.5 bg-black/25 shadow-[inset_0_1px_2px_rgba(0,0,0,0.45)]",
+          macroProgressIndicatorClass(macro.label),
+        )}
+      />
       <p className="mt-2 text-xs text-zinc-500">{Math.round(macro.percent)}% complete</p>
     </div>
   );
@@ -3576,10 +3610,10 @@ function FoodTypeBadge({
 }>) {
   const kind = foodTypeIconKind(label, foodName, iconType);
   return (
-    <span className="inline-flex items-center gap-1.5 rounded-full bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">
+    <ShadBadge variant="secondary" className="inline-flex h-auto items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.06] px-2 py-1 text-xs font-medium text-zinc-400">
       <FoodTypeGlyph kind={kind} className="h-3.5 w-3.5 text-zinc-500" />
       {label || "Food"}
-    </span>
+    </ShadBadge>
   );
 }
 
@@ -3638,11 +3672,11 @@ function FoodLogList({
         const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
         const amountLabel = foodAmountLabel(entry);
         return (
-          <div key={entryId} className="apple-health-card-subtle apple-health-tap border border-white/10 bg-white/[0.04] p-3" data-testid="food-log-row">
+          <div key={entryId} className="apple-health-card-subtle apple-health-tap border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.025))] p-3.5" data-testid="food-log-row">
             <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
               <div className="flex min-w-0 items-start gap-3">
                 {selectedIcon ? (
-                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border">
+                  <span className="accent-outline mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-[22px] border shadow-[0_12px_30px_-22px_currentColor]">
                     <FoodIcon type={selectedIcon} className="h-5 w-5" />
                   </span>
                 ) : null}
@@ -3664,28 +3698,32 @@ function FoodLogList({
                 </div>
                 <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                   {onEdit ? (
-                    <button
+                    <ShadButton
                       type="button"
+                      variant="outline"
+                      size="sm"
                       onClick={() => onEdit(entry)}
                       disabled={!entry.food_log_id || isOptimistic || isSaving}
-                      className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="apple-health-tap w-fit rounded-2xl border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Edit ${entry.food_name || "food entry"}`}
                     >
                       <Pencil className="h-3.5 w-3.5" />
                       Edit
-                    </button>
+                    </ShadButton>
                   ) : null}
                   {onRemove ? (
-                    <button
+                    <ShadButton
                       type="button"
+                      variant="outline"
+                      size="sm"
                       onClick={() => onRemove(entry)}
                       disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
-                      className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="apple-health-tap w-fit rounded-2xl border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Remove ${entry.food_name || "food entry"}`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
                       {removingId === entry.food_log_id ? "Removing..." : "Delete"}
-                    </button>
+                    </ShadButton>
                   ) : null}
                 </div>
               </div>
@@ -3695,24 +3733,27 @@ function FoodLogList({
               <div className="mt-4 border-t border-white/10 pt-4">
                 <FoodIconPicker value={editingIcon ?? null} onChange={onEditingIconChange} />
                 <div className="mt-3 flex flex-wrap justify-end gap-2">
-                  <button
+                  <ShadButton
                     type="button"
+                    variant="outline"
+                    size="sm"
                     onClick={onCancelEdit}
                     disabled={isSaving}
-                    className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                    className="rounded-2xl border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <X className="h-3.5 w-3.5" />
                     Cancel
-                  </button>
-                  <button
+                  </ShadButton>
+                  <ShadButton
                     type="button"
+                    size="sm"
                     onClick={() => onSaveIcon(entry)}
                     disabled={isSaving}
-                    className="accent-bg inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                    className="accent-bg rounded-2xl px-3 py-2 text-xs font-semibold text-zinc-950 transition disabled:cursor-not-allowed disabled:opacity-60"
                   >
                     <Check className="h-3.5 w-3.5" />
                     {isSaving ? "Saving..." : "Save"}
-                  </button>
+                  </ShadButton>
                 </div>
               </div>
             ) : null}
@@ -3808,11 +3849,11 @@ function FoodTimelineList({
           onDragEnd();
         }}
         disabled={!item.persistable || savingOrder}
-        className="apple-health-tap mt-0.5 flex h-9 w-9 shrink-0 touch-none cursor-grab items-center justify-center rounded-2xl border border-white/10 bg-zinc-950/60 text-zinc-500 hover:border-emerald-300/30 hover:text-emerald-100 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-35"
+        className="apple-health-tap mt-0.5 flex h-10 w-10 shrink-0 touch-none cursor-grab items-center justify-center rounded-[20px] border border-white/[0.14] bg-zinc-950/70 text-zinc-400 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] hover:border-emerald-300/35 hover:text-emerald-100 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-35"
         aria-label="Drag to reorder food timeline"
         title={item.persistable ? "Drag to reorder" : "Save pending entry before reordering"}
       >
-        <GripVertical className="h-4 w-4" />
+        <GripVertical className="h-5 w-5" strokeWidth={2.5} />
       </button>
     );
   };
@@ -3828,12 +3869,12 @@ function FoodTimelineList({
             {label ? (
               <div className="mb-2 mt-4 grid gap-1 first:mt-0">
                 <div className="flex items-center gap-2">
-                  <span className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-white/10" />
+                  <ShadSeparator className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-white/10" />
                   <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-zinc-950/85 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300 shadow-[0_10px_30px_-24px_rgba(255,255,255,0.7)]">
                     <GripVertical className="h-3.5 w-3.5 text-zinc-500" />
                     {label.title}
                   </span>
-                  <span className="h-px flex-1 bg-gradient-to-l from-transparent via-white/10 to-white/10" />
+                  <ShadSeparator className="h-px flex-1 bg-gradient-to-l from-transparent via-white/10 to-white/10" />
                 </div>
                 <p className="text-center text-[11px] font-medium text-zinc-500">{label.detail}</p>
               </div>
@@ -3859,8 +3900,8 @@ function FoodTimelineList({
               onDragEnd={onDragEnd}
               className={cx(
                 item.type === "workout_marker"
-                  ? "rounded-[26px] border border-emerald-300/35 bg-[radial-gradient(circle_at_16%_0%,rgba(16,185,129,0.2),transparent_42%),linear-gradient(135deg,rgba(16,185,129,0.13),rgba(255,255,255,0.035))] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_18px_45px_-36px_rgba(16,185,129,0.8)]"
-                  : "apple-health-card-subtle border border-white/10 bg-white/[0.04] p-3",
+                  ? "rounded-[30px] border border-emerald-300/45 bg-[radial-gradient(circle_at_16%_0%,rgba(16,185,129,0.32),transparent_42%),linear-gradient(135deg,rgba(16,185,129,0.18),rgba(255,255,255,0.045))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.16),0_24px_70px_-44px_rgba(16,185,129,0.95)]"
+                  : "apple-health-card-subtle border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.025))] p-3.5",
                 "transition duration-150",
                 isDragging ? "scale-[0.99] opacity-60" : "opacity-100",
               )}
@@ -3870,8 +3911,8 @@ function FoodTimelineList({
               {item.type === "workout_marker" ? (
                 <div className="flex min-w-0 items-start gap-3">
                   {dragButton(item)}
-                  <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-emerald-300/25 bg-emerald-300/15 text-emerald-100 shadow-[0_0_22px_rgba(16,185,129,0.16)]">
-                    <Dumbbell className="h-5 w-5" />
+                  <span className="mt-0.5 flex h-14 w-14 shrink-0 items-center justify-center rounded-[24px] border border-emerald-300/35 bg-emerald-300/[0.18] text-emerald-100 shadow-[0_0_30px_rgba(16,185,129,0.22),inset_0_1px_0_rgba(255,255,255,0.14)]">
+                    <Dumbbell className="h-6 w-6" strokeWidth={2.5} />
                   </span>
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -3904,7 +3945,7 @@ function FoodTimelineList({
                           <div className="flex min-w-0 items-start gap-3">
                             {dragButton(item)}
                             {selectedIcon ? (
-                              <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border">
+                              <span className="accent-outline mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-[22px] border shadow-[0_12px_30px_-22px_currentColor]">
                                 <FoodIcon type={selectedIcon} className="h-5 w-5" />
                               </span>
                             ) : null}
@@ -3926,28 +3967,32 @@ function FoodTimelineList({
                             </div>
                             <div className="flex shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                               {onEdit ? (
-                                <button
+                                <ShadButton
                                   type="button"
+                                  variant="outline"
+                                  size="sm"
                                   onClick={() => onEdit(entry)}
                                   disabled={!entry.food_log_id || isOptimistic || isSaving}
-                                  className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                  className="apple-health-tap w-fit rounded-2xl border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50"
                                   aria-label={`Edit ${entry.food_name || "food entry"}`}
                                 >
                                   <Pencil className="h-3.5 w-3.5" />
                                   Edit
-                                </button>
+                                </ShadButton>
                               ) : null}
                               {onRemove ? (
-                                <button
+                                <ShadButton
                                   type="button"
+                                  variant="outline"
+                                  size="sm"
                                   onClick={() => onRemove(entry)}
                                   disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
-                                  className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                  className="apple-health-tap w-fit rounded-2xl border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
                                   aria-label={`Remove ${entry.food_name || "food entry"}`}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                   {removingId === entry.food_log_id ? "Removing..." : "Delete"}
-                                </button>
+                                </ShadButton>
                               ) : null}
                             </div>
                           </div>
@@ -3957,24 +4002,27 @@ function FoodTimelineList({
                           <div className="mt-4 border-t border-white/10 pt-4">
                             <FoodIconPicker value={editingIcon ?? null} onChange={onEditingIconChange} />
                             <div className="mt-3 flex flex-wrap justify-end gap-2">
-                              <button
+                              <ShadButton
                                 type="button"
+                                variant="outline"
+                                size="sm"
                                 onClick={onCancelEdit}
                                 disabled={isSaving}
-                                className="inline-flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs font-semibold text-zinc-300 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50"
+                                className="rounded-2xl border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-300 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50"
                               >
                                 <X className="h-3.5 w-3.5" />
                                 Cancel
-                              </button>
-                              <button
+                              </ShadButton>
+                              <ShadButton
                                 type="button"
+                                size="sm"
                                 onClick={() => onSaveIcon(entry)}
                                 disabled={isSaving}
-                                className="accent-bg inline-flex items-center gap-2 rounded-lg px-3 py-2 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-60"
+                                className="accent-bg rounded-2xl px-3 py-2 text-xs font-semibold text-zinc-950 transition disabled:cursor-not-allowed disabled:opacity-60"
                               >
                                 <Check className="h-3.5 w-3.5" />
                                 {isSaving ? "Saving..." : "Save"}
-                              </button>
+                              </ShadButton>
                             </div>
                           </div>
                         ) : null}
@@ -4631,13 +4679,13 @@ function presetMacroText(item: Pick<FoodShortcut, "protein" | "carbs" | "fat">) 
 function PresetStatusPill({ status }: Readonly<{ status?: QuickFoodLogStatus }>) {
   const pendingCount = status?.pending ?? 0;
   if (status?.error) {
-    return <span className="rounded-full border border-red-300/25 bg-red-300/15 px-2 py-1 text-[11px] font-semibold text-red-100">Retry</span>;
+    return <ShadBadge variant="outline" className="h-auto rounded-full border-red-300/25 bg-red-300/15 px-2 py-1 text-[11px] font-semibold text-red-100">Retry</ShadBadge>;
   }
   if (pendingCount > 0) {
-    return <span className="rounded-full border border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">{pendingCount > 1 ? `Adding ${pendingCount}` : "Adding"}</span>;
+    return <ShadBadge variant="outline" className="h-auto rounded-full border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">{pendingCount > 1 ? `Adding ${pendingCount}` : "Adding"}</ShadBadge>;
   }
   if (status?.added) {
-    return <span className="rounded-full border border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">Added</span>;
+    return <ShadBadge variant="outline" className="h-auto rounded-full border-emerald-300/25 bg-emerald-300/15 px-2 py-1 text-[11px] font-semibold text-emerald-100">Added</ShadBadge>;
   }
   return null;
 }
@@ -4651,14 +4699,14 @@ function FoodPresetCardIcon({
 }>) {
   return (
     <span
-      className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-white/20 bg-black/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.14),0_10px_24px_rgba(0,0,0,0.2)] transition duration-200 group-hover:scale-110 group-hover:border-white/30 group-active:scale-95"
+      className="grid h-14 w-14 shrink-0 place-items-center rounded-[24px] border border-white/25 bg-black/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.18),0_14px_34px_rgba(0,0,0,0.26)] transition duration-200 group-hover:scale-110 group-hover:border-white/35 group-active:scale-95"
       style={{
         color: tone.accent,
         background: `linear-gradient(145deg, rgba(255, 255, 255, 0.12), ${tone.iconBackground})`,
-        filter: `drop-shadow(0 0 10px ${tone.glow})`,
+        filter: `drop-shadow(0 0 14px ${tone.glow})`,
       }}
     >
-      <FoodPresetIcon type={type} className="h-8 w-8 drop-shadow-sm" />
+      <FoodPresetIcon type={type} className="h-9 w-9 drop-shadow-sm" />
     </span>
   );
 }
@@ -4687,7 +4735,7 @@ function PresetFoodTile({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-[22px] border p-3.5 text-left text-white shadow-[0_18px_50px_-36px_rgba(0,0,0,0.9)] transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60",
+        "group relative flex min-h-[154px] min-w-0 flex-col overflow-hidden rounded-[28px] border p-4 text-left text-white shadow-[0_22px_70px_-40px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.12)] transition duration-200 hover:-translate-y-1 hover:scale-[1.012] hover:shadow-[0_30px_85px_-42px_rgba(0,0,0,0.95)] disabled:cursor-not-allowed disabled:opacity-60",
         editing ? "ring-1 ring-white/35" : "",
       )}
       style={{
@@ -4698,8 +4746,9 @@ function PresetFoodTile({
       title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
     >
       <span className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-80" style={{ background: `linear-gradient(90deg, transparent, ${tone.accent}, transparent)` }} />
-      <span className="pointer-events-none absolute bottom-3 left-0 top-3 w-1 rounded-r-full opacity-80" style={{ backgroundColor: tone.accent }} />
-      <span className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full opacity-20 blur-2xl transition group-hover:opacity-35" style={{ backgroundColor: tone.accent }} />
+      <span className="pointer-events-none absolute bottom-4 left-0 top-4 w-1.5 rounded-r-full opacity-85" style={{ backgroundColor: tone.accent }} />
+      <span className="pointer-events-none absolute -right-10 -top-12 h-32 w-32 rounded-full opacity-24 blur-3xl transition group-hover:opacity-45" style={{ backgroundColor: tone.accent }} />
+      <span className="pointer-events-none absolute inset-0 bg-[linear-gradient(125deg,rgba(255,255,255,0.16),transparent_32%,transparent_72%,rgba(255,255,255,0.06))] opacity-70 transition group-hover:opacity-100" />
       <span className="relative z-10 flex items-start justify-between gap-3">
         <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
           {category}
@@ -4707,8 +4756,8 @@ function PresetFoodTile({
         <FoodPresetCardIcon type={iconType} tone={tone} />
       </span>
       <span className="relative z-10 mt-3 flex min-h-0 flex-1 flex-col justify-end gap-1">
-        <span className="line-clamp-2 text-base font-semibold leading-5 tracking-normal text-white">{shortcut.shortcut_name}</span>
-        <span className="text-sm font-semibold text-white/90">{Math.round(Number(shortcut.calories) || 0)} kcal</span>
+        <span className="line-clamp-2 text-lg font-semibold leading-5 tracking-[-0.02em] text-white">{shortcut.shortcut_name}</span>
+        <span className="text-base font-semibold text-white/90">{Math.round(Number(shortcut.calories) || 0)} kcal</span>
         <span className="text-xs font-medium text-white/62">{presetMacroText(shortcut)}</span>
       </span>
       <span className="relative z-10 mt-3 flex items-center justify-between gap-2">
@@ -4752,12 +4801,12 @@ function PresetFoodEditor({
         <TextInput label="Sodium optional mg" type="number" min={0} step="any" value={shortcut.sodium ?? ""} onChange={(value) => onChange({ ...shortcut, sodium: value === "" ? null : Number(value) })} />
       </div>
       <div className="mt-4 flex flex-wrap gap-2">
-        <button type="button" onClick={onSave} disabled={saving || !shortcut.shortcut_name.trim()} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60">
+        <ShadButton type="button" onClick={onSave} disabled={saving || !shortcut.shortcut_name.trim()} className="accent-bg rounded-2xl px-3 py-2 text-sm font-semibold text-zinc-950 transition disabled:cursor-not-allowed disabled:opacity-60">
           {saving ? "Saving..." : isDefaultPresetShortcut(shortcut) ? "Save preset" : "Save edits"}
-        </button>
-        <button type="button" onClick={onCancel} disabled={saving} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200 transition hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:opacity-50">
+        </ShadButton>
+        <ShadButton type="button" variant="outline" onClick={onCancel} disabled={saving} className="rounded-2xl border-white/10 bg-white/[0.035] px-3 py-2 text-sm font-semibold text-zinc-200 hover:bg-white/[0.075] disabled:cursor-not-allowed disabled:opacity-50">
           Cancel
-        </button>
+        </ShadButton>
       </div>
     </div>
   );
@@ -4790,19 +4839,19 @@ function SupplementsTile({
       onClick={toggleTaken}
       aria-pressed={taken}
       className={cx(
-        "apple-health-tap group w-full rounded-[22px] border p-4 text-left duration-300",
+        "apple-health-tap group w-full rounded-[28px] border p-4 text-left duration-300 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]",
         taken
-          ? "border-cyan-300/30 bg-cyan-300/[0.08] shadow-[0_0_28px_rgba(34,211,238,0.10)]"
-          : "border-white/10 bg-white/[0.035] hover:border-white/15 hover:bg-white/[0.055]",
+          ? "border-cyan-300/35 bg-[radial-gradient(circle_at_15%_0%,rgba(34,211,238,0.18),transparent_36%),rgba(34,211,238,0.08)] shadow-[0_0_34px_rgba(34,211,238,0.12)]"
+          : "border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.025))] hover:border-white/20 hover:bg-white/[0.065]",
       )}
     >
       <div className="flex items-center justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
           <span className={cx(
-            "mt-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-lg border transition",
-            taken ? "border-cyan-200/35 bg-cyan-200/12 text-cyan-100" : "border-white/10 bg-black/20 text-zinc-500 group-hover:text-zinc-300",
+            "mt-0.5 grid h-12 w-12 shrink-0 place-items-center rounded-[22px] border transition",
+            taken ? "border-cyan-200/35 bg-cyan-200/[0.12] text-cyan-100" : "border-white/[0.13] bg-black/20 text-zinc-500 group-hover:text-zinc-300",
           )}>
-            <Pill className="h-4 w-4" />
+            <Pill className="h-5 w-5" strokeWidth={2.45} />
           </span>
           <div className="min-w-0">
             <p className="text-sm font-semibold text-white">Supplements</p>
@@ -4834,14 +4883,14 @@ function EmptyState({
   onAction,
 }: Readonly<{ title: string; description: string; action?: string; onAction?: () => void }>) {
   return (
-    <div className="apple-health-card-subtle border border-dashed border-white/15 bg-white/[0.035] p-6">
-      <p className="text-base font-semibold text-white">{title}</p>
+    <div className="apple-health-card-subtle border border-dashed border-white/[0.18] bg-[radial-gradient(circle_at_10%_0%,rgba(255,255,255,0.08),transparent_34%),rgba(255,255,255,0.04)] p-6">
+      <p className="text-lg font-semibold tracking-[-0.02em] text-white">{title}</p>
       <p className="mt-2 text-sm leading-6 text-zinc-400">{description}</p>
       {action && onAction ? (
-        <button onClick={onAction} className="accent-bg apple-health-tap mt-4 inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-semibold">
+        <ShadButton onClick={onAction} className="accent-bg apple-health-tap mt-4 rounded-2xl px-4 py-2.5 text-sm font-semibold text-zinc-950 shadow-[0_16px_36px_-26px_var(--accent-glow)]">
           <Plus className="h-4 w-4" />
           {action}
-        </button>
+        </ShadButton>
       ) : null}
     </div>
   );
@@ -4954,7 +5003,7 @@ function ChartFrame({ children, className }: Readonly<{ children: React.ReactNod
   return (
     <div
       className={cx(
-        "apple-health-card-subtle relative overflow-hidden border border-white/10 bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.075),transparent_34%),rgba(255,255,255,0.032)] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+        "apple-health-card-subtle relative overflow-hidden border border-white/[0.13] bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.105),transparent_34%),rgba(255,255,255,0.04)] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_18px_60px_-48px_rgba(0,0,0,0.9)]",
         className,
       )}
     >
@@ -5217,13 +5266,13 @@ function DashboardHealthSignalTile({
   icon: React.ElementType;
 }>) {
   return (
-    <div className="apple-health-card-subtle apple-health-tap min-h-[132px] border border-white/10 bg-white/[0.045] p-4">
+    <div className="apple-health-card-subtle apple-health-tap min-h-[148px] border border-white/[0.13] bg-[radial-gradient(circle_at_80%_0%,rgba(255,255,255,0.08),transparent_34%),rgba(255,255,255,0.055)] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{title}</p>
-          <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">{value}</p>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-zinc-500">{title}</p>
+          <p className="apple-health-number mt-3 text-3xl font-semibold tracking-[-0.04em] text-white">{value}</p>
         </div>
-        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} />
+        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} size="lg" />
       </div>
       <p className="mt-3 text-xs leading-5 text-zinc-400">{detail}</p>
     </div>
@@ -5246,28 +5295,31 @@ function DashboardPanel({
   index?: number;
 }>) {
   return (
-    <motion.section
+    <motion.div
       initial={{ opacity: 0, y: 14, filter: "blur(6px)" }}
       animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
       transition={{ ...DASHBOARD_CARD_TRANSITION, delay: dashboardMotionDelay(index) }}
       whileHover={{ y: -2 }}
       whileTap={{ scale: 0.997 }}
-      className={cx("apple-health-card border border-white/10 bg-white/[0.065] p-5 text-zinc-100 will-change-transform", className)}
+      className={cx("will-change-transform", className)}
     >
-      {children}
-    </motion.section>
+      <ShadCard className={cx("apple-health-card !block !gap-0 !rounded-[30px] !py-0 border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.105),rgba(255,255,255,0.052)_48%,rgba(255,255,255,0.03))] p-5 text-zinc-100 ring-1 ring-white/[0.055]", className)}>
+        <ShadCardContent className="px-0">{children}</ShadCardContent>
+      </ShadCard>
+    </motion.div>
   );
 }
 
 function DashboardActionButton({ children, onClick, className }: Readonly<{ children: React.ReactNode; onClick: () => void; className?: string }>) {
   return (
-    <button
+    <ShadButton
       type="button"
+      variant="outline"
       onClick={onClick}
-      className={cx("apple-health-tap inline-flex h-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.055] px-3 text-sm font-semibold text-zinc-100 shadow-[0_12px_30px_-24px_rgba(0,0,0,0.7)]", className)}
+      className={cx("apple-health-tap h-10 rounded-2xl border-white/[0.13] bg-white/[0.075] px-3 text-sm font-semibold text-zinc-100 shadow-[0_18px_45px_-34px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.08)] hover:bg-white/[0.105]", className)}
     >
       {children}
-    </button>
+    </ShadButton>
   );
 }
 
@@ -5291,14 +5343,16 @@ function DashboardSummaryStat({
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ ...DASHBOARD_CARD_TRANSITION, delay: 0.08 + dashboardMotionDelay(index) }}
-      className="apple-health-card-subtle apple-health-tap min-h-[128px] border border-white/10 bg-white/[0.052] p-4"
+      whileHover={{ y: -3, scale: 1.008 }}
+      whileTap={{ scale: 0.995 }}
+      className="apple-health-card-subtle apple-health-tap min-h-[146px] overflow-hidden border border-white/[0.13] bg-[radial-gradient(circle_at_85%_0%,rgba(255,255,255,0.11),transparent_36%),linear-gradient(145deg,rgba(255,255,255,0.092),rgba(255,255,255,0.035))] p-4"
     >
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</p>
-          <p className="apple-health-number mt-3 truncate text-2xl font-semibold tracking-[-0.03em] text-white">{value}</p>
+          <p className="text-[11px] font-black uppercase tracking-[0.2em] text-zinc-500">{label}</p>
+          <p className="apple-health-number mt-4 truncate text-3xl font-semibold tracking-[-0.045em] text-white">{value}</p>
         </div>
-        <MetricIcon icon={icon} tone={tone} />
+        <MetricIcon icon={icon} tone={tone} size="lg" />
       </div>
       <p className="mt-3 line-clamp-2 text-xs leading-5 text-zinc-400">{detail}</p>
     </motion.div>
@@ -5428,20 +5482,20 @@ function SicknessDashboardBanner({
 
   return (
     <div className={cx(
-      "col-span-full rounded-[26px] border p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]",
+      "col-span-full overflow-hidden rounded-[32px] border p-5 shadow-[0_30px_110px_-58px_rgba(0,0,0,0.98),inset_0_1px_0_rgba(255,255,255,0.14)] ring-1 ring-white/[0.055]",
       isStrong
-        ? "border-orange-300/35 bg-[linear-gradient(135deg,rgba(251,146,60,0.18),rgba(244,63,94,0.09))] text-orange-50"
-        : "border-amber-300/30 bg-amber-300/[0.09] text-amber-50",
+        ? "border-orange-300/45 bg-[radial-gradient(circle_at_12%_0%,rgba(251,146,60,0.34),transparent_34%),linear-gradient(135deg,rgba(251,146,60,0.24),rgba(244,63,94,0.13))] text-orange-50"
+        : "border-amber-300/38 bg-[radial-gradient(circle_at_12%_0%,rgba(251,191,36,0.24),transparent_34%),linear-gradient(135deg,rgba(251,191,36,0.15),rgba(255,255,255,0.045))] text-amber-50",
     )}>
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={cx("grid h-10 w-10 place-items-center rounded-2xl border", isStrong ? "border-orange-200/35 bg-orange-300/15" : "border-amber-200/30 bg-amber-300/12")}>
-              <AlertTriangle className="h-4 w-4" />
+            <span className={cx("grid h-14 w-14 place-items-center rounded-[24px] border shadow-[0_0_32px_rgba(251,146,60,0.18)]", isStrong ? "border-orange-200/45 bg-orange-300/20" : "border-amber-200/38 bg-amber-300/15")}>
+              <AlertTriangle className="h-6 w-6" strokeWidth={2.5} />
             </span>
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.14em] opacity-75">{isStrong ? "Recovery alert" : "Recovery watch"}</p>
-              <h3 className="text-lg font-semibold text-white">{warning?.label || (isStrong ? "Possible sickness pattern detected" : "Possible recovery dip / early illness signal")}</h3>
+              <h3 className="text-2xl font-semibold tracking-[-0.03em] text-white">{warning?.label || (isStrong ? "Possible sickness pattern detected" : "Possible recovery dip / early illness signal")}</h3>
             </div>
           </div>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-zinc-100/85">{warning?.message || "Consider reducing intensity today and prioritizing recovery."}</p>
@@ -8429,13 +8483,13 @@ function AnalyticsStatTile({
   icon: React.ElementType;
 }>) {
   return (
-    <div className="apple-health-card-subtle apple-health-tap min-h-[132px] border border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.028))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+    <div className="apple-health-card-subtle apple-health-tap min-h-[152px] border border-white/[0.13] bg-[radial-gradient(circle_at_85%_0%,rgba(255,255,255,0.095),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.09),rgba(255,255,255,0.032))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.1)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</p>
-          <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">{value}</p>
+          <p className="text-[11px] font-black uppercase tracking-[0.18em] text-zinc-500">{label}</p>
+          <p className="apple-health-number mt-3 text-3xl font-semibold tracking-[-0.045em] text-white">{value}</p>
         </div>
-        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} />
+        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} size="lg" />
       </div>
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {status ? <StatusBadge status={status}>{String(status).replaceAll("_", " ")}</StatusBadge> : null}
@@ -8455,7 +8509,7 @@ function AnalyticsChartBlock({
   empty?: boolean;
 }>) {
   return (
-    <div className="apple-health-card-subtle border border-white/10 bg-white/[0.035] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.065)]">
+    <div className="apple-health-card-subtle border border-white/[0.13] bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.028))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
       <p className="inline-flex items-center gap-2 text-sm font-semibold tracking-[-0.01em] text-white">
         <span className="h-2 w-2 rounded-full bg-[var(--accent-primary)] shadow-[0_0_14px_rgba(132,204,22,0.45)]" />
         {title}
@@ -17533,8 +17587,8 @@ function HomeContent() {
       <div className="accent-page-glow pointer-events-none fixed inset-0" />
       {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen dissolving={startupTransitioning} /> : null}
       <div className={cx("startup-app-shell relative flex h-screen overflow-hidden", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
-        <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.055),rgba(255,255,255,0.018)_42%,rgba(0,0,0,0.2))] p-5 shadow-[18px_0_60px_-52px_rgba(0,0,0,0.9)] backdrop-blur-2xl lg:block">
-          <div className="mb-8 flex items-center gap-3 rounded-[28px] border border-white/10 bg-white/[0.035] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
+        <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/[0.12] bg-[radial-gradient(circle_at_30%_0%,rgba(190,242,100,0.09),transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.075),rgba(255,255,255,0.024)_42%,rgba(0,0,0,0.24))] p-5 shadow-[24px_0_80px_-58px_rgba(0,0,0,0.95)] backdrop-blur-2xl lg:block">
+          <div className="mb-8 flex items-center gap-3 rounded-[30px] border border-white/[0.13] bg-white/[0.055] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.1),0_18px_60px_-50px_rgba(0,0,0,0.95)]">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/POSLOGO.png"
@@ -17548,7 +17602,7 @@ function HomeContent() {
               <p className="text-xs text-zinc-500">Health intelligence</p>
             </div>
           </div>
-          <nav className="relative rounded-[28px] border border-white/10 bg-black/20 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_55px_-48px_rgba(0,0,0,0.9)]">
+          <nav className="relative rounded-[30px] border border-white/[0.13] bg-black/25 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_22px_65px_-48px_rgba(0,0,0,0.95)]">
             <motion.span
               aria-hidden="true"
               className={cx(
@@ -17604,7 +17658,7 @@ function HomeContent() {
         </aside>
 
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <header className="mobile-safe-header z-20 shrink-0 border-b border-white/10 bg-[#07080b]/82 px-4 py-4 shadow-[0_18px_60px_-54px_rgba(0,0,0,0.95)] backdrop-blur-2xl sm:px-6 lg:px-8">
+          <header className="mobile-safe-header z-20 shrink-0 border-b border-white/[0.12] bg-[#07080b]/86 px-4 py-4 shadow-[0_22px_80px_-58px_rgba(0,0,0,0.98)] backdrop-blur-2xl sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex min-w-0 items-start gap-3">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -17626,7 +17680,7 @@ function HomeContent() {
                   onClick={() => void refreshAll()}
                   whileTap={{ scale: 0.985 }}
                   transition={{ duration: 0.18, ease: "easeOut" }}
-                  className="apple-health-tap inline-flex h-10 items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.055] px-3 text-sm font-semibold text-zinc-200 shadow-[0_16px_45px_-38px_rgba(0,0,0,0.9)]"
+                  className="apple-health-tap inline-flex h-10 items-center gap-2 rounded-2xl border border-white/[0.13] bg-white/[0.075] px-3 text-sm font-semibold text-zinc-200 shadow-[0_18px_55px_-42px_rgba(0,0,0,0.95),inset_0_1px_0_rgba(255,255,255,0.08)]"
                 >
                   <RefreshCw className="h-4 w-4" />
                   Refresh
@@ -17635,7 +17689,7 @@ function HomeContent() {
             </div>
             <div
               ref={mobileNavRef}
-              className="relative mt-4 hidden overflow-x-auto rounded-[28px] border border-white/10 bg-white/[0.045] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_50px_-44px_rgba(0,0,0,0.9)] [scrollbar-width:none] sm:block lg:hidden [&::-webkit-scrollbar]:hidden"
+              className="relative mt-4 hidden overflow-x-auto rounded-[30px] border border-white/[0.13] bg-white/[0.06] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_20px_60px_-46px_rgba(0,0,0,0.95)] [scrollbar-width:none] sm:block lg:hidden [&::-webkit-scrollbar]:hidden"
             >
               <span
                 aria-hidden="true"
@@ -17797,10 +17851,10 @@ function HomeContent() {
             )}
           </div>
         </section>
-        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#07080b]/82 px-3 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 shadow-2xl shadow-black/40 backdrop-blur-2xl sm:hidden" aria-label="Primary navigation">
+        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/[0.12] bg-[#07080b]/88 px-3 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 shadow-2xl shadow-black/50 backdrop-blur-2xl sm:hidden" aria-label="Primary navigation">
           <div
             ref={bottomNavRef}
-            className="relative overflow-x-auto rounded-[28px] border border-white/10 bg-white/[0.045] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_50px_-42px_rgba(0,0,0,0.95)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            className="relative overflow-x-auto rounded-[30px] border border-white/[0.13] bg-white/[0.06] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08),0_22px_70px_-46px_rgba(0,0,0,0.98)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
           >
             <span
               aria-hidden="true"
