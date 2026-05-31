@@ -1,7 +1,10 @@
 "use client";
 
 import * as Sentry from "@sentry/nextjs";
+import { motion } from "framer-motion";
+import { toast } from "sonner";
 import {
+  Activity,
   Apple,
   AlertTriangle,
   BarChart3,
@@ -22,6 +25,7 @@ import {
   HeartPulse,
   Leaf,
   Milk,
+  Moon,
   Pencil,
   Pill,
   Plus,
@@ -32,6 +36,7 @@ import {
   Sparkles,
   Star,
   Target,
+  Thermometer,
   Trash2,
   Utensils,
   WandSparkles,
@@ -58,6 +63,8 @@ import {
 } from "recharts";
 import { Component, FormEvent, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ErrorInfo } from "react";
 import { publicApiBaseLabel, publicApiUrl } from "@/lib/api-base";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Toaster } from "@/components/ui/sonner";
 
 function apiUrl(path: string) {
   return publicApiUrl(path);
@@ -2590,20 +2597,62 @@ async function apiUpload<T>(path: string, formData: FormData): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-function Card({ children, className }: Readonly<{ children: React.ReactNode; className?: string }>) {
+function AppleHealthCard({ children, className }: Readonly<{ children: React.ReactNode; className?: string }>) {
   return (
-    <section className={cx("rounded-lg border border-white/10 bg-zinc-950/70 p-5 shadow-2xl shadow-black/20 backdrop-blur", className)}>
+    <section className={cx("apple-health-card border border-white/10 bg-white/[0.065] p-5 text-zinc-100", className)}>
       {children}
     </section>
   );
 }
 
+function Card({ children, className }: Readonly<{ children: React.ReactNode; className?: string }>) {
+  return <AppleHealthCard className={className}>{children}</AppleHealthCard>;
+}
+
+function MetricIcon({
+  icon: Icon,
+  tone,
+  size = "md",
+}: Readonly<{
+  icon: React.ElementType;
+  tone?: string;
+  size?: "sm" | "md" | "lg";
+}>) {
+  return (
+    <span className={cx(
+      "grid shrink-0 place-items-center rounded-2xl border shadow-[0_10px_30px_-20px_currentColor]",
+      size === "sm" ? "h-8 w-8" : size === "lg" ? "h-12 w-12" : "h-10 w-10",
+      tone || "accent-outline",
+    )}>
+      <Icon className={cx(size === "sm" ? "h-4 w-4" : size === "lg" ? "h-5 w-5" : "h-[18px] w-[18px]")} strokeWidth={2.2} />
+    </span>
+  );
+}
+
+function StatusBadge({ children, status }: Readonly<{ children: React.ReactNode; status?: string }>) {
+  return (
+    <span className={cx("inline-flex w-fit items-center rounded-full border px-2.5 py-1 text-xs font-semibold capitalize", dashboardHealthTone(status))}>
+      {children}
+    </span>
+  );
+}
+
+function TrendPill({ children, tone = "normal" }: Readonly<{ children: React.ReactNode; tone?: string }>) {
+  return <StatusBadge status={tone}>{children}</StatusBadge>;
+}
+
+function WarningBanner({ children, tone = "watch", className }: Readonly<{ children: React.ReactNode; tone?: string; className?: string }>) {
+  return (
+    <div className={cx("rounded-[22px] border p-4 shadow-[0_18px_50px_-38px_rgba(0,0,0,0.8)]", dashboardHealthTone(tone), className)}>
+      {children}
+    </div>
+  );
+}
+
 function TitleWithIcon({ icon: Icon, children }: Readonly<{ icon: React.ComponentType<{ className?: string }>; children: React.ReactNode }>) {
   return (
-    <span className="inline-flex min-w-0 items-center gap-2">
-      <span className="accent-outline grid h-8 w-8 shrink-0 place-items-center rounded-lg border">
-        <Icon className="h-4 w-4" />
-      </span>
+    <span className="inline-flex min-w-0 items-center gap-2.5">
+      <MetricIcon icon={Icon} size="sm" />
       <span className="min-w-0 truncate">{children}</span>
     </span>
   );
@@ -2611,10 +2660,10 @@ function TitleWithIcon({ icon: Icon, children }: Readonly<{ icon: React.Componen
 
 function SectionHeader({ eyebrow, title, action }: Readonly<{ eyebrow?: string; title: React.ReactNode; action?: React.ReactNode }>) {
   return (
-    <div className="mb-4 flex flex-wrap items-start justify-between gap-3 sm:gap-4">
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-3 sm:gap-4">
       <div className="min-w-0">
-        {eyebrow ? <p className="accent-text mb-1 text-xs font-semibold uppercase tracking-[0.18em]">{eyebrow}</p> : null}
-        <h2 className="text-lg font-semibold text-white">{title}</h2>
+        {eyebrow ? <p className="accent-text mb-1.5 text-[11px] font-bold uppercase tracking-[0.2em]">{eyebrow}</p> : null}
+        <h2 className="text-xl font-semibold tracking-[-0.01em] text-white">{title}</h2>
       </div>
       {action ? <div className="shrink-0">{action}</div> : null}
     </div>
@@ -2646,12 +2695,18 @@ function StartupLoadingScreen({ dissolving }: Readonly<{ dissolving: boolean }>)
   }, []);
 
   return (
-    <div className={cx("startup-screen fixed inset-0 z-50 overflow-hidden text-zinc-100", dissolving && "is-dissolving")}>
+    <div className={cx("startup-screen fixed inset-0 z-50 overflow-hidden bg-[#07080b] text-zinc-100", dissolving && "is-dissolving")}>
       <div className="startup-background-image absolute inset-0" aria-hidden="true" />
-      <div className="startup-overlay-layer absolute inset-0 bg-[radial-gradient(circle_at_50%_38%,rgba(84,113,62,0.08),rgba(8,9,10,0.46)_44%,rgba(0,0,0,0.88)_100%)]" />
-      <div className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(180deg,rgba(16,17,19,0.82)_0%,rgba(9,10,11,0.42)_42%,rgba(0,0,0,0.86)_100%)]" />
+      <div
+        className="startup-overlay-layer absolute inset-0 bg-[radial-gradient(circle_at_50%_42%,rgba(190,242,100,0.14),transparent_30%),radial-gradient(circle_at_50%_88%,rgba(113,113,122,0.16),transparent_34%),linear-gradient(180deg,rgba(8,9,12,0.18),rgba(2,2,3,0.76))]"
+        aria-hidden="true"
+      />
+      <div
+        className="startup-overlay-layer absolute inset-0 bg-[linear-gradient(120deg,rgba(255,255,255,0.075),transparent_24%,transparent_72%,rgba(255,255,255,0.04))]"
+        aria-hidden="true"
+      />
       <div className="relative flex min-h-dvh items-center justify-center px-6">
-        <div className="-translate-y-[7vh] text-center">
+        <div className="-translate-y-[3vh] text-center">
           <div className="startup-logo-dissolve startup-logo-shell mx-auto">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
@@ -2664,12 +2719,12 @@ function StartupLoadingScreen({ dissolving }: Readonly<{ dissolving: boolean }>)
           </div>
           <div className="startup-loading-details">
             <div className="mt-9 flex justify-center">
-              <span className="startup-spinner h-8 w-8 rounded-full" aria-hidden="true" />
+              <span className="startup-spinner h-7 w-7 rounded-full" aria-hidden="true" />
             </div>
             <p
               aria-live="polite"
               className={cx(
-                "mt-5 min-h-6 text-sm font-medium tracking-[0.02em] text-zinc-200 transition-opacity duration-300 sm:text-base",
+                "mt-5 min-h-6 text-sm font-medium tracking-[0.02em] text-zinc-200/90 transition-opacity duration-300 sm:text-base",
                 messageVisible ? "opacity-100" : "opacity-0",
               )}
             >
@@ -2807,7 +2862,7 @@ class TargetSectionErrorBoundary extends Component<
   render() {
     if (this.state.hasError) {
       return (
-        <Card className="border-amber-300/25 bg-amber-300/[0.06]">
+        <WarningBanner tone="watch">
           <p className="font-medium text-amber-100">{this.props.title}</p>
           <p className="mt-2 text-sm leading-6 text-amber-100/75">{this.props.description ?? "Insufficient data to render this section."}</p>
           {this.state.message ? <p className="mt-2 text-xs leading-5 text-amber-100/55">{this.state.message}</p> : null}
@@ -2819,7 +2874,7 @@ class TargetSectionErrorBoundary extends Component<
             userAction={this.props.userAction}
             stateSummary={this.props.stateSummary}
           />
-        </Card>
+        </WarningBanner>
       );
     }
     return this.props.children;
@@ -2982,16 +3037,14 @@ function MetricCard({
   accent: string;
 }>) {
   return (
-    <Card className="min-h-[150px]">
+    <Card className="apple-health-tap min-h-[150px]">
       <div className="flex items-start justify-between gap-4">
         <div>
-          <p className="text-sm text-zinc-400">{title}</p>
-          <p className="mt-3 text-2xl font-semibold text-white">{value}</p>
-          <p className="mt-2 text-sm text-zinc-400">{detail}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{title}</p>
+          <p className="apple-health-number mt-3 text-3xl font-semibold tracking-[-0.025em] text-white">{value}</p>
+          <p className="mt-2 text-sm leading-6 text-zinc-400">{detail}</p>
         </div>
-        <div className={cx("rounded-lg border p-2", accent)}>
-          <Icon className="h-5 w-5" />
-        </div>
+        <MetricIcon icon={Icon} tone={accent} size="lg" />
       </div>
     </Card>
   );
@@ -3013,16 +3066,14 @@ function TargetDetailCard({
   accent: string;
 }>) {
   return (
-    <Card className="min-h-[172px] p-4">
+    <Card className="apple-health-tap min-h-[172px] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-sm text-zinc-400">{title}</p>
-          <p className="mt-2 text-2xl font-semibold text-white">{value}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{title}</p>
+          <p className="apple-health-number mt-2 text-3xl font-semibold tracking-[-0.025em] text-white">{value}</p>
           <p className="mt-1 text-sm text-zinc-300">{subvalue}</p>
         </div>
-        <div className={cx("shrink-0 rounded-lg border p-2", accent)}>
-          <Icon className="h-5 w-5" />
-        </div>
+        <MetricIcon icon={Icon} tone={accent} />
       </div>
       <p className="mt-4 text-xs leading-5 text-zinc-500">{note}</p>
     </Card>
@@ -3147,25 +3198,25 @@ function buildMacroProgress(label: string, unit: string, eaten: number, target: 
 function MacroProgressCard({ macro }: Readonly<{ macro: MacroProgress }>) {
   const moleculeKind = macroMoleculeKind(macro.label);
   return (
-    <div className="group rounded-lg border border-white/10 bg-white/[0.035] p-4 transition hover:border-white/15">
+    <div className="apple-health-card-subtle apple-health-tap group border border-white/10 bg-white/[0.045] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="flex items-start gap-3">
           {moleculeKind ? (
-            <div className={cx("rounded-lg border p-2 transition group-hover:bg-white/[0.045]", macroIconAccent(macro.label))}>
+            <div className={cx("rounded-2xl border p-2.5 transition group-hover:bg-white/[0.045]", macroIconAccent(macro.label))}>
               <MacroMoleculeIcon kind={moleculeKind} />
             </div>
           ) : null}
           <div>
-            <p className="text-sm text-zinc-400">{macro.label}</p>
-            <p className="mt-2 text-2xl font-semibold text-white">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{macro.label}</p>
+            <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">
               {Math.round(macro.eaten)}
               <span className="text-sm font-medium text-zinc-500"> / {Math.round(macro.target)}{macro.unit}</span>
             </p>
           </div>
         </div>
-        <span className={cx("rounded-full px-2.5 py-1 text-xs font-medium", macro.over > 0 ? "bg-amber-300/10 text-amber-200" : "bg-emerald-300/10 text-emerald-200")}>
+        <TrendPill tone={macro.over > 0 ? "watch" : "good"}>
           {macro.over > 0 ? `+${Math.round(macro.over)}${macro.unit} over` : `${Math.round(macro.left)}${macro.unit} left`}
-        </span>
+        </TrendPill>
       </div>
       <div className="mt-4 h-2 rounded-full bg-white/10">
         <div className={cx("h-2 rounded-full", macro.accent)} style={{ width: `${macro.percent}%` }} />
@@ -3587,11 +3638,11 @@ function FoodLogList({
         const isSaving = Boolean(entry.food_log_id && savingId === entry.food_log_id);
         const amountLabel = foodAmountLabel(entry);
         return (
-          <div key={entryId} className="rounded-lg border border-white/10 bg-white/[0.035] p-3" data-testid="food-log-row">
+          <div key={entryId} className="apple-health-card-subtle apple-health-tap border border-white/10 bg-white/[0.04] p-3" data-testid="food-log-row">
             <div className="grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
               <div className="flex min-w-0 items-start gap-3">
                 {selectedIcon ? (
-                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border">
                     <FoodIcon type={selectedIcon} className="h-5 w-5" />
                   </span>
                 ) : null}
@@ -3617,7 +3668,7 @@ function FoodLogList({
                       type="button"
                       onClick={() => onEdit(entry)}
                       disabled={!entry.food_log_id || isOptimistic || isSaving}
-                      className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                      className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Edit ${entry.food_name || "food entry"}`}
                     >
                       <Pencil className="h-3.5 w-3.5" />
@@ -3629,7 +3680,7 @@ function FoodLogList({
                       type="button"
                       onClick={() => onRemove(entry)}
                       disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
-                      className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                       aria-label={`Remove ${entry.food_name || "food entry"}`}
                     >
                       <Trash2 className="h-3.5 w-3.5" />
@@ -3689,6 +3740,7 @@ function FoodTimelineList({
   onDragStart,
   onDragOverItem,
   onDragEnd,
+  onEmptyAction,
 }: Readonly<{
   items: FoodTimelineItem[];
   emptyDescription: string;
@@ -3706,14 +3758,15 @@ function FoodTimelineList({
   onDragStart: (itemId: string) => void;
   onDragOverItem: (itemId: string, position?: FoodTimelineDropPosition) => void;
   onDragEnd: () => void;
+  onEmptyAction?: () => void;
 }>) {
   if (!items.length) {
     return (
       <EmptyState
         title="No food logged yet"
         description={emptyDescription}
-        action="Use manual entry"
-        onAction={() => undefined}
+        action="Add meal"
+        onAction={onEmptyAction ?? (() => undefined)}
       />
     );
   }
@@ -3755,7 +3808,7 @@ function FoodTimelineList({
           onDragEnd();
         }}
         disabled={!item.persistable || savingOrder}
-        className="mt-0.5 flex h-9 w-9 shrink-0 touch-none cursor-grab items-center justify-center rounded-lg border border-white/10 bg-zinc-950/60 text-zinc-500 transition hover:border-emerald-300/30 hover:text-emerald-100 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-35"
+        className="apple-health-tap mt-0.5 flex h-9 w-9 shrink-0 touch-none cursor-grab items-center justify-center rounded-2xl border border-white/10 bg-zinc-950/60 text-zinc-500 hover:border-emerald-300/30 hover:text-emerald-100 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-35"
         aria-label="Drag to reorder food timeline"
         title={item.persistable ? "Drag to reorder" : "Save pending entry before reordering"}
       >
@@ -3775,11 +3828,12 @@ function FoodTimelineList({
             {label ? (
               <div className="mb-2 mt-4 grid gap-1 first:mt-0">
                 <div className="flex items-center gap-2">
-                  <span className="h-px flex-1 bg-white/10" />
-                  <span className="rounded-full border border-white/10 bg-zinc-950/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300">
+                  <span className="h-px flex-1 bg-gradient-to-r from-transparent via-white/10 to-white/10" />
+                  <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-zinc-950/85 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-zinc-300 shadow-[0_10px_30px_-24px_rgba(255,255,255,0.7)]">
+                    <GripVertical className="h-3.5 w-3.5 text-zinc-500" />
                     {label.title}
                   </span>
-                  <span className="h-px flex-1 bg-white/10" />
+                  <span className="h-px flex-1 bg-gradient-to-l from-transparent via-white/10 to-white/10" />
                 </div>
                 <p className="text-center text-[11px] font-medium text-zinc-500">{label.detail}</p>
               </div>
@@ -3805,8 +3859,8 @@ function FoodTimelineList({
               onDragEnd={onDragEnd}
               className={cx(
                 item.type === "workout_marker"
-                  ? "rounded-xl border border-emerald-300/25 bg-emerald-300/[0.055] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"
-                  : "rounded-lg border border-white/10 bg-white/[0.035] p-3",
+                  ? "rounded-[26px] border border-emerald-300/35 bg-[radial-gradient(circle_at_16%_0%,rgba(16,185,129,0.2),transparent_42%),linear-gradient(135deg,rgba(16,185,129,0.13),rgba(255,255,255,0.035))] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.12),0_18px_45px_-36px_rgba(16,185,129,0.8)]"
+                  : "apple-health-card-subtle border border-white/10 bg-white/[0.04] p-3",
                 "transition duration-150",
                 isDragging ? "scale-[0.99] opacity-60" : "opacity-100",
               )}
@@ -3816,7 +3870,7 @@ function FoodTimelineList({
               {item.type === "workout_marker" ? (
                 <div className="flex min-w-0 items-start gap-3">
                   {dragButton(item)}
-                  <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                  <span className="mt-0.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-emerald-300/25 bg-emerald-300/15 text-emerald-100 shadow-[0_0_22px_rgba(16,185,129,0.16)]">
                     <Dumbbell className="h-5 w-5" />
                   </span>
                   <div className="min-w-0 flex-1">
@@ -3830,7 +3884,7 @@ function FoodTimelineList({
                       ) : null}
                     </div>
                     <p className="mt-1 text-xs text-zinc-500">
-                      Movable divider: foods above are pre-workout, foods below are post-workout.
+                      Drag this divider or move foods around it. Above = pre-workout, below = post-workout.
                     </p>
                     {item.marker.notes ? <p className="mt-2 text-sm leading-5 text-zinc-400">{item.marker.notes}</p> : null}
                   </div>
@@ -3850,7 +3904,7 @@ function FoodTimelineList({
                           <div className="flex min-w-0 items-start gap-3">
                             {dragButton(item)}
                             {selectedIcon ? (
-                              <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border">
+                              <span className="accent-outline mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border">
                                 <FoodIcon type={selectedIcon} className="h-5 w-5" />
                               </span>
                             ) : null}
@@ -3876,7 +3930,7 @@ function FoodTimelineList({
                                   type="button"
                                   onClick={() => onEdit(entry)}
                                   disabled={!entry.food_log_id || isOptimistic || isSaving}
-                                  className="inline-flex w-fit items-center gap-2 rounded-lg border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                                  className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.035] px-3 py-2 text-xs font-semibold text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50"
                                   aria-label={`Edit ${entry.food_name || "food entry"}`}
                                 >
                                   <Pencil className="h-3.5 w-3.5" />
@@ -3888,7 +3942,7 @@ function FoodTimelineList({
                                   type="button"
                                   onClick={() => onRemove(entry)}
                                   disabled={!entry.food_log_id || isOptimistic || removingId === entry.food_log_id || isSaving}
-                                  className="inline-flex w-fit items-center gap-2 rounded-lg border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                                  className="apple-health-tap inline-flex w-fit items-center gap-2 rounded-2xl border border-red-300/20 bg-red-300/5 px-3 py-2 text-xs font-semibold text-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                                   aria-label={`Remove ${entry.food_name || "food entry"}`}
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
@@ -4214,13 +4268,13 @@ function MacroDonutCard({
   const caloriesOver = Math.max(0, Math.round(totals.calories - targets.target_calories));
 
   return (
-    <Card className="min-w-0 overflow-hidden">
+    <Card className="min-w-0 overflow-hidden border-emerald-300/15 bg-[radial-gradient(circle_at_18%_0%,rgba(132,204,22,0.13),transparent_36%),linear-gradient(145deg,rgba(255,255,255,0.075),rgba(255,255,255,0.025))]">
       <SectionHeader eyebrow="Today" title={<TitleWithIcon icon={Target}>Daily summary · {dateLabel}</TitleWithIcon>} />
-      <div className="grid gap-5 lg:grid-cols-[180px_minmax(0,1fr)] lg:items-center">
-        <div className="flex items-center gap-5 lg:block">
-          <div className="relative h-36 w-36 shrink-0 lg:mx-auto">
+      <div className="grid gap-5 lg:grid-cols-[210px_minmax(0,1fr)] lg:items-center">
+        <div className="flex items-center gap-5 rounded-[26px] border border-white/10 bg-black/20 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)] lg:block">
+          <div className="relative h-40 w-40 shrink-0 lg:mx-auto">
             <svg className="-rotate-90" viewBox="0 0 112 112" aria-label="Daily nutrition completion">
-              <circle cx="56" cy="56" r={calorieRadius} fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="7" />
+              <circle cx="56" cy="56" r={calorieRadius} fill="none" stroke="rgba(255,255,255,0.07)" strokeWidth="7" />
               <circle
                 cx="56"
                 cy="56"
@@ -4258,6 +4312,7 @@ function MacroDonutCard({
               })}
             </svg>
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <Flame className="mb-1 h-4 w-4 text-[var(--accent-primary)]" />
               <p className="text-2xl font-semibold text-white">{Math.round(targets.target_calories > 0 ? Math.min((totals.calories / targets.target_calories) * 100, 999) : 0)}%</p>
               <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500">Daily</p>
             </div>
@@ -4267,12 +4322,12 @@ function MacroDonutCard({
               {Math.round(totals.calories).toLocaleString()} <span className="text-zinc-500">/</span> {Math.round(targets.target_calories).toLocaleString()}
             </p>
             <p className="mt-1 text-sm font-medium uppercase tracking-[0.18em] text-zinc-500">Calories</p>
-            <p className={cx("mt-2 text-xs", caloriesOver > 0 ? "text-amber-300" : "text-zinc-400")}>
+            <p className={cx("mx-auto mt-3 inline-flex rounded-full border px-3 py-1 text-xs font-semibold", caloriesOver > 0 ? "border-amber-300/25 bg-amber-300/10 text-amber-100" : "border-emerald-300/20 bg-emerald-300/10 text-emerald-100")}>
               {caloriesOver > 0 ? `${caloriesOver.toLocaleString()} over` : `${caloriesLeft.toLocaleString()} remaining`}
             </p>
           </div>
         </div>
-        <div className="min-w-0 space-y-3">
+        <div className="grid min-w-0 gap-3 sm:grid-cols-2">
           {rows.map((row) => {
             const consumed = Math.round(row.consumed);
             const target = Math.round(row.target);
@@ -4280,26 +4335,32 @@ function MacroDonutCard({
             const over = Math.max(0, consumed - target);
             const percent = target > 0 ? Math.min(100, (consumed / target) * 100) : 0;
             return (
-              <div key={row.label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
+              <div key={row.label} className="apple-health-tap rounded-[22px] border border-white/10 bg-white/[0.055] p-3.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
                 <div className="flex min-w-0 items-baseline justify-between gap-3 text-sm">
                   <span className="inline-flex min-w-0 items-center gap-2 font-medium text-zinc-200">
-                    <MacroIcon label={row.label} className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-2xl border border-white/10 bg-black/25">
+                      <MacroIcon label={row.label} className="h-4 w-4 shrink-0 text-[var(--accent-primary)]" />
+                    </span>
                     {row.label}
                   </span>
-                  <span className="shrink-0 text-zinc-400">{consumed}{row.unit} / {target}{row.unit}</span>
+                  <span className="shrink-0 text-zinc-400">{Math.round(percent)}%</span>
                 </div>
-                <div className="mt-2 h-1.5 rounded-full bg-white/10">
-                  <div className={cx("h-1.5 rounded-full transition-all duration-700 ease-out", row.bar)} style={{ width: `${percent}%` }} />
+                <div className="mt-3 flex items-end justify-between gap-3">
+                  <p className="text-2xl font-semibold tracking-tight text-white">{consumed}{row.unit}</p>
+                  <p className="text-xs font-medium text-zinc-500">of {target}{row.unit}</p>
+                </div>
+                <div className="mt-3 h-2 rounded-full bg-white/10">
+                  <div className={cx("h-2 rounded-full transition-all duration-700 ease-out", row.bar)} style={{ width: `${percent}%` }} />
                 </div>
                 <div className="mt-1 flex items-center justify-between gap-3 text-xs text-zinc-500">
                   <span>{over > 0 ? `${over}${row.unit} over` : `${remaining}${row.unit} remaining`}</span>
-                  <span>{Math.round(percent)}%</span>
+                  <span>{row.label === "Calories" ? "energy" : "macro"}</span>
                 </div>
               </div>
             );
           })}
           {dayTypeMacros ? (
-            <p className="accent-outline rounded-lg border px-3 py-2 text-xs leading-5">
+            <p className="accent-outline rounded-[22px] border px-3.5 py-3 text-xs leading-5 sm:col-span-2">
               {dayTypeMacros.day_type}: {dayTypeMacros.reason}
             </p>
           ) : null}
@@ -4626,7 +4687,7 @@ function PresetFoodTile({
       onClick={onClick}
       disabled={disabled}
       className={cx(
-        "group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-xl border p-3 text-left text-white shadow-black/20 transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60",
+        "group relative flex min-h-[138px] min-w-0 flex-col overflow-hidden rounded-[22px] border p-3.5 text-left text-white shadow-[0_18px_50px_-36px_rgba(0,0,0,0.9)] transition duration-200 hover:-translate-y-1 hover:scale-[1.01] hover:shadow-2xl disabled:cursor-not-allowed disabled:opacity-60",
         editing ? "ring-1 ring-white/35" : "",
       )}
       style={{
@@ -4637,6 +4698,7 @@ function PresetFoodTile({
       title={editMode ? `Edit ${shortcut.shortcut_name}` : `Add ${shortcut.shortcut_name} to today`}
     >
       <span className="pointer-events-none absolute inset-x-0 top-0 h-px opacity-80" style={{ background: `linear-gradient(90deg, transparent, ${tone.accent}, transparent)` }} />
+      <span className="pointer-events-none absolute bottom-3 left-0 top-3 w-1 rounded-r-full opacity-80" style={{ backgroundColor: tone.accent }} />
       <span className="pointer-events-none absolute -right-8 -top-10 h-24 w-24 rounded-full opacity-20 blur-2xl transition group-hover:opacity-35" style={{ backgroundColor: tone.accent }} />
       <span className="relative z-10 flex items-start justify-between gap-3">
         <span className="rounded-full border border-white/10 px-2 py-1 text-[11px] font-semibold" style={{ backgroundColor: tone.pillBackground, color: tone.pillColor }}>
@@ -4651,7 +4713,8 @@ function PresetFoodTile({
       </span>
       <span className="relative z-10 mt-3 flex items-center justify-between gap-2">
         <PresetStatusPill status={status} />
-        <span className="ml-auto flex items-center gap-1.5 text-white/55">
+        <span className="ml-auto flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-[0.12em] text-white/55">
+          {!editMode && !status?.added ? <span className="hidden sm:inline">Tap to log</span> : null}
           {isDefaultPresetShortcut(shortcut) ? <Star className="h-3.5 w-3.5 fill-current opacity-60" /> : null}
           {editMode ? <Pencil className="h-3.5 w-3.5" /> : status?.added ? <Check className="h-3.5 w-3.5 text-emerald-100" /> : null}
         </span>
@@ -4674,7 +4737,7 @@ function PresetFoodEditor({
   onCancel: () => void;
 }>) {
   return (
-    <div className="rounded-lg border border-white/10 bg-zinc-950/50 p-4">
+    <div className="apple-health-card-subtle border border-white/10 bg-zinc-950/50 p-4">
       <FoodPresetIconPicker value={foodPresetIconType(shortcut)} onChange={(icon_type) => onChange({ ...shortcut, icon_type })} />
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
         <TextInput label="Name" value={shortcut.shortcut_name} onChange={(value) => onChange({ ...shortcut, shortcut_name: value })} />
@@ -4727,7 +4790,7 @@ function SupplementsTile({
       onClick={toggleTaken}
       aria-pressed={taken}
       className={cx(
-        "group w-full rounded-xl border p-4 text-left transition duration-300",
+        "apple-health-tap group w-full rounded-[22px] border p-4 text-left duration-300",
         taken
           ? "border-cyan-300/30 bg-cyan-300/[0.08] shadow-[0_0_28px_rgba(34,211,238,0.10)]"
           : "border-white/10 bg-white/[0.035] hover:border-white/15 hover:bg-white/[0.055]",
@@ -4769,15 +4832,17 @@ function EmptyState({
   description,
   action,
   onAction,
-}: Readonly<{ title: string; description: string; action: string; onAction: () => void }>) {
+}: Readonly<{ title: string; description: string; action?: string; onAction?: () => void }>) {
   return (
-    <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
-      <p className="font-medium text-white">{title}</p>
-      <p className="mt-2 text-sm text-zinc-400">{description}</p>
-      <button onClick={onAction} className="accent-bg mt-4 inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-semibold">
-        <Plus className="h-4 w-4" />
-        {action}
-      </button>
+    <div className="apple-health-card-subtle border border-dashed border-white/15 bg-white/[0.035] p-6">
+      <p className="text-base font-semibold text-white">{title}</p>
+      <p className="mt-2 text-sm leading-6 text-zinc-400">{description}</p>
+      {action && onAction ? (
+        <button onClick={onAction} className="accent-bg apple-health-tap mt-4 inline-flex items-center gap-2 rounded-2xl px-3 py-2 text-sm font-semibold">
+          <Plus className="h-4 w-4" />
+          {action}
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -4826,9 +4891,9 @@ function TextInput({
 
   return (
     <label className="space-y-2 text-sm text-zinc-400">
-      <span>{label}</span>
+      <span className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <input
-        className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
+        className="accent-focus h-11 w-full rounded-2xl border border-white/10 bg-white/[0.055] px-3 text-zinc-100 outline-none transition placeholder:text-zinc-600 hover:bg-white/[0.075]"
         value={displayValue}
         type={type}
         placeholder={placeholder}
@@ -4852,9 +4917,9 @@ function SelectInput({
 }: Readonly<{ label: string; value: string; options: string[]; onChange: (value: string) => void }>) {
   return (
     <label className="space-y-2 text-sm text-zinc-400">
-      <span>{label}</span>
+      <span className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</span>
       <select
-        className="accent-focus h-11 w-full rounded-lg border border-white/10 bg-zinc-950 px-3 text-zinc-100 outline-none transition"
+        className="accent-focus h-11 w-full rounded-2xl border border-white/10 bg-zinc-950/85 px-3 text-zinc-100 outline-none transition hover:bg-zinc-900"
         value={value}
         onChange={(event) => onChange(event.target.value)}
       >
@@ -4868,13 +4933,80 @@ function SelectInput({
   );
 }
 
+function AppleChartTooltip() {
+  return (
+    <Tooltip
+      cursor={{ stroke: "rgba(255,255,255,0.12)", strokeWidth: 1 }}
+      contentStyle={APPLE_CHART_TOOLTIP_STYLE}
+      itemStyle={{ color: "#e4e4e7", fontSize: 12 }}
+      labelStyle={{ color: "#ffffff", fontSize: 12, fontWeight: 700, marginBottom: 6 }}
+      wrapperStyle={{ outline: "none" }}
+    />
+  );
+}
+
 function ChartFrame({ children, className }: Readonly<{ children: React.ReactNode; className: string }>) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => setMounted(true));
     return () => window.cancelAnimationFrame(frame);
   }, []);
-  return <div className={className}>{mounted ? children : <div className="h-full w-full animate-pulse rounded-lg bg-white/[0.04]" />}</div>;
+  return (
+    <div
+      className={cx(
+        "apple-health-card-subtle relative overflow-hidden border border-white/10 bg-[radial-gradient(circle_at_50%_0%,rgba(255,255,255,0.075),transparent_34%),rgba(255,255,255,0.032)] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]",
+        className,
+      )}
+    >
+      {mounted ? children : <Skeleton className="h-full w-full rounded-[18px] bg-white/[0.055]" />}
+    </div>
+  );
+}
+
+function ChartUnavailableState({ title, description }: Readonly<{ title: string; description: string }>) {
+  return (
+    <div className="apple-health-card-subtle flex min-h-40 items-center gap-4 border border-dashed border-white/15 bg-white/[0.03] p-6">
+      <MetricIcon icon={BarChart3} tone="border-white/10 bg-white/[0.04] text-zinc-400" />
+      <div>
+        <p className="font-semibold text-white">{title}</p>
+        <p className="mt-2 text-sm leading-6 text-zinc-400">{description}</p>
+      </div>
+    </div>
+  );
+}
+
+function ArchiveStatCard({ label, value, detail }: Readonly<{ label: string; value: React.ReactNode; detail: React.ReactNode }>) {
+  return (
+    <div className="apple-health-card-subtle apple-health-tap border border-white/10 bg-white/[0.04] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+      <p className="apple-health-number mt-1 text-lg font-semibold text-white">{value}</p>
+      <p className="mt-1 text-xs leading-5 text-zinc-500">{detail}</p>
+    </div>
+  );
+}
+
+function HistoryDisclosure({
+  title,
+  description,
+  children,
+}: Readonly<{
+  title: string;
+  description: string;
+  children: React.ReactNode;
+}>) {
+  return (
+    <details className="group apple-health-card-subtle border border-white/10 bg-white/[0.028] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+      <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
+          <p className="mt-1 text-sm font-semibold text-white">{title}</p>
+          <p className="mt-1 text-xs leading-5 text-zinc-500">{description}</p>
+        </div>
+        <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
+      </summary>
+      <div className="mt-4">{children}</div>
+    </details>
+  );
 }
 
 function compactDate(date: unknown) {
@@ -5085,18 +5217,91 @@ function DashboardHealthSignalTile({
   icon: React.ElementType;
 }>) {
   return (
-    <div className="min-h-[132px] rounded-lg border border-white/10 bg-white/[0.035] p-4">
+    <div className="apple-health-card-subtle apple-health-tap min-h-[132px] border border-white/10 bg-white/[0.045] p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{title}</p>
-          <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{title}</p>
+          <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">{value}</p>
         </div>
-        <div className={cx("rounded-lg border p-2", dashboardHealthTone(status))}>
-          <Icon className="h-4 w-4" />
-        </div>
+        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} />
       </div>
       <p className="mt-3 text-xs leading-5 text-zinc-400">{detail}</p>
     </div>
+  );
+}
+
+const DASHBOARD_CARD_TRANSITION = { duration: 0.42, ease: [0.22, 1, 0.36, 1] as const };
+
+function dashboardMotionDelay(index = 0) {
+  return Math.min(index * 0.035, 0.18);
+}
+
+function DashboardPanel({
+  children,
+  className,
+  index = 0,
+}: Readonly<{
+  children: React.ReactNode;
+  className?: string;
+  index?: number;
+}>) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 14, filter: "blur(6px)" }}
+      animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+      transition={{ ...DASHBOARD_CARD_TRANSITION, delay: dashboardMotionDelay(index) }}
+      whileHover={{ y: -2 }}
+      whileTap={{ scale: 0.997 }}
+      className={cx("apple-health-card border border-white/10 bg-white/[0.065] p-5 text-zinc-100 will-change-transform", className)}
+    >
+      {children}
+    </motion.section>
+  );
+}
+
+function DashboardActionButton({ children, onClick, className }: Readonly<{ children: React.ReactNode; onClick: () => void; className?: string }>) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx("apple-health-tap inline-flex h-10 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.055] px-3 text-sm font-semibold text-zinc-100 shadow-[0_12px_30px_-24px_rgba(0,0,0,0.7)]", className)}
+    >
+      {children}
+    </button>
+  );
+}
+
+function DashboardSummaryStat({
+  label,
+  value,
+  detail,
+  icon,
+  tone,
+  index,
+}: Readonly<{
+  label: string;
+  value: React.ReactNode;
+  detail: React.ReactNode;
+  icon: React.ElementType;
+  tone?: string;
+  index: number;
+}>) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ ...DASHBOARD_CARD_TRANSITION, delay: 0.08 + dashboardMotionDelay(index) }}
+      className="apple-health-card-subtle apple-health-tap min-h-[128px] border border-white/10 bg-white/[0.052] p-4"
+    >
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-zinc-500">{label}</p>
+          <p className="apple-health-number mt-3 truncate text-2xl font-semibold tracking-[-0.03em] text-white">{value}</p>
+        </div>
+        <MetricIcon icon={icon} tone={tone} />
+      </div>
+      <p className="mt-3 line-clamp-2 text-xs leading-5 text-zinc-400">{detail}</p>
+    </motion.div>
   );
 }
 
@@ -5159,46 +5364,50 @@ function SicknessDashboardBanner({
 }>) {
   const level = sicknessAlertLevel(warning);
   const alertDate = sicknessIsoDate(date);
-  const [hidden, setHidden] = useState(true);
-  const [showNotificationCopy, setShowNotificationCopy] = useState(false);
+  const [alertVisibility, setAlertVisibility] = useState({ hidden: true, showNotificationCopy: false });
 
   useEffect(() => {
-    if (level === "normal" || level === "unavailable") {
-      const stored = readStoredSicknessAlertState();
-      writeStoredSicknessAlertState({ ...stored, lastLevel: "normal", strongFirstDate: undefined });
-      setHidden(true);
-      setShowNotificationCopy(false);
-      return;
-    }
+    let canceled = false;
+    const timer = window.setTimeout(() => {
+      if (level === "normal" || level === "unavailable") {
+        const stored = readStoredSicknessAlertState();
+        writeStoredSicknessAlertState({ ...stored, lastLevel: "normal", strongFirstDate: undefined });
+        if (!canceled) setAlertVisibility({ hidden: true, showNotificationCopy: false });
+        return;
+      }
 
-    const stored = readStoredSicknessAlertState();
-    const hiddenForDate = stored.dismissedDate === alertDate || Boolean(stored.remindAfter && alertDate < stored.remindAfter);
-    const strongFirstDate = level === "strong"
-      ? stored.lastLevel === "strong" && stored.strongFirstDate
-        ? stored.strongFirstDate
-        : alertDate
-      : undefined;
-    const strongPersists = level === "strong" && strongFirstDate ? daysBetweenIso(strongFirstDate, alertDate) >= 1 : false;
-    const stateChangedToMild = level === "mild" && (!stored.lastLevel || stored.lastLevel === "normal" || stored.lastLevel === "unavailable");
-    const stateChangedToStrong = level === "strong" && stored.lastLevel !== "strong";
-    const persistenceNotification = strongPersists && stored.strongPersistenceNotifiedForStartDate !== strongFirstDate;
-    const notificationKey = `${alertDate}:${level}:${persistenceNotification ? "persisting" : "change"}`;
-    const shouldNotify = !hiddenForDate
-      && (stateChangedToMild || stateChangedToStrong || persistenceNotification)
-      && stored.lastNotificationKey !== notificationKey;
-    const next: StoredSicknessAlertState = {
-      ...stored,
-      lastLevel: level,
-      strongFirstDate,
-      lastNotificationKey: shouldNotify ? notificationKey : stored.lastNotificationKey,
-      strongPersistenceNotifiedForStartDate: persistenceNotification ? strongFirstDate : stored.strongPersistenceNotifiedForStartDate,
+      const stored = readStoredSicknessAlertState();
+      const hiddenForDate = stored.dismissedDate === alertDate || Boolean(stored.remindAfter && alertDate < stored.remindAfter);
+      const strongFirstDate = level === "strong"
+        ? stored.lastLevel === "strong" && stored.strongFirstDate
+          ? stored.strongFirstDate
+          : alertDate
+        : undefined;
+      const strongPersists = level === "strong" && strongFirstDate ? daysBetweenIso(strongFirstDate, alertDate) >= 1 : false;
+      const stateChangedToMild = level === "mild" && (!stored.lastLevel || stored.lastLevel === "normal" || stored.lastLevel === "unavailable");
+      const stateChangedToStrong = level === "strong" && stored.lastLevel !== "strong";
+      const persistenceNotification = strongPersists && stored.strongPersistenceNotifiedForStartDate !== strongFirstDate;
+      const notificationKey = `${alertDate}:${level}:${persistenceNotification ? "persisting" : "change"}`;
+      const shouldNotify = !hiddenForDate
+        && (stateChangedToMild || stateChangedToStrong || persistenceNotification)
+        && stored.lastNotificationKey !== notificationKey;
+      const next: StoredSicknessAlertState = {
+        ...stored,
+        lastLevel: level,
+        strongFirstDate,
+        lastNotificationKey: shouldNotify ? notificationKey : stored.lastNotificationKey,
+        strongPersistenceNotifiedForStartDate: persistenceNotification ? strongFirstDate : stored.strongPersistenceNotifiedForStartDate,
+      };
+      writeStoredSicknessAlertState(next);
+      if (!canceled) setAlertVisibility({ hidden: hiddenForDate, showNotificationCopy: shouldNotify });
+    }, 0);
+    return () => {
+      canceled = true;
+      window.clearTimeout(timer);
     };
-    writeStoredSicknessAlertState(next);
-    setHidden(hiddenForDate);
-    setShowNotificationCopy(shouldNotify);
   }, [alertDate, level]);
 
-  if (hidden || level === "normal" || level === "unavailable") return null;
+  if (alertVisibility.hidden || level === "normal" || level === "unavailable") return null;
 
   const isStrong = level === "strong";
   const contributors = stringList(warning?.top_contributors, stringList(warning?.abnormal_signals)).slice(0, 3);
@@ -5209,17 +5418,17 @@ function SicknessDashboardBanner({
   const dismissToday = () => {
     const stored = readStoredSicknessAlertState();
     writeStoredSicknessAlertState({ ...stored, dismissedDate: alertDate });
-    setHidden(true);
+    setAlertVisibility((current) => ({ ...current, hidden: true }));
   };
   const remindTomorrow = () => {
     const stored = readStoredSicknessAlertState();
     writeStoredSicknessAlertState({ ...stored, remindAfter: addIsoDays(alertDate, 1) });
-    setHidden(true);
+    setAlertVisibility((current) => ({ ...current, hidden: true }));
   };
 
   return (
     <div className={cx(
-      "col-span-full rounded-lg border p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]",
+      "col-span-full rounded-[26px] border p-4 shadow-[0_18px_60px_rgba(0,0,0,0.28)]",
       isStrong
         ? "border-orange-300/35 bg-[linear-gradient(135deg,rgba(251,146,60,0.18),rgba(244,63,94,0.09))] text-orange-50"
         : "border-amber-300/30 bg-amber-300/[0.09] text-amber-50",
@@ -5227,7 +5436,7 @@ function SicknessDashboardBanner({
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <span className={cx("grid h-9 w-9 place-items-center rounded-lg border", isStrong ? "border-orange-200/35 bg-orange-300/15" : "border-amber-200/30 bg-amber-300/12")}>
+            <span className={cx("grid h-10 w-10 place-items-center rounded-2xl border", isStrong ? "border-orange-200/35 bg-orange-300/15" : "border-amber-200/30 bg-amber-300/12")}>
               <AlertTriangle className="h-4 w-4" />
             </span>
             <div>
@@ -5236,7 +5445,7 @@ function SicknessDashboardBanner({
             </div>
           </div>
           <p className="mt-3 max-w-3xl text-sm leading-6 text-zinc-100/85">{warning?.message || "Consider reducing intensity today and prioritizing recovery."}</p>
-          {showNotificationCopy ? (
+          {alertVisibility.showNotificationCopy ? (
             <p className="mt-3 max-w-3xl rounded-lg border border-white/10 bg-black/15 p-3 text-sm font-semibold text-white">{notificationCopy}</p>
           ) : null}
           <div className="mt-3 flex flex-wrap gap-2">
@@ -5258,13 +5467,13 @@ function SicknessDashboardBanner({
           <p className="mt-3 text-[11px] text-zinc-300/75">{warning?.disclaimer || "This is not a medical diagnosis."}</p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2 lg:justify-end">
-          <button onClick={onOpenRecovery} className="h-9 rounded-lg border border-white/15 bg-white/[0.06] px-3 text-sm font-semibold text-white transition hover:bg-white/[0.1]">
+          <button onClick={onOpenRecovery} className="apple-health-tap h-9 rounded-2xl border border-white/15 bg-white/[0.06] px-3 text-sm font-semibold text-white">
             Open recovery
           </button>
-          <button onClick={remindTomorrow} className="h-9 rounded-lg border border-white/10 px-3 text-sm font-semibold text-zinc-100 transition hover:bg-white/[0.06]">
+          <button onClick={remindTomorrow} className="apple-health-tap h-9 rounded-2xl border border-white/10 px-3 text-sm font-semibold text-zinc-100">
             Remind tomorrow
           </button>
-          <button onClick={dismissToday} aria-label="Dismiss sickness alert today" className="grid h-9 w-9 place-items-center rounded-lg border border-white/10 text-zinc-100 transition hover:bg-white/[0.06]">
+          <button onClick={dismissToday} aria-label="Dismiss sickness alert today" className="apple-health-tap grid h-9 w-9 place-items-center rounded-2xl border border-white/10 text-zinc-100">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -5529,11 +5738,124 @@ function Dashboard({
   const macroWeeklyScore = finiteNumberOrNull(macroAdherence?.weekly_score);
   const failedDashboardBlocks = arrayOrEmpty<DashboardDebugBlock>(data?.debug?.errors ?? data?.errors).filter((block) => block.status === "error" || block.error_type);
   const dashboardDegraded = data?.debug?.dashboard_status === "degraded" && failedDashboardBlocks.length > 0;
+  const dashboardDateLabel = data?.date ? headerDateString(new Date(`${data.date}T12:00:00`)) : headerDateString();
+  const foodCaloriesLeft = finiteNumberOrNull(safeFood.calories.left);
+  const workoutQualityNumeric = finiteNumberOrNull(workoutQuality?.score);
+  const wearableStatusLabel = googleHealthReady
+    ? "Wearables synced"
+    : googleHealth?.reason === "no_wearable_data_connected"
+      ? "No wearable data"
+      : googleHealth?.reason === "connected_no_wearable_metrics"
+        ? "Learning baseline"
+        : "Syncing";
+  const wearableStatusTone = googleHealthReady ? "good" : googleHealth?.reason ? "learning" : "watch";
+  const sleepHeroValue = googleHealthReady
+    ? sleepUnavailable
+      ? sleepLearning
+        ? "Learning"
+        : "No data yet"
+      : formatDashboardNumber(sleepQuality?.duration_hours, "h", 1)
+    : googleHealth ? "No data yet" : "Syncing";
+  const recoveryHeroValue = recoveryReadiness?.provisional
+    ? "Learning"
+    : recoveryScore !== null
+      ? `${Math.round(recoveryScore)}`
+      : recoveryConnected
+        ? "Syncing"
+        : "No data";
+  const dashboardSummaryStats = [
+    {
+      label: "Nutrition",
+      value: hasFoodTargets ? `${Math.round(safeFood.calories.eaten).toLocaleString()}` : "Set targets",
+      detail: hasFoodTargets
+        ? `${foodCaloriesLeft !== null ? `${Math.round(foodCaloriesLeft).toLocaleString()} kcal left` : "Calorie target pending"} · P ${Math.round(safeFood.protein.eaten)} C ${Math.round(safeFood.carbs.eaten)} F ${Math.round(safeFood.fat.eaten)}`
+        : "Goals & Targets powers this tile.",
+      icon: Utensils,
+      tone: "accent-outline",
+    },
+    {
+      label: "Training",
+      value: workoutQualityNumeric !== null ? workoutQualityScoreText(workoutQuality?.score) : completedTraining ? "Logged" : "Not logged",
+      detail: completedTraining ? completedTraining : `Today: ${plannedWorkout}`,
+      icon: Dumbbell,
+      tone: "border-amber-300/25 bg-amber-300/[0.08] text-amber-100",
+    },
+    {
+      label: "Sleep",
+      value: sleepHeroValue,
+      detail: googleHealthReady
+        ? sleepUnavailable
+          ? "Sleep data unavailable from wearable sync."
+          : `${sleepLearning ? `${sleepQuality?.baseline_label || "Learning baseline"} · ` : ""}REM ${formatDashboardNumber(sleepQuality?.rem_minutes, "m")} · Deep ${formatDashboardNumber(sleepQuality?.deep_minutes, "m")}`
+        : "Wearable sync pending.",
+      icon: Moon,
+      tone: sleepLearning ? "border-sky-300/25 bg-sky-300/[0.08] text-sky-100" : dashboardHealthTone(sleepQuality?.status),
+    },
+    {
+      label: "Recovery",
+      value: recoveryHeroValue,
+      detail: recoveryMessage,
+      icon: HeartPulse,
+      tone: dashboardHealthTone(recoveryReadiness?.status ?? recovery?.classification),
+    },
+    {
+      label: "Bodyweight",
+      value: todayWeight !== null ? `${todayWeight.toFixed(1)} lb` : "No data yet",
+      detail: `7-day avg: ${sevenDayWeight !== null ? `${sevenDayWeight.toFixed(1)} lb` : "Need data"} · ${weight?.trend_label ?? "insufficient data"}`,
+      icon: Weight,
+      tone: "border-blue-300/25 bg-blue-300/[0.08] text-blue-100",
+    },
+    {
+      label: "Goals",
+      value: formatDashboardNumber(calorieTarget, " kcal"),
+      detail: targetDecisionNotice?.message || recommendationReason,
+      icon: Target,
+      tone: "border-violet-300/25 bg-violet-300/[0.08] text-violet-100",
+    },
+  ];
 
   return (
-    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4">
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.28, ease: "easeOut" }}
+      className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,280px),1fr))] gap-4"
+    >
+      <DashboardPanel className="col-span-full overflow-hidden p-0" index={0}>
+        <div className="relative overflow-hidden rounded-[inherit]">
+          <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(132,204,22,0.14),transparent_34%),linear-gradient(135deg,rgba(255,255,255,0.08),transparent_42%)]" />
+          <div className="relative p-5 sm:p-6">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+              <div>
+                <p className="accent-text text-[11px] font-bold uppercase tracking-[0.22em]">Dashboard</p>
+                <h1 className="mt-2 text-2xl font-semibold tracking-[-0.035em] text-white sm:text-3xl">Performance command center</h1>
+                <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-400">Today&apos;s nutrition, training, recovery, sleep, bodyweight, and goal signals in one live view.</p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="apple-health-card-subtle inline-flex items-center gap-2 border border-white/10 bg-white/[0.055] px-3 py-2 text-sm font-semibold text-zinc-200">
+                  {dashboardDateLabel}
+                </span>
+                <StatusBadge status={wearableStatusTone}>{wearableStatusLabel}</StatusBadge>
+              </div>
+            </div>
+            <div className="mt-6 grid gap-3 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-6">
+              {dashboardSummaryStats.map((stat, index) => (
+                <DashboardSummaryStat
+                  key={stat.label}
+                  label={stat.label}
+                  value={stat.value}
+                  detail={stat.detail}
+                  icon={stat.icon}
+                  tone={stat.tone}
+                  index={index}
+                />
+              ))}
+            </div>
+          </div>
+        </div>
+      </DashboardPanel>
       {dashboardDegraded ? (
-        <Card className="col-span-full border-amber-400/30 bg-amber-400/10">
+        <DashboardPanel className="col-span-full border-amber-400/30 bg-amber-400/10" index={1}>
           <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <div className="flex items-center gap-2">
@@ -5551,7 +5873,7 @@ function Dashboard({
             </div>
             {data?.debug?.generated_at ? <p className="text-xs text-amber-100/60">Generated {data.debug.generated_at}</p> : null}
           </div>
-        </Card>
+        </DashboardPanel>
       ) : null}
       <SicknessDashboardBanner
         warning={sicknessWarning}
@@ -5559,8 +5881,12 @@ function Dashboard({
         onOpenRecovery={() => setActivePage("recovery")}
       />
       {targetDecisionNotice ? (
-        <div className={cx(
-          "col-span-full rounded-lg border px-4 py-3 text-sm shadow-[0_12px_40px_rgba(0,0,0,0.18)] backdrop-blur",
+        <motion.div
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ ...DASHBOARD_CARD_TRANSITION, delay: dashboardMotionDelay(2) }}
+          className={cx(
+          "col-span-full rounded-[22px] border px-4 py-3 text-sm shadow-[0_12px_40px_rgba(0,0,0,0.18)] backdrop-blur",
           targetDecisionNotice.tone === "amber"
             ? "border-amber-300/20 bg-amber-300/[0.07] text-amber-50"
             : "border-emerald-300/20 bg-emerald-300/[0.07] text-emerald-50",
@@ -5576,11 +5902,11 @@ function Dashboard({
               {targetDecisionNotice.confidence} confidence
             </span>
           </div>
-        </div>
+        </motion.div>
       ) : null}
       <TargetSectionErrorBoundary title="Food tile unavailable" description="Insufficient target data for today's food tile." resetKey={`${data?.date ?? ""}-${calorieTarget}`}>
-        <Card className="xl:col-span-2">
-          <SectionHeader eyebrow="Today" title="Food" action={<button onClick={() => setActivePage("food")} className="accent-bg rounded-lg px-3 py-2 text-sm font-semibold">Log food</button>} />
+        <DashboardPanel className="xl:col-span-2" index={3}>
+          <SectionHeader eyebrow="Today" title={<TitleWithIcon icon={Utensils}>Food</TitleWithIcon>} action={<DashboardActionButton onClick={() => setActivePage("food")} className="accent-bg border-emerald-300/20 text-zinc-950">Log food</DashboardActionButton>} />
           {hasFoodTargets ? (
             <div className="space-y-4">
               <DashboardProgressLine label="Calories" value={safeFood.calories.eaten} target={safeFood.calories.target} left={safeFood.calories.left} over={safeFood.calories.over} percent={safeFood.calories.percent} unit="kcal" />
@@ -5592,14 +5918,14 @@ function Dashboard({
           ) : (
             <EmptyState title="Set macro targets." description="Goals & Targets powers calorie and macro progress." action="Set targets" onAction={() => setActivePage("goals")} />
           )}
-        </Card>
+        </DashboardPanel>
       </TargetSectionErrorBoundary>
 
-      <Card>
-        <SectionHeader eyebrow="Check-in" title="Weight" action={<button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Enter weight</button>} />
-        <p className="text-3xl font-semibold text-white">{todayWeight !== null ? `${todayWeight.toFixed(1)} lb` : "Enter today's weight"}</p>
+      <DashboardPanel index={4}>
+        <SectionHeader eyebrow="Check-in" title={<TitleWithIcon icon={Weight}>Weight</TitleWithIcon>} action={<DashboardActionButton onClick={() => setActivePage("recovery")}>Open</DashboardActionButton>} />
+        <p className="apple-health-number text-4xl font-semibold tracking-[-0.04em] text-white">{todayWeight !== null ? `${todayWeight.toFixed(1)} lb` : "No data yet"}</p>
         <p className="mt-2 text-sm text-zinc-400">7-day avg: {sevenDayWeight !== null ? `${sevenDayWeight.toFixed(1)} lb` : "Need data"}</p>
-        <p className="mt-2 inline-flex rounded-full border border-blue-300/20 bg-blue-300/10 px-3 py-1 text-xs text-blue-100">{weight?.trend_label ?? "insufficient data"}</p>
+        <TrendPill tone="learning">{weight?.trend_label ?? "insufficient data"}</TrendPill>
         {weightHistory.length ? (
           <ChartFrame className="mt-4 h-28">
             <ResponsiveContainer width="100%" height="100%">
@@ -5609,11 +5935,11 @@ function Dashboard({
             </ResponsiveContainer>
           </ChartFrame>
         ) : <p className="mt-4 text-sm text-zinc-500">{weight?.message ?? "No bodyweight data yet."}</p>}
-      </Card>
+      </DashboardPanel>
 
       <TargetSectionErrorBoundary title="Training tile unavailable" description="Training and workout-quality data could not render safely." resetKey={`${data?.date ?? ""}-${workoutQuality?.score ?? ""}`}>
-        <Card className="xl:col-span-2">
-          <SectionHeader eyebrow="Training" title="Today's Training" action={<button onClick={() => setActivePage("training")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Training</button>} />
+        <DashboardPanel className="xl:col-span-2" index={5}>
+          <SectionHeader eyebrow="Training" title={<TitleWithIcon icon={Dumbbell}>Today&apos;s Training</TitleWithIcon>} action={<DashboardActionButton onClick={() => setActivePage("training")}>Training</DashboardActionButton>} />
           <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(240px,0.7fr)]">
             <div className="space-y-3">
               <div>
@@ -5651,7 +5977,7 @@ function Dashboard({
                 </div>
               ) : null}
             </div>
-            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+            <div className="apple-health-card-subtle border border-white/10 bg-white/[0.045] p-4">
               <div className="flex items-center gap-4">
                 <div className={`grid h-20 w-20 shrink-0 place-items-center rounded-full border-4 bg-white/[0.035] ${qualityStyles.ring}`}>
                   <span className="text-xl font-semibold">{workoutQualityScoreText(workoutQuality?.score)}</span>
@@ -5679,31 +6005,31 @@ function Dashboard({
               </div>
             </div>
           </div>
-        </Card>
+        </DashboardPanel>
       </TargetSectionErrorBoundary>
 
       <TargetSectionErrorBoundary title="Recovery tile unavailable" description="Recovery data could not render safely." resetKey={`${data?.date ?? ""}-${recoveryScore ?? ""}`}>
-        <Card>
+        <DashboardPanel index={6}>
           <SectionHeader
             eyebrow="Recovery"
-            title="Readiness"
-            action={!recoveryConnected ? <button onClick={() => setActivePage("settings")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Connect</button> : <button onClick={() => setActivePage("recovery")} className="rounded-lg border border-white/10 px-3 py-2 text-sm font-semibold text-zinc-200">Open</button>}
+            title={<TitleWithIcon icon={HeartPulse}>Readiness</TitleWithIcon>}
+            action={!recoveryConnected ? <DashboardActionButton onClick={() => setActivePage("settings")}>Connect</DashboardActionButton> : <DashboardActionButton onClick={() => setActivePage("recovery")}>Open</DashboardActionButton>}
           />
           {recoveryScore !== null || recoveryConnected ? (
             <div>
               <div className="flex items-start justify-between gap-3">
                 <div>
-                  <p className="text-3xl font-semibold text-white">{recoveryScore !== null ? Math.round(recoveryScore) : "--"}</p>
-                  <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1 text-xs text-emerald-100">{recoveryClassification}</p>
+                  <p className="apple-health-number text-4xl font-semibold tracking-[-0.04em] text-white">{recoveryReadiness?.provisional ? "Learning" : recoveryScore !== null ? Math.round(recoveryScore) : "--"}</p>
+                  <StatusBadge status={recoveryReadiness?.status ?? recovery?.classification}>{recoveryClassification}</StatusBadge>
                 </div>
                 <p className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs uppercase tracking-[0.14em] text-zinc-400">{recoverySource}</p>
               </div>
               <p className="mt-4 text-sm leading-6 text-zinc-400">{recoveryMessage}</p>
             </div>
           ) : (
-            <p className="text-sm leading-6 text-zinc-400">No recovery data yet</p>
+            <EmptyState title="No recovery data yet" description="Connect wearable data or add a recovery check-in to unlock readiness." action="Open Settings" onAction={() => setActivePage("settings")} />
           )}
-          <div className="mt-4 rounded-lg border border-white/10 bg-white/[0.035] p-3">
+          <div className="apple-health-card-subtle mt-4 border border-white/10 bg-white/[0.035] p-3">
             <div className="flex items-center justify-between gap-3">
               <p className="text-sm font-semibold text-white">Extra run</p>
               <span className={`rounded-full border px-2.5 py-1 text-xs font-medium capitalize ${statusBadgeClass(String(recovery?.extra_run_readiness?.status ?? "insufficient_data"))}`}>
@@ -5715,14 +6041,14 @@ function Dashboard({
               <p className="mt-1 text-xs leading-5 text-zinc-500">{extraRunReasoning[0]}</p>
             ) : null}
           </div>
-        </Card>
+        </DashboardPanel>
       </TargetSectionErrorBoundary>
 
       <TargetSectionErrorBoundary title="Wearable recovery signals unavailable" description="Wearable recovery data could not render safely." resetKey={`${googleHealth?.date ?? ""}-${googleHealth?.status ?? ""}`}>
-        <Card className="xl:col-span-2">
+        <DashboardPanel className="xl:col-span-2" index={7}>
           <SectionHeader
             eyebrow="Recovery"
-            title="Wearable Signals"
+            title={<TitleWithIcon icon={Activity}>Wearable Signals</TitleWithIcon>}
             action={googleHealthReady ? (
               <span className="rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-semibold text-zinc-300">
                 {googleHealth?.source || "google_health"} · {googleHealth?.date || data?.date}
@@ -5792,7 +6118,7 @@ function Dashboard({
                 />
               </div>
               {sicknessSignals.length ? (
-                <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessWarning?.status))}>
+                <div className={cx("rounded-[22px] border p-4 shadow-[0_14px_40px_-30px_rgba(0,0,0,0.85)]", dashboardHealthTone(sicknessWarning?.status))}>
                   <p className="text-sm font-semibold">Possible sickness / elevated recovery risk</p>
                   <p className="mt-2 text-sm leading-6 text-zinc-300">Consider reducing intensity today. Prioritize sleep, hydration, and easy movement. This is not a diagnosis.</p>
                   <div className="mt-3 flex flex-wrap gap-2">
@@ -5802,7 +6128,7 @@ function Dashboard({
                   </div>
                 </div>
               ) : null}
-              <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
+              <details className="group apple-health-card-subtle border border-white/10 bg-white/[0.025] p-4">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">Calculation Details</p>
@@ -5874,11 +6200,11 @@ function Dashboard({
               onAction={() => setActivePage("settings")}
             />
           )}
-        </Card>
+        </DashboardPanel>
       </TargetSectionErrorBoundary>
 
       <TargetSectionErrorBoundary title="Optimization signals unavailable" description="Insufficient recommendation data for this dashboard tile." resetKey={`${data?.date ?? ""}-${recommendationConfidence}`}>
-        <Card className="xl:col-span-2">
+        <DashboardPanel className="xl:col-span-2" index={8}>
           <button
             type="button"
             aria-expanded={signalsExpanded}
@@ -5955,10 +6281,10 @@ function Dashboard({
               </div>
             </div>
           ) : null}
-        </Card>
+        </DashboardPanel>
       </TargetSectionErrorBoundary>
 
-    </div>
+    </motion.div>
   );
 }
 
@@ -6823,7 +7149,13 @@ function FoodPage({
   };
 
   return (
-    <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start" data-testid="food-page">
+    <motion.div
+      className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.85fr)] xl:items-start"
+      data-testid="food-page"
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ duration: 0.32, ease: [0.22, 1, 0.36, 1] }}
+    >
       <div className="min-w-0 space-y-4 xl:self-start">
         <MacroDonutCard
           totals={selectedDateTotals}
@@ -6832,7 +7164,7 @@ function FoodPage({
           dateLabel={selectedDateLabel}
           dayTypeMacros={dayTypeMacros}
         />
-        <Card className="min-w-0">
+        <Card className="min-w-0 overflow-hidden border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.065),rgba(255,255,255,0.025))]">
           <SectionHeader
             eyebrow="Logged foods"
             title={<TitleWithIcon icon={Utensils}>Food logged for {selectedDateLabel}</TitleWithIcon>}
@@ -6842,20 +7174,34 @@ function FoodPage({
                   type="button"
                   onClick={(event) => onWorkoutMarkerSubmit(event as unknown as FormEvent)}
                   title={markerStatusText}
-                  className="inline-flex h-9 items-center gap-2 rounded-lg border border-emerald-300/25 bg-emerald-300/[0.08] px-3 text-xs font-semibold text-emerald-100 transition hover:bg-emerald-300/[0.14]"
+                  className="apple-health-tap inline-flex h-9 items-center gap-2 rounded-2xl border border-emerald-300/25 bg-emerald-300/[0.1] px-3 text-xs font-semibold text-emerald-100 hover:bg-emerald-300/[0.16]"
                 >
                   <Dumbbell className="h-3.5 w-3.5" />
                   Gym Marker
                 </button>
-                <button onClick={() => setShowFoodHistory((value) => !value)} className="inline-flex h-9 items-center gap-2 rounded-lg border border-white/10 px-3 text-xs font-semibold text-zinc-200 transition hover:bg-white/[0.04]">
+                <button onClick={() => setShowFoodHistory((value) => !value)} className="apple-health-tap inline-flex h-9 items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.03] px-3 text-xs font-semibold text-zinc-200 hover:bg-white/[0.06]">
                   {showFoodHistory ? "Hide details" : "View full history/details"}
                   <ChevronDown className={cx("h-4 w-4 transition", showFoodHistory ? "rotate-180" : "")} />
                 </button>
               </div>
             }
           />
-          {latestSelectedMarker ? <p className="mb-3 text-xs font-medium text-emerald-100/80">{markerStatusText}</p> : null}
-          {timelineFeedback ? <p className="mb-3 text-xs font-medium text-emerald-100/80">{timelineFeedback}</p> : null}
+          <div className={cx(
+            "mb-3 flex min-w-0 items-start gap-3 rounded-[24px] border p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]",
+            latestSelectedMarker ? "border-emerald-300/25 bg-emerald-300/[0.075]" : "border-white/10 bg-white/[0.035]",
+          )}>
+            <span className={cx(
+              "grid h-10 w-10 shrink-0 place-items-center rounded-2xl border",
+              latestSelectedMarker ? "border-emerald-300/25 bg-emerald-300/15 text-emerald-100" : "border-white/10 bg-black/20 text-zinc-400",
+            )}>
+              <Dumbbell className="h-5 w-5" />
+            </span>
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-white">{latestSelectedMarker ? "Gym marker active" : "Add a gym marker to split timing"}</p>
+              <p className="mt-1 text-xs leading-5 text-zinc-400">{markerStatusText} Drag foods above or below the marker to classify pre/post workout nutrition.</p>
+            </div>
+          </div>
+          {timelineFeedback ? <p className="mb-3 rounded-2xl border border-emerald-300/20 bg-emerald-300/10 px-3 py-2 text-xs font-medium text-emerald-100/90">{timelineFeedback}</p> : null}
           {timelineError ? <p className="mb-3 text-xs font-medium text-red-200">{timelineError}</p> : null}
           <FoodTimelineList
             items={selectedTimelineItems}
@@ -6874,10 +7220,11 @@ function FoodPage({
             onDragStart={beginTimelineDrag}
             onDragOverItem={reorderTimelineOverItem}
             onDragEnd={finishTimelineDrag}
+            onEmptyAction={() => openQuickEntryPanel("manual")}
           />
           {selectedDateEntries.length ? (
-            <div className="mt-3 grid gap-3 rounded-lg border border-white/10 bg-zinc-950/50 p-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-              <p className="font-semibold text-white">Daily total</p>
+            <div className="mt-3 grid gap-3 rounded-[22px] border border-white/10 bg-zinc-950/50 p-3 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+              <p className="inline-flex items-center gap-2 font-semibold text-white"><Target className="h-4 w-4 text-[var(--accent-primary)]" /> Daily total</p>
               <div className="flex flex-wrap gap-1.5 text-xs text-zinc-300 sm:justify-end">
                 <span className="accent-outline rounded-full border px-2 py-1">{formatFoodAmount(selectedDateTotals.calories)} kcal</span>
                 <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-1">P {formatFoodAmount(selectedDateTotals.protein)}g</span>
@@ -6954,10 +7301,10 @@ function FoodPage({
                   <ChartFrame className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <RechartsLineChart data={recentHistory}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                        <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                         <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                         <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                        <AppleChartTooltip />
                         <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
                         <Line dataKey="target_calories" name="Target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
                       </RechartsLineChart>
@@ -6966,10 +7313,10 @@ function FoodPage({
                   <ChartFrame className="h-72">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={recentHistory}>
-                        <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                        <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                         <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                         <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                        <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                        <AppleChartTooltip />
                         <Area type="monotone" dataKey="total_protein" name="Protein" stroke="#2dd4bf" fill="#2dd4bf33" strokeWidth={2} />
                         <Area type="monotone" dataKey="total_carbs" name="Carbs" stroke="#60a5fa" fill="#60a5fa22" strokeWidth={2} />
                         <Area type="monotone" dataKey="total_fat" name="Fat" stroke="#f59e0b" fill="#f59e0b22" strokeWidth={2} />
@@ -6985,15 +7332,15 @@ function FoodPage({
       </div>
       <div className="order-first flex min-w-0 flex-col gap-4 xl:order-none">
       <div ref={manualFoodEntryRef} className="order-3 scroll-mt-24">
-      <Card className="min-w-0">
-        <SectionHeader eyebrow="Food" title={<TitleWithIcon icon={Utensils}>Manual food entry</TitleWithIcon>} />
-        <div className="mb-4 grid grid-cols-2 rounded-lg border border-white/10 bg-white/[0.035] p-1 text-sm">
+      <Card className="min-w-0 overflow-hidden border-emerald-300/15 bg-[radial-gradient(circle_at_12%_0%,rgba(16,185,129,0.12),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.06),rgba(255,255,255,0.025))]">
+        <SectionHeader eyebrow="Food" title={<TitleWithIcon icon={Pencil}>Manual food entry</TitleWithIcon>} />
+        <div className="mb-4 grid grid-cols-2 rounded-[22px] border border-white/10 bg-black/20 p-1 text-sm shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
           {(["direct", "serving"] as const).map((mode) => (
             <button
               key={mode}
               type="button"
               onClick={() => setManualFoodMode(mode)}
-              className={cx("rounded-md px-3 py-2 font-semibold transition", manualFoodMode === mode ? "accent-active" : "text-zinc-300 hover:bg-white/[0.04]")}
+              className={cx("rounded-2xl px-3 py-2 font-semibold transition", manualFoodMode === mode ? "accent-active shadow-[0_10px_30px_-22px_rgba(132,204,22,0.8)]" : "text-zinc-300 hover:bg-white/[0.04]")}
             >
               <span className="inline-flex items-center justify-center gap-2">
                 {mode === "direct" ? <CircleGauge className="h-4 w-4" /> : <Soup className="h-4 w-4" />}
@@ -7036,7 +7383,7 @@ function FoodPage({
               <TextInput label="Sodium per serving optional" type="number" min={0} step="any" value={servingForm.sodium_per_serving} onChange={(value) => setServingForm((state) => ({ ...state, sodium_per_serving: value === "" ? "" : Number(value) }))} />
               <TextInput label="Potassium per serving optional" type="number" min={0} step="any" value={servingForm.potassium_per_serving} onChange={(value) => setServingForm((state) => ({ ...state, potassium_per_serving: value === "" ? "" : Number(value) }))} />
               <TextInput label="Grams consumed" type="number" min={0} step="any" value={servingForm.grams_consumed} onChange={(value) => setServingForm((state) => ({ ...state, grams_consumed: Number(value) }))} />
-              <div className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
+              <div className="rounded-[22px] border border-white/10 bg-white/[0.045] p-4">
                 <p className="text-sm font-semibold text-white">Live preview</p>
                 <p className="mt-2 text-sm text-zinc-400">Multiplier: {servingPreview.multiplier.toFixed(2)}x</p>
                 <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -7046,14 +7393,14 @@ function FoodPage({
                     ["Carbs", `${Number(servingPreview.carbs.toFixed(1))}g`],
                     ["Fat", `${Number(servingPreview.fat.toFixed(1))}g`],
                   ].map(([label, value]) => (
-                    <div key={label} className="rounded-lg border border-white/10 bg-zinc-950/50 p-3">
+                    <div key={label} className="rounded-2xl border border-white/10 bg-zinc-950/50 p-3">
                       <p className="text-xs text-zinc-500">{label}</p>
                       <p className="mt-1 text-lg font-semibold text-white">{value}</p>
                     </div>
                   ))}
                 </div>
               </div>
-              <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-4">
+              <div className="rounded-[22px] border border-dashed border-white/15 bg-white/[0.03] p-4">
                 <p className="text-sm font-semibold text-white">Upload nutrition label</p>
                 <p className="mt-1 text-sm text-zinc-400">PDF, PNG, JPG, or JPEG. Extraction is a placeholder for now; manual fields stay editable.</p>
                 <input
@@ -7075,12 +7422,12 @@ function FoodPage({
             </>
           )}
           {manualError ? <p className="rounded-lg border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-100">{manualError}</p> : null}
-          <button disabled={manualSaving} className="accent-bg inline-flex h-11 items-center justify-center gap-2 rounded-lg text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-60">
+          <button disabled={manualSaving} className="accent-bg apple-health-tap inline-flex h-12 items-center justify-center gap-2 rounded-2xl text-sm font-semibold shadow-[0_16px_36px_-28px_rgba(132,204,22,0.95)] disabled:cursor-not-allowed disabled:opacity-60">
             <Plus className="h-4 w-4" />
             {manualSaving ? "Saving food..." : manualFoodMode === "serving" ? "Save scaled food entry" : "Add Food"}
           </button>
           {manualFoodMode === "serving" ? (
-            <button type="button" onClick={onSaveServingShortcut} className="inline-flex h-11 items-center justify-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 text-sm font-semibold text-emerald-100">
+            <button type="button" onClick={onSaveServingShortcut} className="apple-health-tap inline-flex h-12 items-center justify-center gap-2 rounded-2xl border border-emerald-300/30 bg-emerald-300/10 text-sm font-semibold text-emerald-100">
               <Plus className="h-4 w-4" />
               Save scaled food as shortcut
             </button>
@@ -7211,10 +7558,10 @@ function FoodPage({
                 <ChartFrame className="h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <RechartsLineChart data={recentHistory}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                      <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                       <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                       <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                      <AppleChartTooltip />
                       <Line dataKey="total_calories" name="Calories" stroke="#60a5fa" strokeWidth={3} dot={false} />
                       <Line dataKey="target_calories" name="Target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} />
                     </RechartsLineChart>
@@ -7223,10 +7570,10 @@ function FoodPage({
                 <ChartFrame className="h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <AreaChart data={recentHistory}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                      <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                       <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                       <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                      <AppleChartTooltip />
                       <Area type="monotone" dataKey="total_protein" name="Protein" stroke="#2dd4bf" fill="#2dd4bf33" strokeWidth={2} />
                       <Area type="monotone" dataKey="total_carbs" name="Carbs" stroke="#60a5fa" fill="#60a5fa22" strokeWidth={2} />
                       <Area type="monotone" dataKey="total_fat" name="Fat" stroke="#f59e0b" fill="#f59e0b22" strokeWidth={2} />
@@ -7241,7 +7588,7 @@ function FoodPage({
           </Card>
         ) : null}
         <div ref={aiFoodEntryRef} className="order-2 scroll-mt-24">
-        <Card className="min-w-0">
+        <Card className="min-w-0 overflow-hidden border-violet-300/15 bg-[radial-gradient(circle_at_14%_0%,rgba(167,139,250,0.13),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.06),rgba(255,255,255,0.025))]">
           <SectionHeader eyebrow="AI text entry" title={<TitleWithIcon icon={WandSparkles}>AI Food Entry</TitleWithIcon>} />
           <form onSubmit={onParseFood} className="space-y-3">
             <div className="grid gap-3 sm:grid-cols-2">
@@ -7251,7 +7598,7 @@ function FoodPage({
               <span>Food list</span>
               <textarea
                 id="ai-food-entry-textarea"
-                className="accent-focus min-h-32 w-full resize-y rounded-lg border border-white/10 bg-white/[0.04] px-3 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
+                className="accent-focus min-h-32 w-full resize-y rounded-[22px] border border-white/10 bg-black/20 px-4 py-3 text-zinc-100 outline-none transition placeholder:text-zinc-600"
                 value={aiText}
                 maxLength={4000}
                 placeholder="Example: 2 Kirkland bagels, Built Puff Bar, Fairlife milk"
@@ -7259,7 +7606,7 @@ function FoodPage({
               />
               <span className="block text-xs text-zinc-600">{aiText.length}/4000</span>
             </label>
-            <button disabled={parseLoading || !aiText.trim() || !aiParsingConfigured} className="inline-flex h-11 items-center gap-2 rounded-lg bg-violet-300 px-4 text-sm font-semibold text-zinc-950 disabled:cursor-not-allowed disabled:opacity-60">
+            <button disabled={parseLoading || !aiText.trim() || !aiParsingConfigured} className="apple-health-tap inline-flex h-12 items-center gap-2 rounded-2xl bg-violet-300 px-5 text-sm font-semibold text-zinc-950 shadow-[0_16px_36px_-28px_rgba(167,139,250,0.95)] disabled:cursor-not-allowed disabled:opacity-60">
               <Sparkles className="h-4 w-4" />
               {parseLoading ? "Analyzing..." : "Analyze"}
             </button>
@@ -7424,19 +7771,19 @@ function FoodPage({
                 </p>
               ) : null}
               <div className="flex flex-wrap gap-2">
-                <button className="accent-bg inline-flex h-11 items-center gap-2 rounded-lg px-4 text-sm font-semibold">
+                <button className="accent-bg apple-health-tap inline-flex h-11 items-center gap-2 rounded-2xl px-4 text-sm font-semibold">
                   <Plus className="h-4 w-4" />
                   Save to today
                 </button>
-                <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
+                <button type="button" onClick={(event) => onSaveShortcut(event as unknown as FormEvent)} className="apple-health-tap inline-flex h-11 items-center gap-2 rounded-2xl border border-emerald-300/30 bg-emerald-300/10 px-4 text-sm font-semibold text-emerald-100">
                   <Utensils className="h-4 w-4" />
                   Save as Food Shortcut
                 </button>
-                <button type="button" onClick={(event) => onSaveMealTemplate(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg border border-violet-300/30 bg-violet-300/10 px-4 text-sm font-semibold text-violet-100">
+                <button type="button" onClick={(event) => onSaveMealTemplate(event as unknown as FormEvent)} className="apple-health-tap inline-flex h-11 items-center gap-2 rounded-2xl border border-violet-300/30 bg-violet-300/10 px-4 text-sm font-semibold text-violet-100">
                   <Soup className="h-4 w-4" />
                   Save as Meal Template
                 </button>
-                <button type="button" onClick={(event) => onSaveAndLogToday(event as unknown as FormEvent)} className="inline-flex h-11 items-center gap-2 rounded-lg bg-amber-300 px-4 text-sm font-semibold text-zinc-950">
+                <button type="button" onClick={(event) => onSaveAndLogToday(event as unknown as FormEvent)} className="apple-health-tap inline-flex h-11 items-center gap-2 rounded-2xl bg-amber-300 px-4 text-sm font-semibold text-zinc-950">
                   <Star className="h-4 w-4" />
                   Save shortcut, meal, and log
                 </button>
@@ -7449,7 +7796,7 @@ function FoodPage({
           <SectionHeader eyebrow="Log" title="Recent saved foods" />
           <FoodLogList entries={logs.slice(-5).reverse()} emptyDescription="Manual food entries will appear here after saving." />
         </Card>
-        <Card className="order-1 min-w-0">
+        <Card className="order-1 min-w-0 overflow-hidden border-white/10 bg-[radial-gradient(circle_at_18%_0%,rgba(132,204,22,0.12),transparent_34%),linear-gradient(145deg,rgba(255,255,255,0.065),rgba(255,255,255,0.025))]">
           <SectionHeader
             eyebrow="Fast log"
             title={<TitleWithIcon icon={Star}>Preset foods & meals</TitleWithIcon>}
@@ -7467,7 +7814,7 @@ function FoodPage({
                     setEditingShortcut(null);
                     cancelTemplateRename();
                   }}
-                  className={cx("inline-flex items-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition", presetEditMode ? "accent-outline" : "border-white/10 text-zinc-200 hover:bg-white/[0.04]")}
+                  className={cx("apple-health-tap inline-flex items-center gap-2 rounded-2xl border px-3 py-2 text-sm font-semibold", presetEditMode ? "accent-outline" : "border-white/10 bg-white/[0.03] text-zinc-200 hover:bg-white/[0.06]")}
                 >
                   <Pencil className="h-4 w-4" />
                   {presetEditMode ? "Done editing" : "Edit Presets"}
@@ -7480,10 +7827,10 @@ function FoodPage({
               <button
                 type="button"
                 onClick={() => openQuickEntryPanel("manual")}
-                className="group flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-3 text-left transition hover:-translate-y-0.5 hover:border-emerald-300/25 hover:bg-emerald-300/[0.06]"
+                className="apple-health-tap group flex min-w-0 items-center gap-3 rounded-[24px] border border-emerald-300/15 bg-[linear-gradient(145deg,rgba(16,185,129,0.13),rgba(255,255,255,0.035))] p-4 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.09)] hover:-translate-y-0.5 hover:border-emerald-300/30"
               >
-                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-emerald-300/20 bg-emerald-300/10 text-emerald-100 transition group-hover:scale-105">
-                  <Pencil className="h-5 w-5" />
+                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-emerald-300/25 bg-emerald-300/15 text-emerald-100 shadow-[0_0_20px_rgba(16,185,129,0.12)] transition group-hover:scale-105">
+                  <Pencil className="h-5 w-5" strokeWidth={2.4} />
                 </span>
                 <span className="min-w-0">
                   <span className="block font-semibold text-white">Manual food entry</span>
@@ -7493,10 +7840,10 @@ function FoodPage({
               <button
                 type="button"
                 onClick={() => openQuickEntryPanel("ai")}
-                className="group flex min-w-0 items-center gap-3 rounded-xl border border-white/10 bg-white/[0.035] p-3 text-left transition hover:-translate-y-0.5 hover:border-violet-300/25 hover:bg-violet-300/[0.06]"
+                className="apple-health-tap group flex min-w-0 items-center gap-3 rounded-[24px] border border-violet-300/15 bg-[linear-gradient(145deg,rgba(167,139,250,0.14),rgba(255,255,255,0.035))] p-4 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.09)] hover:-translate-y-0.5 hover:border-violet-300/30"
               >
-                <span className="grid h-11 w-11 shrink-0 place-items-center rounded-xl border border-violet-300/20 bg-violet-300/10 text-violet-100 transition group-hover:scale-105">
-                  <WandSparkles className="h-5 w-5" />
+                <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl border border-violet-300/25 bg-violet-300/15 text-violet-100 shadow-[0_0_20px_rgba(167,139,250,0.13)] transition group-hover:scale-105">
+                  <WandSparkles className="h-5 w-5" strokeWidth={2.4} />
                 </span>
                 <span className="min-w-0">
                   <span className="block font-semibold text-white">AI text entry</span>
@@ -7504,16 +7851,21 @@ function FoodPage({
                 </span>
               </button>
             </div>
+            <div className="flex flex-wrap gap-2 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1">{presetShortcuts.length} saved foods</span>
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1">{templateSummaries.length} saved meals</span>
+              <span className="rounded-full border border-white/10 bg-white/[0.035] px-3 py-1">{frequentFoods.length} frequent</span>
+            </div>
             <div className="space-y-2">
               <label className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500" htmlFor="preset-food-search">Search library</label>
               <div className="relative">
-                <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
                 <input
                   id="preset-food-search"
                   value={shortcutQuery}
                   placeholder="Bagel, shake, burrito"
                   onChange={(event) => setShortcutQuery(event.target.value)}
-                  className="h-11 w-full rounded-xl border border-white/10 bg-zinc-950/70 pl-10 pr-10 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-300/35 focus:bg-zinc-950"
+                  className="h-12 w-full rounded-[22px] border border-white/10 bg-zinc-950/70 pl-11 pr-10 text-sm text-white outline-none transition placeholder:text-zinc-600 focus:border-emerald-300/35 focus:bg-zinc-950"
                 />
                 {shortcutQuery ? (
                   <button
@@ -7571,7 +7923,7 @@ function FoodPage({
                 ) : null}
               </div>
             ) : (
-              <EmptyState title="No matching presets" description="Clear the search or save a new shortcut from the AI review flow." action="Use AI parser" onAction={() => undefined} />
+              <EmptyState title="No matching presets" description="Clear the search, add a custom meal, or describe what you ate with AI text entry." action="Use AI text entry" onAction={() => openQuickEntryPanel("ai")} />
             )
             ) : null}
             {shortcutTab === "meals" ? (
@@ -7652,7 +8004,7 @@ function FoodPage({
                 ) : null}
               </div>
             ) : (
-              <EmptyState title="No meal templates yet" description="Save an AI parse as a meal template to reuse it here." action="Use AI parser" onAction={() => undefined} />
+              <EmptyState title="No meal templates yet" description="Save an AI parse as a meal template to reuse it here." action="Use AI text entry" onAction={() => openQuickEntryPanel("ai")} />
             )
             ) : null}
             {shortcutTab === "frequent" ? (
@@ -7713,14 +8065,14 @@ function FoodPage({
                   })}
                 </div>
               ) : (
-                <EmptyState title="No frequent foods yet" description="Frequent foods appear after repeated logging." action="Log food" onAction={() => undefined} />
+                <EmptyState title="No frequent foods yet" description="Frequent foods appear after repeated logging." action="Add meal" onAction={() => openQuickEntryPanel("manual")} />
               )
             ) : null}
           </div>
         </Card>
       </div>
       </div>
-    </div>
+    </motion.div>
   );
 }
 
@@ -8010,7 +8362,7 @@ function BodyCompositionChart({ history, tab }: Readonly<{ history: WeightChartP
                 <stop offset="100%" stopColor="#a3e635" stopOpacity={0.02} />
               </linearGradient>
             </defs>
-            <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+            <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
             <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={28} tickFormatter={compactDate} />
             <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={46} />
             <Tooltip content={<WeightTooltip />} />
@@ -8041,7 +8393,7 @@ function BodyCompositionChart({ history, tab }: Readonly<{ history: WeightChartP
       <ChartFrame className="h-96">
         <ResponsiveContainer width="100%" height="100%">
           <RechartsLineChart data={history}>
-            <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+            <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
             <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={28} tickFormatter={compactDate} />
             <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={46} />
             <Tooltip content={<WeightTooltip />} />
@@ -8077,15 +8429,16 @@ function AnalyticsStatTile({
   icon: React.ElementType;
 }>) {
   return (
-    <div className="min-h-[124px] rounded-lg border border-white/10 bg-white/[0.035] p-4">
+    <div className="apple-health-card-subtle apple-health-tap min-h-[132px] border border-white/10 bg-[linear-gradient(145deg,rgba(255,255,255,0.07),rgba(255,255,255,0.028))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="text-xs font-semibold uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-          <p className="mt-2 text-xl font-semibold text-white">{value}</p>
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</p>
+          <p className="apple-health-number mt-2 text-2xl font-semibold tracking-[-0.02em] text-white">{value}</p>
         </div>
-        <div className={cx("rounded-lg border p-2", dashboardHealthTone(status))}>
-          <Icon className="h-4 w-4" />
-        </div>
+        <MetricIcon icon={Icon} tone={dashboardHealthTone(status)} />
+      </div>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {status ? <StatusBadge status={status}>{String(status).replaceAll("_", " ")}</StatusBadge> : null}
       </div>
       <p className="mt-3 text-xs leading-5 text-zinc-400">{detail}</p>
     </div>
@@ -8102,10 +8455,13 @@ function AnalyticsChartBlock({
   empty?: boolean;
 }>) {
   return (
-    <div className="rounded-lg border border-white/10 bg-white/[0.025] p-4">
-      <p className="text-sm font-semibold text-white">{title}</p>
+    <div className="apple-health-card-subtle border border-white/10 bg-white/[0.035] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.065)]">
+      <p className="inline-flex items-center gap-2 text-sm font-semibold tracking-[-0.01em] text-white">
+        <span className="h-2 w-2 rounded-full bg-[var(--accent-primary)] shadow-[0_0_14px_rgba(132,204,22,0.45)]" />
+        {title}
+      </p>
       {empty ? (
-        <div className="mt-3 flex h-52 items-center rounded-lg border border-dashed border-white/10 bg-black/10 p-4 text-sm leading-6 text-zinc-400">
+        <div className="mt-3 flex h-52 items-center rounded-[22px] border border-dashed border-white/10 bg-black/10 p-4 text-sm leading-6 text-zinc-400">
           More passive wearable history is needed before this chart can render.
         </div>
       ) : children}
@@ -8124,6 +8480,20 @@ function formatSignedAnalyticsNumber(value: unknown, unit = "", digits = 0) {
   if (parsed === null) return "--";
   const formatted = parsed.toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
   return `${parsed > 0 ? "+" : ""}${formatted}${unit}`;
+}
+
+const APPLE_CHART_GRID_STROKE = "rgba(255,255,255,0.06)";
+const APPLE_CHART_TOOLTIP_STYLE = {
+  background: "rgba(9,9,11,0.96)",
+  border: "1px solid rgba(255,255,255,0.14)",
+  borderRadius: 16,
+  color: "#fff",
+  boxShadow: "0 18px 40px rgba(0,0,0,0.35)",
+} as const;
+
+function compactDateTicks<T extends { date?: string | null }>(rows: T[]) {
+  const dates = Array.from(new Set(rows.map((row) => String(row.date || "").slice(0, 10)).filter(Boolean)));
+  return dates.length <= 1 ? dates : undefined;
 }
 
 function wearableSleepHours(metric: WearableMetricEntry | null | undefined) {
@@ -8233,6 +8603,14 @@ function RecoveryPage({
   const awakeMinutes = finiteNumberOrNull(sleepQuality?.awake_minutes) ?? finiteNumberOrNull(latestWearable?.awake_minutes) ?? finiteNumberOrNull(latestSleep?.awakeMinutes);
   const sleepEfficiency = finiteNumberOrNull(sleepQuality?.efficiency) ?? finiteNumberOrNull(latestWearable?.sleep_efficiency) ?? finiteNumberOrNull(latestSleep?.efficiencyPercent);
   const recoveryReadinessScore = googleHealthReady ? finiteNumberOrNull(recoveryReadiness?.score) : finiteNumberOrNull(dashboardRecovery?.latest_score);
+  const sleepBaselineState = String(sleepQuality?.baseline_state || sleepQuality?.status || "").toLowerCase();
+  const sleepLearning = Boolean(sleepQuality?.provisional || ["early_data", "learning_baseline", "learning"].includes(sleepBaselineState));
+  const sleepLearningLabel = sleepQuality?.baseline_label || (sleepBaselineState === "early_data" ? "Early data" : "Learning baseline");
+  const sleepNeededNights = finiteNumberOrNull(sleepQuality?.needed_nights);
+  const recoveryBaselineState = String(recoveryReadiness?.baseline_status?.state || recoveryReadiness?.status || "").toLowerCase();
+  const recoveryLearning = Boolean(recoveryReadiness?.provisional || ["early_data", "learning_baseline", "learning"].includes(recoveryBaselineState));
+  const recoveryLearningLabel = recoveryReadiness?.baseline_status?.label || (recoveryBaselineState === "early_data" ? "Early data" : "Learning baseline");
+  const recoveryNeededNights = finiteNumberOrNull(recoveryReadiness?.baseline_status?.needed_nights);
   const restingHr = finiteNumberOrNull(restingHrSignal?.resting_hr) ?? finiteNumberOrNull(latestWearable?.resting_hr) ?? finiteNumberOrNull(latestSleep?.restingHeartRate);
   const restingHrBaseline = finiteNumberOrNull(restingHrSignal?.baseline) ?? finiteNumberOrNull(latestWearable?.resting_hr_baseline);
   const restingHrDeviation = finiteNumberOrNull(restingHrSignal?.deviation) ?? finiteNumberOrNull(latestWearable?.resting_hr_deviation);
@@ -8287,6 +8665,24 @@ function RecoveryPage({
     : googleHealthReady || latestWearable
       ? "Heart-rate/HRV unavailable; using sleep, activity, calories, and training load."
       : "Connect Google Health / Fitbit for passive scoring.";
+  const recoveryReadinessValue = recoveryLearning
+    ? recoveryReadinessScore !== null && recoveryReadinessScore > 0
+      ? `${Math.round(recoveryReadinessScore)}/100`
+      : recoveryLearningLabel
+    : recoveryReadinessScore !== null
+      ? `${Math.round(recoveryReadinessScore)}/100`
+      : "--";
+  const recoveryReadinessDetail = recoveryLearning
+    ? `${recoveryLearningLabel}${recoveryNeededNights !== null ? ` · Need ${Math.round(recoveryNeededNights)} more night${Math.round(recoveryNeededNights) === 1 ? "" : "s"}` : ""}. ${recoveryReadiness?.message || "Using available raw wearable values provisionally."}`
+    : recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.";
+  const sleepQualityValue = sleepLearning && (!sleepScore || sleepScore <= 0)
+    ? sleepLearningLabel
+    : sleepScore !== null
+      ? `${Math.round(sleepScore)}/100`
+      : "--";
+  const sleepQualityDetail = sleepLearning
+    ? `${sleepLearningLabel}${sleepNeededNights !== null ? ` · Need ${Math.round(sleepNeededNights)} more night${Math.round(sleepNeededNights) === 1 ? "" : "s"}` : ""} · ${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`
+    : `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`;
   const wearableFlags = Array.isArray(wearableSignals?.flags) ? wearableSignals.flags : [];
   const sleepDurationData = useMemo(() => {
     const wearableSleep = sortedWearableMetrics
@@ -8362,14 +8758,53 @@ function RecoveryPage({
     { label: "Projected monthly gain", value: formatSignedAnalyticsNumber(projectedMonthlyGain, " lb", 1), detail: "Projected from current weekly bodyweight velocity.", status: projectedMonthlyGain !== null ? "normal" : "insufficient_data", icon: BarChart3 },
   ];
   const recoverySummaryCards = [
-    { label: "Recovery Readiness", value: recoveryReadiness?.provisional ? "Learning" : recoveryReadinessScore !== null ? `${Math.round(recoveryReadinessScore)}/100` : "--", detail: recoveryReadiness?.message || dashboardRecovery?.message || "Uses wearable sleep, HR, vitals, and training load.", status: recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
-    { label: "Sleep Quality", value: sleepScore !== null ? `${Math.round(sleepScore)}/100` : "--", detail: `${formatAnalyticsNumber(currentSleepHours, "h", 1)} sleep · efficiency ${formatAnalyticsNumber(sleepEfficiency, "%")}`, status: sleepQuality?.status, icon: HeartPulse },
-    { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: HeartPulse },
-    { label: "Resting HR vs baseline", value: restingHrLearning ? `${formatAnalyticsNumber(restingHr, " bpm")} / Learning` : restingHr === null ? restingHrUnavailableLabel : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "Clean resting HR samples are not available; this is not penalized." : restingHrLearning ? `Learning baseline · Need ${restingHrSignal?.needed_nights ?? "--"} more night${restingHrSignal?.needed_nights === 1 ? "" : "s"}.` : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrSignal?.status, icon: HeartPulse },
-    { label: "HRV vs baseline", value: hrvLearning ? `${formatAnalyticsNumber(hrvValue)} / Learning` : hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvLearning ? `Learning baseline · Need ${hrvSignal?.needed_nights ?? "--"} more night${hrvSignal?.needed_nights === 1 ? "" : "s"}.` : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvSignal?.status, icon: Gauge },
-    { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status, icon: BarChart3 },
+    { label: "Recovery Readiness", value: recoveryReadinessValue, detail: recoveryReadinessDetail, status: recoveryLearning ? "learning_baseline" : recoveryReadiness?.status || dashboardRecovery?.extra_run_readiness?.status, icon: Gauge },
+    { label: "Sleep Quality", value: sleepQualityValue, detail: sleepQualityDetail, status: sleepLearning ? "learning_baseline" : sleepQuality?.status, icon: Moon },
+    { label: "Sleep duration", value: sleepDurationMinutes !== null ? formatSleepDuration(sleepDurationMinutes) : "No data", detail: `REM ${formatAnalyticsNumber(remMinutes, "m")} · Deep ${formatAnalyticsNumber(deepMinutes, "m")} · Awake ${formatAnalyticsNumber(awakeMinutes, "m")}`, status: currentSleepHours === null ? "insufficient_data" : currentSleepHours >= 7 ? "good" : currentSleepHours >= 6.5 ? "watch" : "poor", icon: Moon },
+    { label: "Resting HR vs baseline", value: restingHrLearning ? `${formatAnalyticsNumber(restingHr, " bpm")} / Learning` : restingHr === null ? restingHrUnavailableLabel : `${formatAnalyticsNumber(restingHr, " bpm")} / ${formatAnalyticsNumber(restingHrBaseline, " bpm")}`, detail: restingHr === null ? "Clean resting HR samples are not available; this is not penalized." : restingHrLearning ? `Learning baseline · Need ${restingHrSignal?.needed_nights ?? "--"} more night${restingHrSignal?.needed_nights === 1 ? "" : "s"}.` : `Deviation ${formatSignedAnalyticsNumber(restingHrDeviation, " bpm", 1)}`, status: restingHr === null ? "insufficient_data" : restingHrLearning ? "learning_baseline" : restingHrSignal?.status, icon: HeartPulse },
+    { label: "HRV vs baseline", value: hrvLearning ? `${formatAnalyticsNumber(hrvValue)} / Learning` : hrvValue === null ? "HRV unavailable" : `${formatAnalyticsNumber(hrvValue)} / ${formatAnalyticsNumber(hrvBaseline)}`, detail: hrvValue === null ? "Missing HRV lowers confidence but does not penalize readiness." : hrvLearning ? `Learning baseline · Need ${hrvSignal?.needed_nights ?? "--"} more night${hrvSignal?.needed_nights === 1 ? "" : "s"}.` : hrvSignal?.status ? hrvSignal.status.replaceAll("_", " ") : "Baseline learns from wearable history.", status: hrvValue === null ? "insufficient_data" : hrvLearning ? "learning_baseline" : hrvSignal?.status, icon: Activity },
+    { label: "Activity load", value: activityLoadSignal?.status === "high" ? "High" : activityLoadSignal?.status === "normal" ? "Normal" : "Learning", detail: `${formatAnalyticsNumber(activeMinutes, "m")} active · ${formatAnalyticsNumber(activeZoneMinutes, "m")} zone · ${formatAnalyticsNumber(steps)} steps`, status: activityLoadSignal?.status || "learning_baseline", icon: Activity },
     { label: "Sickness warning", value: sicknessLabel, detail: sicknessWarning?.message || trainingReadiness?.sickness_warning?.message || "Conservative, non-diagnostic recovery stress signal.", status: sicknessStatus, icon: AlertTriangle },
     { label: "Recovery confidence", value: recoveryConfidence, detail: recoveryConfidenceDetail, status: recoveryConfidence.includes("measured") ? "good" : recoveryConfidence.includes("partial") ? "watch" : "insufficient_data", icon: Sparkles },
+  ];
+  const googleHealthDebug = recordOrEmpty(googleHealth?.debug);
+  const hrDiagnostics = recordOrEmpty(googleHealthDebug.hr_diagnostics ?? googleHealthDebug.heart_rate_diagnostics ?? googleHealthDebug.sample_diagnostics);
+  const rawPayloadDiagnostics = recordOrEmpty(recordOrEmpty(latestWearable?.raw_payload).diagnostics);
+  const diagnosticNumber = (...values: unknown[]) => {
+    for (const value of values) {
+      const parsed = finiteNumberOrNull(value);
+      if (parsed !== null) return parsed;
+    }
+    return null;
+  };
+  const rawHrSamples = diagnosticNumber(
+    googleHealthDebug.raw_hr_samples_received,
+    googleHealthDebug.raw_hr_samples,
+    hrDiagnostics.raw_hr_samples_received,
+    hrDiagnostics.raw_samples,
+    rawPayloadDiagnostics.raw_hr_samples_received,
+  );
+  const invalidHrSamples = diagnosticNumber(
+    googleHealthDebug.invalid_hr_samples_dropped,
+    googleHealthDebug.invalid_hr_samples,
+    hrDiagnostics.invalid_hr_samples_dropped,
+    hrDiagnostics.invalid_samples,
+    rawPayloadDiagnostics.invalid_hr_samples_dropped,
+  );
+  const cleanHrSamples = diagnosticNumber(
+    googleHealthDebug.clean_hr_samples_used,
+    googleHealthDebug.clean_hr_samples,
+    hrDiagnostics.clean_hr_samples_used,
+    hrDiagnostics.clean_samples,
+    rawPayloadDiagnostics.clean_hr_samples_used,
+  );
+  const wearableDiagnosticCards = [
+    { label: "Connection", value: googleHealthReady || latestWearable ? "Connected" : "No wearable data", detail: googleHealth?.source || latestWearable?.provider || latestWearable?.source || "Google Health / Fitbit", status: googleHealthReady || latestWearable ? "good" : "insufficient_data", icon: HeartPulse },
+    { label: "Last sync", value: googleHealth?.date || latestWearable?.date || "--", detail: googleHealth?.latest_metric_date || String(googleHealthDebug.latest_metric_date || "") || "Latest metric date pending", status: googleHealth?.date || latestWearable?.date ? "normal" : "insufficient_data", icon: RefreshCw },
+    { label: "Raw HR samples", value: rawHrSamples !== null ? Math.round(rawHrSamples).toLocaleString() : "--", detail: "Received before wearable cleanup, when exposed by diagnostics.", status: rawHrSamples !== null ? "normal" : "insufficient_data", icon: Activity },
+    { label: "Invalid HR dropped", value: invalidHrSamples !== null ? Math.round(invalidHrSamples).toLocaleString() : "--", detail: "Zero or impossible heart-rate samples removed before scoring.", status: invalidHrSamples && invalidHrSamples > 0 ? "watch" : invalidHrSamples === 0 ? "good" : "insufficient_data", icon: AlertTriangle },
+    { label: "Clean HR used", value: cleanHrSamples !== null ? Math.round(cleanHrSamples).toLocaleString() : "--", detail: "Clean samples available for resting HR and recovery baselines.", status: cleanHrSamples && cleanHrSamples > 0 ? "good" : "insufficient_data", icon: HeartPulse },
+    { label: "Populated fields", value: latestWearable?.populated_metric_count !== undefined && latestWearable?.populated_metric_count !== null ? Math.round(Number(latestWearable.populated_metric_count)).toLocaleString() : `${Object.keys(recordOrEmpty(googleHealthDebug.fields_used)).length}`, detail: `Rows available: ${googleHealthDebug.metric_rows_available ?? wearableMetrics.length ?? "--"}`, status: latestWearable || googleHealthReady ? "normal" : "insufficient_data", icon: Check },
   ];
 
   return (
@@ -8406,8 +8841,8 @@ function RecoveryPage({
                     <stop offset="100%" stopColor="#a3e635" stopOpacity={0.02} />
                   </linearGradient>
                 </defs>
-                <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={24} tickFormatter={compactDate} />
+                <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={24} tickFormatter={compactDate} ticks={compactDateTicks(weightHistory.slice(-45))} />
                 <YAxis domain={["dataMin - 3", "dataMax + 3"]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={42} />
                 <Tooltip content={<WeightTooltip />} />
                 <Area type="monotone" dataKey="bodyweight" name="Weight" stroke="#a3e635" strokeWidth={3} fill="url(#recoveryWeightFill)" dot={false} activeDot={{ r: 5 }} />
@@ -8485,15 +8920,44 @@ function RecoveryPage({
         <div className="grid gap-3 sm:grid-cols-2 2xl:grid-cols-4">
           {recoverySummaryCards.map((card) => <AnalyticsStatTile key={card.label} {...card} />)}
         </div>
-        {sicknessLevel === "normal" || sicknessLevel === "unavailable" ? (
-          <p className="rounded-lg border border-white/10 bg-white/[0.025] p-3 text-sm leading-6 text-zinc-400">
-            No sickness pattern detected from available wearable data.
-          </p>
-        ) : (
-          <div className={cx("rounded-lg border p-4", dashboardHealthTone(sicknessStatus))}>
+        <div className="rounded-[26px] border border-white/10 bg-white/[0.035] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.07)]">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <p className="inline-flex items-center gap-2 text-sm font-semibold text-white">
+              <Activity className="h-4 w-4 text-[var(--accent-primary)]" />
+              Wearable diagnostics
+            </p>
+            <StatusBadge status={googleHealthReady || latestWearable ? "good" : "insufficient_data"}>
+              {googleHealthReady || latestWearable ? "connected" : "not connected"}
+            </StatusBadge>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {wearableDiagnosticCards.map((card) => {
+              const Icon = card.icon;
+              return (
+                <div key={card.label} className="rounded-2xl border border-white/10 bg-black/15 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">{card.label}</p>
+                      <p className="mt-1 truncate text-sm font-semibold text-white">{card.value}</p>
+                    </div>
+                    <span className={cx("grid h-8 w-8 shrink-0 place-items-center rounded-xl border", dashboardHealthTone(card.status))}>
+                      <Icon className="h-4 w-4" />
+                    </span>
+                  </div>
+                  <p className="mt-2 text-xs leading-5 text-zinc-500">{card.detail}</p>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+        {sicknessLevel === "normal" || sicknessLevel === "unavailable" ? null : (
+          <div className={cx("rounded-[26px] border p-4 shadow-[0_18px_50px_-36px_rgba(0,0,0,0.9)]", dashboardHealthTone(sicknessStatus))}>
             <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
               <div>
-                <p className="text-sm font-semibold text-white">{sicknessLabel}</p>
+                <p className="inline-flex items-center gap-2 text-sm font-semibold text-white">
+                  <AlertTriangle className="h-4 w-4" />
+                  {sicknessLabel}
+                </p>
                 <p className="mt-2 text-sm leading-6 text-zinc-300">
                   {sicknessStatus === "warning"
                     ? "Possible elevated recovery stress. Consider reducing intensity today and prioritize hydration and sleep."
@@ -8518,10 +8982,10 @@ function RecoveryPage({
             <ChartFrame className="mt-3 h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={sleepDurationData}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(sleepDurationData)} />
                   <YAxis domain={[0, 10]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Line dataKey="target" stroke="#71717a" strokeDasharray="4 4" dot={false} strokeWidth={2} />
                   <Line dataKey="hours" stroke="#60a5fa" dot={false} strokeWidth={3} />
                 </RechartsLineChart>
@@ -8532,10 +8996,10 @@ function RecoveryPage({
             <ChartFrame className="mt-3 h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={sleepStageData}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(sleepStageData)} />
                   <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Bar dataKey="deep" stackId="sleep" fill="#60a5fa" radius={[0, 0, 4, 4]} />
                   <Bar dataKey="rem" stackId="sleep" fill="#a78bfa" />
                   <Bar dataKey="light" stackId="sleep" fill="#34d399" />
@@ -8548,10 +9012,10 @@ function RecoveryPage({
             <ChartFrame className="mt-3 h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={heartTrendData}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(heartTrendData)} />
                   <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Line type="monotone" dataKey="restingHr" stroke="#fb7185" dot={false} strokeWidth={3} connectNulls />
                 </RechartsLineChart>
               </ResponsiveContainer>
@@ -8561,10 +9025,10 @@ function RecoveryPage({
             <ChartFrame className="mt-3 h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={heartTrendData}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(heartTrendData)} />
                   <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Line type="monotone" dataKey="hrv" stroke="#a78bfa" dot={false} strokeWidth={3} connectNulls />
                 </RechartsLineChart>
               </ResponsiveContainer>
@@ -8580,10 +9044,10 @@ function RecoveryPage({
                       <stop offset="100%" stopColor="#34d399" stopOpacity={0.02} />
                     </linearGradient>
                   </defs>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(readinessTrendData)} />
                   <YAxis domain={[0, 100]} tick={{ fill: "#a1a1aa", fontSize: 12 }} width={36} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Area type="monotone" dataKey="recoveryScore" stroke="#34d399" strokeWidth={3} fill="url(#readinessTrendFill)" dot={false} />
                 </AreaChart>
               </ResponsiveContainer>
@@ -8593,10 +9057,10 @@ function RecoveryPage({
             <ChartFrame className="mt-3 h-52">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={activityTrendData}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
-                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} />
+                  <CartesianGrid stroke={APPLE_CHART_GRID_STROKE} vertical={false} />
+                  <XAxis dataKey="date" tick={{ fill: "#a1a1aa", fontSize: 12 }} minTickGap={18} tickFormatter={compactDate} ticks={compactDateTicks(activityTrendData)} />
                   <YAxis tick={{ fill: "#a1a1aa", fontSize: 12 }} width={38} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", color: "#fff" }} />
+                  <AppleChartTooltip />
                   <Bar dataKey="activeMinutes" fill="#34d399" radius={[4, 4, 0, 0]} />
                   <Bar dataKey="activeZoneMinutes" fill="#fbbf24" radius={[4, 4, 0, 0]} />
                 </BarChart>
@@ -8606,18 +9070,23 @@ function RecoveryPage({
         </div>
         <div className="grid gap-3 sm:grid-cols-2">
           {[
-            ["REM sleep", formatAnalyticsNumber(remMinutes, "m"), "Restorative sleep signal"],
-            ["Deep sleep", formatAnalyticsNumber(deepMinutes, "m"), "Physical recovery signal"],
-            ["Light sleep", formatAnalyticsNumber(lightMinutes, "m"), "Stage total when available"],
-            ["Awake time", formatAnalyticsNumber(awakeMinutes, "m"), "Sleep fragmentation context"],
-            ["Calories burned", formatAnalyticsNumber(caloriesBurned, " kcal"), "Activity context only"],
-            ["Workout HR", `${formatAnalyticsNumber(latestWearable?.workout_average_hr, " bpm")} avg / ${formatAnalyticsNumber(latestWearable?.workout_max_hr, " bpm")} max`, "Workout intensity if available"],
-            ["Breathing rate", formatAnalyticsNumber(breathingRate, "/min", 1), "Optional health signal"],
-            ["SpO2 / temp", `${formatAnalyticsNumber(spo2, "%")} / ${formatAnalyticsNumber(skinTemperature ?? bodyTemperature, "", 1)}`, "Optional sickness-warning inputs"],
-          ].map(([label, value, detail]) => (
-            <div key={label} className="rounded-lg border border-white/10 bg-white/[0.025] p-3">
-              <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-              <p className="mt-1 text-sm font-semibold text-white">{value}</p>
+            { label: "REM sleep", value: formatAnalyticsNumber(remMinutes, "m"), detail: "Restorative sleep signal", icon: Moon },
+            { label: "Deep sleep", value: formatAnalyticsNumber(deepMinutes, "m"), detail: "Physical recovery signal", icon: Moon },
+            { label: "Light sleep", value: formatAnalyticsNumber(lightMinutes, "m"), detail: "Stage total when available", icon: Moon },
+            { label: "Awake time", value: formatAnalyticsNumber(awakeMinutes, "m"), detail: "Sleep fragmentation context", icon: Activity },
+            { label: "Calories burned", value: formatAnalyticsNumber(caloriesBurned, " kcal"), detail: "Activity context only", icon: Flame },
+            { label: "Workout HR", value: `${formatAnalyticsNumber(latestWearable?.workout_average_hr, " bpm")} avg / ${formatAnalyticsNumber(latestWearable?.workout_max_hr, " bpm")} max`, detail: "Workout intensity if available", icon: HeartPulse },
+            { label: "Breathing rate", value: formatAnalyticsNumber(breathingRate, "/min", 1), detail: "Optional health signal", icon: Activity },
+            { label: "SpO2 / temp", value: `${formatAnalyticsNumber(spo2, "%")} / ${formatAnalyticsNumber(skinTemperature ?? bodyTemperature, "", 1)}`, detail: "Optional sickness-warning inputs", icon: Thermometer },
+          ].map(({ label, value, detail, icon: Icon }) => (
+            <div key={label} className="rounded-[22px] border border-white/10 bg-white/[0.025] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
+                  <p className="mt-1 text-sm font-semibold text-white">{value}</p>
+                </div>
+                <MetricIcon icon={Icon} size="sm" tone="border-white/10 bg-white/[0.04] text-zinc-200" />
+              </div>
               <p className="mt-1 text-xs text-zinc-500">{detail}</p>
             </div>
           ))}
@@ -9298,10 +9767,10 @@ function StrengthTrendsSection({
                     <ChartFrame className="h-64">
                       <ResponsiveContainer width="100%" height="100%">
                         <RechartsLineChart data={trendChartData}>
-                          <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                          <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                           <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                           <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                          <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                          <AppleChartTooltip />
                           <Line dataKey="estimated_1rm" stroke="#a78bfa" strokeWidth={3} dot={false} />
                         </RechartsLineChart>
                       </ResponsiveContainer>
@@ -9309,10 +9778,10 @@ function StrengthTrendsSection({
                     <ChartFrame className="h-64">
                       <ResponsiveContainer width="100%" height="100%">
                         <BarChart data={trendChartData}>
-                          <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                          <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                           <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                           <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                          <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                          <AppleChartTooltip />
                           <Bar dataKey="total_volume" fill="#f59e0b" radius={[6, 6, 0, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
@@ -9358,10 +9827,10 @@ function StrengthTrendsSection({
                 <ChartFrame className="h-72">
                   <ResponsiveContainer width="100%" height="100%">
                     <RechartsLineChart data={muscleChartData}>
-                      <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                      <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                       <XAxis dataKey="week" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                       <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                      <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                      <AppleChartTooltip />
                       {selectedGroups.map((group, index) => (
                         <Line key={group} dataKey={group} name={`${group} ${metricLabels[muscleTrendMetric]}`} stroke={lineColors[index % lineColors.length]} strokeWidth={3} dot={false} />
                       ))}
@@ -10741,13 +11210,13 @@ function HistoryPage({
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={recoverySleepArchiveData.slice(-120)}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
                   <YAxis yAxisId="score" domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} width={42} />
                   <YAxis yAxisId="sleep" orientation="right" domain={[0, 10]} stroke="#71717a" tickLine={false} axisLine={false} width={36} />
                   <YAxis yAxisId="heart" hide domain={["dataMin - 5", "dataMax + 5"]} />
                   <YAxis yAxisId="hrv" hide domain={["dataMin - 5", "dataMax + 5"]} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   {recoveryArchiveMetrics.sleepHours ? <Line yAxisId="sleep" dataKey="sleepHours" name="Sleep duration" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls /> : null}
                   {recoveryArchiveMetrics.sleepScore ? <Line yAxisId="score" dataKey="sleepScore" name="Sleep quality" stroke="#a78bfa" strokeWidth={2} dot={false} connectNulls /> : null}
                   {recoveryArchiveMetrics.recoveryScore ? <Line yAxisId="score" dataKey="recoveryScore" name="Recovery readiness" stroke="#34d399" strokeWidth={3} dot={false} connectNulls /> : null}
@@ -10758,9 +11227,7 @@ function HistoryPage({
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
-              Sleep/recovery history unavailable until wearable data syncs.
-            </div>
+            <ChartUnavailableState title="Sleep/recovery history unavailable" description="Wearable, sleep, or recovery rows need to sync before this timeline can draw." />
           )}
           <div className="grid gap-3 md:grid-cols-4">
             {[
@@ -10769,28 +11236,21 @@ function HistoryPage({
               ["Trend direction", recoveryTrendDirection, "Recent recovery slope"],
               ["History rows", `${recoveryArchiveExportRows.length}`, "Rows included in section export"],
             ].map(([label, value, detail]) => (
-              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-                <p className="mt-1 text-lg font-semibold text-white">{value}</p>
-                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
-              </div>
+              <ArchiveStatCard key={label} label={label} value={value} detail={detail} />
             ))}
           </div>
-          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
-                <p className="mt-1 text-sm font-semibold text-white">Recovery, sleep, wearable, and sickness-warning rows</p>
+          <HistoryDisclosure title="Recovery, sleep, wearable, and sickness-warning rows" description="Expandable raw rows behind the recovery chart.">
+            {recoverySleepArchiveData.length || safeWearableMetrics.length || safeSleepEntries.length || safeRecoveryTrend.length ? (
+              <div className="grid gap-4 xl:grid-cols-2">
+                {recoverySleepArchiveData.length ? <DataTable rows={recoverySleepArchiveData.slice(-20).reverse()} /> : null}
+                {safeWearableMetrics.length ? <DataTable rows={safeWearableMetrics.slice(-10).reverse()} /> : null}
+                {safeSleepEntries.length ? <DataTable rows={safeSleepEntries.slice(-10).reverse()} /> : null}
+                {safeRecoveryTrend.length ? <DataTable rows={safeRecoveryTrend.slice(-10).reverse()} /> : null}
               </div>
-              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
-            </summary>
-            <div className="mt-4 grid gap-4 xl:grid-cols-2">
-              {recoverySleepArchiveData.length ? <DataTable rows={recoverySleepArchiveData.slice(-20).reverse()} /> : <p className="text-sm text-zinc-400">No recovery archive rows yet.</p>}
-              {safeWearableMetrics.length ? <DataTable rows={safeWearableMetrics.slice(-10).reverse()} /> : null}
-              {safeSleepEntries.length ? <DataTable rows={safeSleepEntries.slice(-10).reverse()} /> : null}
-              {safeRecoveryTrend.length ? <DataTable rows={safeRecoveryTrend.slice(-10).reverse()} /> : null}
-            </div>
-          </details>
+            ) : (
+              <EmptyState title="No recovery history yet" description="Wearable, sleep, and recovery archive rows will appear here after sync or check-ins." />
+            )}
+          </HistoryDisclosure>
         </div>
       </Card>
       </TargetSectionErrorBoundary>
@@ -10817,12 +11277,12 @@ function HistoryPage({
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={caloriesBodyArchiveData.slice(-120)}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
                   <YAxis yAxisId="calories" stroke="#71717a" tickLine={false} axisLine={false} width={50} />
                   <YAxis yAxisId="weight" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={44} domain={["dataMin - 2", "dataMax + 2"]} />
                   <YAxis yAxisId="bodyFat" hide domain={["dataMin - 1", "dataMax + 1"]} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Line yAxisId="calories" dataKey="calories7DayAverage" name="7-day calorie intake" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls />
                   <Line yAxisId="calories" dataKey="wearableCaloriesBurned" name="Wearable calories burned" stroke="#34d399" strokeWidth={2} dot={false} connectNulls />
                   <Line yAxisId="calories" dataKey="estimatedMaintenanceCalories" name="Estimated maintenance" stroke="#fbbf24" strokeWidth={2} strokeDasharray="5 5" dot={false} connectNulls />
@@ -10834,9 +11294,7 @@ function HistoryPage({
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
-              Nutrition, bodyweight, and wearable calorie trend data will appear once logs are available.
-            </div>
+            <ChartUnavailableState title="Energy balance history unavailable" description="Nutrition, bodyweight, and wearable calorie trend data will appear once logs are available." />
           )}
           <div className="grid gap-3 md:grid-cols-4">
             {[
@@ -10845,27 +11303,17 @@ function HistoryPage({
               ["Adaptive target", formatAnalyticsNumber(caloriesBodyArchiveData.at(-1)?.adaptiveCalorieTarget, " kcal"), "Saved target trend"],
               ["Export rows", `${caloriesBodyArchiveExportRows.length}`, "Graph plus historical records"],
             ].map(([label, value, detail]) => (
-              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-                <p className="mt-1 text-lg font-semibold text-white">{value}</p>
-                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
-              </div>
+              <ArchiveStatCard key={label} label={label} value={value} detail={detail} />
             ))}
           </div>
-          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
-                <p className="mt-1 text-sm font-semibold text-white">Nutrition, bodyweight, body composition, and target adjustment rows</p>
-              </div>
-              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
-            </summary>
-            <div className="mt-4 space-y-4">
+          <HistoryDisclosure title="Nutrition, bodyweight, body composition, and target adjustment rows" description="Expandable raw rows behind the energy balance chart.">
+            <div className="space-y-4">
               {excludeNutritionError ? <p className="rounded-lg border border-red-300/20 bg-red-300/10 px-3 py-2 text-sm text-red-100">{excludeNutritionError}</p> : null}
-              {safeNutritionHistory.length ? <DailyNutritionHistoryTable rows={safeNutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} /> : <p className="text-sm text-zinc-400">No nutrition history yet.</p>}
+              {safeNutritionHistory.length ? <DailyNutritionHistoryTable rows={safeNutritionHistory.slice().reverse()} excludingDate={excludingNutritionDate} onExcludeDay={handleExcludeNutritionDay} /> : <EmptyState title="No nutrition history yet" description="Daily nutrition summaries will appear after food logs are saved." />}
               {safeBodyMetrics.length ? <DataTable rows={safeBodyMetrics.slice(-20).reverse()} /> : null}
+              {!safeBodyMetrics.length ? <EmptyState title="No bodyweight history yet" description="Bodyweight and composition rows will appear after smart scale sync or imports." /> : null}
             </div>
-          </details>
+          </HistoryDisclosure>
         </div>
       </Card>
       </TargetSectionErrorBoundary>
@@ -10892,12 +11340,12 @@ function HistoryPage({
             <ChartFrame className="h-[360px]">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={trainingArchiveData.slice(-120)}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} minTickGap={22} />
                   <YAxis yAxisId="volume" stroke="#71717a" tickLine={false} axisLine={false} width={54} />
                   <YAxis yAxisId="workload" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={42} />
                   <YAxis yAxisId="pace" hide />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Line yAxisId="volume" dataKey="totalVolume" name="Total training volume" stroke="var(--accent-primary)" strokeWidth={3} dot={false} connectNulls />
                   <Line yAxisId="workload" dataKey="hardSets" name="Hard sets" stroke="#f59e0b" strokeWidth={2} dot={false} connectNulls />
                   <Line yAxisId="workload" dataKey="runningMileage" name="Running mileage" stroke="#60a5fa" strokeWidth={2} dot={false} connectNulls />
@@ -10908,9 +11356,7 @@ function HistoryPage({
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <div className="rounded-lg border border-dashed border-white/10 bg-white/[0.025] p-6 text-sm text-zinc-400">
-              Training performance graphs will appear after Hevy/manual/Strava history is available.
-            </div>
+            <ChartUnavailableState title="Training performance history unavailable" description="Training performance graphs will appear after Hevy, manual, or Strava history is available." />
           )}
           <div className="grid gap-3 md:grid-cols-4">
             {[
@@ -10919,33 +11365,26 @@ function HistoryPage({
               ["Overreaching risk", trainingArchiveData.at(-1)?.overreachingRisk ?? "learning", "Fatigue vs workload context"],
               ["Performance slope", formatAnalyticsNumber(trainingArchiveData.at(-1)?.strengthTrendScore), "Selected strength trend"],
             ].map(([label, value, detail]) => (
-              <div key={label} className="rounded-lg border border-white/10 bg-white/[0.035] p-3">
-                <p className="text-xs uppercase tracking-[0.12em] text-zinc-500">{label}</p>
-                <p className="mt-1 text-lg font-semibold capitalize text-white">{value}</p>
-                <p className="mt-1 text-xs text-zinc-500">{detail}</p>
-              </div>
+              <ArchiveStatCard key={label} label={label} value={value} detail={detail} />
             ))}
           </div>
-          <details className="group rounded-lg border border-white/10 bg-white/[0.025] p-4">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">History</p>
-                <p className="mt-1 text-sm font-semibold text-white">Workouts, PR trend, muscle coverage, and workload rows</p>
+          <HistoryDisclosure title="Workouts, PR trend, muscle coverage, and workload rows" description="Expandable raw rows behind the training performance chart.">
+            {trainingArchiveData.length || safeWorkoutHistory.length || muscleCoverageItems.length || strengthHistoryData.length ? (
+              <div className="grid gap-4 xl:grid-cols-2">
+                {trainingArchiveData.length ? <DataTable rows={trainingArchiveData.slice(-20).reverse()} /> : null}
+                {safeWorkoutHistory.length ? <DataTable rows={safeWorkoutHistory.slice(-10).map((workout) => ({ date: workout.date, workout_type: workout.workout_type, classification: workout.classification, total_sets: workout.total_sets, total_volume: workout.total_volume, duration_minutes: workout.duration_minutes, source: workout.source })).reverse()} /> : null}
+                {muscleCoverageItems.length ? <DataTable rows={muscleCoverageItems} /> : null}
+                {strengthHistoryData.length ? <DataTable rows={strengthHistoryData.slice(-20).reverse()} /> : null}
               </div>
-              <ChevronDown className="h-4 w-4 shrink-0 text-zinc-400 transition group-open:rotate-180" />
-            </summary>
-            <div className="mt-4 grid gap-4 xl:grid-cols-2">
-              {trainingArchiveData.length ? <DataTable rows={trainingArchiveData.slice(-20).reverse()} /> : null}
-              {safeWorkoutHistory.length ? <DataTable rows={safeWorkoutHistory.slice(-10).map((workout) => ({ date: workout.date, workout_type: workout.workout_type, classification: workout.classification, total_sets: workout.total_sets, total_volume: workout.total_volume, duration_minutes: workout.duration_minutes, source: workout.source })).reverse()} /> : null}
-              {muscleCoverageItems.length ? <DataTable rows={muscleCoverageItems} /> : null}
-              {strengthHistoryData.length ? <DataTable rows={strengthHistoryData.slice(-20).reverse()} /> : null}
-            </div>
-          </details>
+            ) : (
+              <EmptyState title="No workout history yet" description="Workout, strength, and muscle coverage archive rows will appear after training logs are saved or synced." />
+            )}
+          </HistoryDisclosure>
         </div>
       </Card>
       </TargetSectionErrorBoundary>
 
-      <details className="group order-[80] rounded-lg border border-white/10 bg-zinc-950/70 p-5 shadow-2xl shadow-black/20 backdrop-blur">
+      <details className="group order-[80] apple-health-card border border-white/10 bg-white/[0.05] p-5">
         <summary className="flex cursor-pointer list-none items-center justify-between gap-3">
           <div>
             <p className="accent-text mb-1 text-xs font-semibold uppercase tracking-[0.18em]">Management</p>
@@ -11457,10 +11896,10 @@ function HistoryPage({
             <ChartFrame className="mt-4 h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={optimizationMacroDaily}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis domain={[0, 100]} stroke="#71717a" tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Line dataKey="score" name="Adherence score" stroke="var(--accent-primary)" strokeWidth={3} dot={false} />
                 </RechartsLineChart>
               </ResponsiveContainer>
@@ -11498,14 +11937,14 @@ function HistoryPage({
               <ChartFrame className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
                   <RechartsLineChart data={caloriesBodyTrend}>
-                    <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                    <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                     <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                     <YAxis yAxisId="calories" stroke="#71717a" tickLine={false} axisLine={false} width={48} />
                     <YAxis yAxisId="weight" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} width={44} domain={["dataMin - 2", "dataMax + 2"]} />
                     {hasBodyFatTrend ? (
                       <YAxis yAxisId="bodyFat" orientation="right" hide domain={["dataMin - 1", "dataMax + 1"]} />
                     ) : null}
-                    <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                    <AppleChartTooltip />
                     <Line yAxisId="calories" dataKey="calories" name="Daily calories" stroke="rgba(96,165,250,0.35)" strokeWidth={1.5} dot={false} connectNulls />
                     <Line yAxisId="calories" dataKey="calories7DayAverage" name="7-day avg calories" stroke="#60a5fa" strokeWidth={3} dot={false} connectNulls />
                     <Line yAxisId="calories" dataKey="targetCalories" name="Calorie target" stroke="var(--accent-primary)" strokeWidth={2} strokeDasharray="4 4" dot={false} connectNulls />
@@ -11532,9 +11971,7 @@ function HistoryPage({
               </div>
               </>
             ) : (
-              <p className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] px-4 py-3 text-sm text-zinc-400">
-                Nutrition charts will appear once food entries are saved.
-              </p>
+              <ChartUnavailableState title="No nutrition chart yet" description="Nutrition charts will appear once food entries are saved." />
             )}
             <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.035]">
               <button
@@ -11574,16 +12011,16 @@ function HistoryPage({
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={safeBodyMetrics}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} domain={["dataMin - 1", "dataMax + 1"]} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Area dataKey="bodyweight" stroke="#60a5fa" fill="#60a5fa" fillOpacity={0.18} strokeWidth={3} />
                 </AreaChart>
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <EmptyState title="Enter your first bodyweight entry" description="Bodyweight history will render here." action="Open Weight" onAction={() => undefined} />
+            <EmptyState title="No bodyweight history yet" description="Bodyweight history will render here after smart scale sync, import, or saved measurements." />
           )}
         </Card>
         <Card>
@@ -11592,16 +12029,16 @@ function HistoryPage({
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={safeRecoveryTrend}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Line dataKey="recovery_score" stroke="#34d399" strokeWidth={3} dot={false} />
                 </RechartsLineChart>
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <EmptyState title="No recovery check-in yet" description="Recovery charts need saved check-ins." action="Open Recovery" onAction={() => undefined} />
+            <EmptyState title="No recovery history yet" description="Recovery charts need wearable sync or saved recovery check-ins." />
           )}
         </Card>
         <Card>
@@ -11610,16 +12047,16 @@ function HistoryPage({
             <ChartFrame className="h-72">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={safeTrainingVolume}>
-                  <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                  <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                   <XAxis dataKey="date" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                   <YAxis stroke="#71717a" tickLine={false} axisLine={false} />
-                  <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                  <AppleChartTooltip />
                   <Bar dataKey="volume" fill="#f59e0b" radius={[6, 6, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             </ChartFrame>
           ) : (
-            <EmptyState title="No strength volume yet" description="Strength entries with sets, reps, and weight will populate this chart." action="Open Training" onAction={() => undefined} />
+            <EmptyState title="No strength volume yet" description="Strength entries with sets, reps, and weight will populate this chart." />
           )}
         </Card>
         <Card>
@@ -11632,11 +12069,11 @@ function HistoryPage({
               <ChartFrame className="h-72">
                 <ResponsiveContainer width="100%" height="100%">
                   <RechartsLineChart data={safeTrainingSummaryItems}>
-                    <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
+                    <CartesianGrid stroke="rgba(255,255,255,0.07)" vertical={false} strokeDasharray="3 8" />
                     <XAxis dataKey="period_start" tickFormatter={compactDate} stroke="#71717a" tickLine={false} axisLine={false} />
                     <YAxis yAxisId="volume" stroke="#71717a" tickLine={false} axisLine={false} />
                     <YAxis yAxisId="workouts" orientation="right" stroke="#71717a" tickLine={false} axisLine={false} />
-                    <Tooltip contentStyle={{ background: "#09090b", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 8 }} />
+                    <AppleChartTooltip />
                     <Line yAxisId="volume" dataKey="total_volume" name="Volume" stroke="var(--accent-primary)" strokeWidth={3} dot={false} />
                     <Line yAxisId="workouts" dataKey="workout_count" name="Workouts" stroke="#60a5fa" strokeWidth={2} dot={false} />
                   </RechartsLineChart>
@@ -11657,10 +12094,10 @@ function HistoryPage({
               ) : null}
             </div>
           ) : (
-            <div className="rounded-lg border border-dashed border-white/15 bg-white/[0.03] p-6">
-              <p className="font-medium text-white">No historical summaries yet</p>
-              <p className="mt-2 text-sm text-zinc-400">{trainingSummary?.message || "Run training history consolidation after import to populate long-term graphs without loading old raw sets."}</p>
-            </div>
+            <ChartUnavailableState
+              title="No historical summaries yet"
+              description={trainingSummary?.message || "Run training history consolidation after import to populate long-term graphs without loading old raw sets."}
+            />
           )}
         </Card>
       </div>
@@ -14122,28 +14559,56 @@ function SettingsPage({
   );
 }
 
+function formatHistoryCell(value: unknown) {
+  if (value === null || value === undefined || value === "") return "—";
+  if (typeof value === "boolean") return value ? "Yes" : "No";
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "—";
+    return Math.abs(value) >= 1000 ? value.toLocaleString() : String(value);
+  }
+  if (Array.isArray(value)) return value.length ? `${value.length} item${value.length === 1 ? "" : "s"}` : "—";
+  if (typeof value === "object") {
+    try {
+      const text = JSON.stringify(value);
+      return text.length > 90 ? `${text.slice(0, 87)}...` : text;
+    } catch {
+      return "Object";
+    }
+  }
+  const text = String(value);
+  return text.length > 140 ? `${text.slice(0, 137)}...` : text;
+}
+
 function DataTable({ rows }: Readonly<{ rows: Array<Record<string, unknown>> }>) {
   const columns = Object.keys(rows[0] ?? {});
+  if (!rows.length || !columns.length) {
+    return <EmptyState title="No rows yet" description="History rows will appear here once this dataset has saved records." />;
+  }
   return (
-    <div className="min-w-0 overflow-x-auto rounded-lg border border-white/10">
-      <table className="min-w-full divide-y divide-white/10 text-sm">
-        <thead className="sticky top-0 bg-white/[0.04] text-left text-zinc-400">
+    <div className="min-w-0 overflow-x-auto rounded-[22px] border border-white/10 bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <table className="min-w-full border-separate border-spacing-0 text-sm">
+        <thead className="sticky top-0 z-10 bg-[#111217]/95 text-left text-zinc-400 backdrop-blur">
           <tr>
             {columns.map((column) => (
-              <th key={column} className="px-3 py-2 font-medium">
+              <th key={column} className="border-b border-white/10 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em]">
                 {column.replaceAll("_", " ")}
               </th>
             ))}
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/10">
+        <tbody>
           {rows.map((row, index) => (
-            <tr key={index} className="text-zinc-200">
-              {columns.map((column) => (
-                <td key={column} className="px-3 py-2">
-                  {row[column] === null || row[column] === undefined || row[column] === "" ? "—" : String(row[column])}
-                </td>
-              ))}
+            <tr key={index} className="text-zinc-200 transition-colors odd:bg-white/[0.018] hover:bg-white/[0.045]">
+              {columns.map((column) => {
+                const displayValue = formatHistoryCell(row[column]);
+                return (
+                  <td key={column} className="max-w-[18rem] border-b border-white/[0.055] px-4 py-3 align-top text-sm leading-6">
+                    <span title={displayValue.length > 80 ? displayValue : undefined} className="block truncate">
+                      {displayValue}
+                    </span>
+                  </td>
+                );
+              })}
             </tr>
           ))}
         </tbody>
@@ -14162,40 +14627,48 @@ function DailyNutritionHistoryTable({
   onExcludeDay: (date: string) => void;
 }>) {
   const columns = Object.keys(rows[0] ?? {});
+  if (!rows.length || !columns.length) {
+    return <EmptyState title="No nutrition history yet" description="Daily nutrition summaries will appear here once food logs are saved." />;
+  }
   return (
-    <div className="min-w-0 overflow-x-auto rounded-lg border border-white/10">
-      <table className="min-w-full divide-y divide-white/10 text-sm">
-        <thead className="sticky top-0 bg-white/[0.04] text-left text-zinc-400">
+    <div className="min-w-0 overflow-x-auto rounded-[22px] border border-white/10 bg-white/[0.025] shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]">
+      <table className="min-w-full border-separate border-spacing-0 text-sm">
+        <thead className="sticky top-0 z-10 bg-[#111217]/95 text-left text-zinc-400 backdrop-blur">
           <tr>
             {columns.map((column) => (
-              <th key={column} className="px-3 py-2 font-medium">
+              <th key={column} className="border-b border-white/10 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em]">
                 {column.replaceAll("_", " ")}
               </th>
             ))}
-            <th className="px-3 py-2 font-medium">action</th>
+            <th className="border-b border-white/10 px-4 py-3 text-xs font-semibold uppercase tracking-[0.12em]">action</th>
           </tr>
         </thead>
-        <tbody className="divide-y divide-white/10">
+        <tbody>
           {rows.map((row, index) => {
             const rowDate = String(row.date || "").slice(0, 10);
             return (
-              <tr key={`${rowDate}-${index}`} className="text-zinc-200">
+              <tr key={`${rowDate}-${index}`} className="text-zinc-200 transition-colors odd:bg-white/[0.018] hover:bg-white/[0.045]">
                 {columns.map((column) => {
                   const value = (row as unknown as Record<string, unknown>)[column];
+                  const displayValue = formatHistoryCell(value);
                   return (
-                    <td key={column} className="px-3 py-2">
-                      {value === null || value === undefined || value === "" ? "—" : String(value)}
+                    <td key={column} className="max-w-[18rem] border-b border-white/[0.055] px-4 py-3 align-top text-sm leading-6">
+                      <span title={displayValue.length > 80 ? displayValue : undefined} className="block truncate">
+                        {displayValue}
+                      </span>
                     </td>
                   );
                 })}
-                <td className="px-3 py-2">
+                <td className="border-b border-white/[0.055] px-4 py-3 align-top">
                   <button
                     type="button"
                     onClick={() => onExcludeDay(rowDate)}
                     disabled={!rowDate || excludingDate === rowDate}
-                    className="rounded-lg border border-red-300/20 px-2.5 py-1 text-xs font-semibold text-red-100 transition hover:bg-red-300/10 disabled:cursor-not-allowed disabled:opacity-50"
+                    title="Exclude this day from nutrition history summaries"
+                    className="inline-flex items-center gap-1.5 rounded-full border border-red-300/20 bg-red-300/[0.045] px-3 py-1.5 text-xs font-semibold text-red-100 transition hover:bg-red-300/12 disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {excludingDate === rowDate ? "Excluding..." : "Exclude"}
+                    <Trash2 className="h-3.5 w-3.5" />
+                    {excludingDate === rowDate ? "Excluding..." : "Exclude day"}
                   </button>
                 </td>
               </tr>
@@ -15175,6 +15648,7 @@ function HomeContent() {
           refreshDates.add(job.date);
           shouldRefreshShortcuts = shouldRefreshShortcuts || Boolean(job.refreshShortcuts);
           setMessage(`Added ${job.label}.`);
+          toast.success("Food added", { description: job.label });
         } catch (error) {
           const messageText = error instanceof Error ? error.message : `Could not log ${job.label}.`;
           rollbackOptimisticFoodEntry(job.optimisticEntry);
@@ -15185,6 +15659,7 @@ function HomeContent() {
             error: messageText,
           }));
           setApiError(messageText);
+          toast.error("Could not log food", { description: messageText });
         } finally {
           setQuickFoodPendingCount((count) => Math.max(0, count - 1));
         }
@@ -15264,10 +15739,12 @@ function HomeContent() {
         console.warn("[dashboard] refresh after food update failed", error);
       });
       setMessage(success);
+      toast.success(success);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Food update failed.";
       onFailure?.(message);
       setApiError(message);
+      toast.error("Food update failed", { description: message });
     }
   }, [forms.nutrition.date, refreshDashboardCoreOnly, refreshTodayFoodOnly]);
 
@@ -15333,6 +15810,7 @@ function HomeContent() {
         refreshWorkoutMarkersOnly().catch(() => undefined),
         apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS).then(setTrainingReadiness).catch(() => undefined),
       ]);
+      toast.success("Gym marker placed", { description: "Pre/post-workout timing will follow the draggable marker." });
     }, "Workout marker saved.");
   }, [forms.nutrition.date, forms.workoutMarker, refreshWorkoutMarkersOnly, submitWithoutRefresh, workoutMarkers]);
 
@@ -15374,7 +15852,9 @@ function HomeContent() {
       refreshDashboardCoreOnly(date).catch(() => undefined),
       apiGet<TrainingReadinessSignals>("/api/wearables/training-readiness", SETTINGS_API_TIMEOUT_MS).then(setTrainingReadiness).catch(() => undefined),
     ]);
-    setMessage(result.message || "Food timeline order saved.");
+    const savedMessage = result.message || "Food timeline order saved.";
+    setMessage(savedMessage);
+    toast.success("Meal order saved", { description: savedMessage });
   }, [refreshDashboardCoreOnly, refreshTodayFoodOnly, refreshWorkoutMarkersOnly]);
 
   const submitWearableMetric = useCallback((event: FormEvent) => {
@@ -16007,6 +16487,7 @@ function HomeContent() {
               source: "manual_serving_scale",
             });
             await refreshFoodShortcutsOnly();
+            toast.success("Preset added", { description: servingForm.food_name.trim() });
           }, "Serving-scaled food saved as shortcut.")
         }
         aiText={aiText}
@@ -16259,12 +16740,14 @@ function HomeContent() {
           submitWithoutRefresh(event, async () => {
             await saveParsedShortcut();
             await refreshFoodShortcutsOnly();
+            toast.success("Preset added", { description: parsedFoods[0]?.food_name || "AI food shortcut" });
           }, "Saved AI parse as a food shortcut.")
         }
         onSaveMealTemplate={(event) =>
           submitWithoutRefresh(event, async () => {
             await saveParsedMealTemplate();
             await refreshFoodShortcutsOnly();
+            toast.success("Meal saved", { description: parsedFoods[0]?.food_name || "AI meal template" });
           }, "Saved AI parse as a meal template.")
         }
         onSaveAndLogToday={(event) =>
@@ -16311,6 +16794,7 @@ function HomeContent() {
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend("/api/nutrition/shortcuts", "POST", shortcutMutationPayload(shortcut));
             await refreshFoodShortcutsOnly();
+            toast.success("Preset added", { description: shortcut.shortcut_name });
           }, "Preset saved.")
         }
         onCreateAndLogPreset={(shortcut) => {
@@ -16391,12 +16875,14 @@ function HomeContent() {
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiSend(`/api/nutrition/shortcuts/${shortcut.shortcut_id}`, "PUT", shortcutMutationPayload(shortcut));
             await refreshFoodShortcutsOnly();
+            toast.success("Preset updated", { description: shortcut.shortcut_name });
           }, "Shortcut updated.")
         }
         onDeleteShortcut={(shortcutId) =>
           submitWithoutRefresh({ preventDefault: () => undefined } as FormEvent, async () => {
             await apiDelete(`/api/nutrition/shortcuts/${shortcutId}`);
             await refreshFoodShortcutsOnly();
+            toast.success("Preset deleted");
           }, "Shortcut deleted.")
         }
         onLogMealTemplate={(template) => {
@@ -17043,11 +17529,12 @@ function HomeContent() {
 
   return (
     <main data-accent-theme={accentTheme} className="h-screen overflow-hidden bg-[#07080b] text-zinc-100">
+      <Toaster position="top-center" richColors closeButton />
       <div className="accent-page-glow pointer-events-none fixed inset-0" />
       {!initialBootComplete && (loading || startupTransitioning) ? <StartupLoadingScreen dissolving={startupTransitioning} /> : null}
       <div className={cx("startup-app-shell relative flex h-screen overflow-hidden", (startupTransitioning || initialBootComplete) && "startup-app-shell-ready")}>
-        <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-black/35 p-5 backdrop-blur-xl lg:block">
-          <div className="mb-8 flex items-center gap-3">
+        <aside className="sticky top-0 hidden h-screen w-72 shrink-0 border-r border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.055),rgba(255,255,255,0.018)_42%,rgba(0,0,0,0.2))] p-5 shadow-[18px_0_60px_-52px_rgba(0,0,0,0.9)] backdrop-blur-2xl lg:block">
+          <div className="mb-8 flex items-center gap-3 rounded-[28px] border border-white/10 bg-white/[0.035] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]">
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
               src="/POSLOGO.png"
@@ -17058,14 +17545,14 @@ function HomeContent() {
             />
             <div>
               <p className="font-semibold text-white">Performance OS</p>
-              <p className="text-xs text-zinc-500">Local-first dashboard</p>
+              <p className="text-xs text-zinc-500">Health intelligence</p>
             </div>
           </div>
-          <nav className="relative">
-            <span
+          <nav className="relative rounded-[28px] border border-white/10 bg-black/20 p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_55px_-48px_rgba(0,0,0,0.9)]">
+            <motion.span
               aria-hidden="true"
               className={cx(
-                "accent-active pointer-events-none absolute left-0 right-0 top-0 h-10 rounded-lg transition-[transform,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none",
+                "accent-active pointer-events-none absolute left-1.5 right-1.5 top-1.5 h-10 rounded-[20px] transition-[transform,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)] will-change-transform motion-reduce:transition-none",
                 primaryNavActive ? "opacity-100" : "opacity-0",
               )}
               style={{ transform: `translate3d(0, ${sidebarHighlightOffset}px, 0)` }}
@@ -17073,40 +17560,51 @@ function HomeContent() {
             <div className="space-y-2">
               {primaryNavigation.map((item) => {
                 const Icon = item.icon;
+                const isActive = activePage === item.id;
                 return (
-                  <button
+                  <motion.button
                     key={item.id}
                     onClick={() => setActivePage(item.id)}
                     data-testid={`nav-${item.id}`}
-                    className={cx("relative z-10 flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white")}
+                    aria-current={isActive ? "page" : undefined}
+                    animate={{ scale: isActive ? 1.01 : 1 }}
+                    whileTap={{ scale: 0.985 }}
+                    transition={{ duration: 0.18, ease: "easeOut" }}
+                    className={cx(
+                      "apple-health-tap relative z-10 flex h-10 w-full items-center gap-3 overflow-hidden rounded-[20px] px-3 text-left text-sm font-medium transition-colors",
+                      isActive ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white",
+                    )}
                   >
-                    <Icon className="h-4 w-4" />
-                    {item.label}
-                  </button>
+                    <Icon className={cx("h-4 w-4 shrink-0", isActive ? "text-[#050505]" : "text-zinc-400")} strokeWidth={2.1} />
+                    <span className="min-w-0 truncate">{item.label}</span>
+                  </motion.button>
                 );
               })}
             </div>
           </nav>
           <div className="absolute bottom-5 left-5 right-5 border-t border-white/10 pt-4">
             <p className="px-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-600">Diagnostics</p>
-            <button
+            <motion.button
               onClick={() => setActivePage(debugNavigationItem.id)}
               data-testid={`nav-${debugNavigationItem.id}`}
+              aria-current={activePage === debugNavigationItem.id ? "page" : undefined}
+              whileTap={{ scale: 0.985 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
               className={cx(
-                "mt-3 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-xs transition-colors",
+                "apple-health-tap mt-3 flex h-9 w-full items-center gap-2 rounded-2xl border px-3 text-left text-xs transition-colors",
                 activePage === debugNavigationItem.id
                   ? "border border-amber-300/20 bg-amber-300/10 text-amber-100"
-                  : "text-zinc-500 hover:bg-white/[0.04] hover:text-zinc-300",
+                  : "border-transparent text-zinc-500 hover:border-white/10 hover:bg-white/[0.04] hover:text-zinc-300",
               )}
             >
               <AlertTriangle className="h-3.5 w-3.5" />
               {debugNavigationItem.label}
-            </button>
+            </motion.button>
           </div>
         </aside>
 
         <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <header className="mobile-safe-header z-20 shrink-0 border-b border-white/10 bg-[#07080b]/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-8">
+          <header className="mobile-safe-header z-20 shrink-0 border-b border-white/10 bg-[#07080b]/82 px-4 py-4 shadow-[0_18px_60px_-54px_rgba(0,0,0,0.95)] backdrop-blur-2xl sm:px-6 lg:px-8">
             <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
               <div className="flex min-w-0 items-start gap-3">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -17118,23 +17616,31 @@ function HomeContent() {
                   className={cx("mt-1 h-9 w-9 shrink-0 object-contain drop-shadow-[0_0_10px_rgba(190,242,100,0.18)] transition-opacity duration-300 lg:hidden", initialBootComplete ? "opacity-100" : "opacity-0")}
                 />
                 <div className="min-w-0">
-                  <p className="text-sm text-zinc-500">Performance optimization dashboard</p>
-                  <h1 className="mt-2 text-2xl font-semibold text-white sm:text-3xl">{currentPage.label}</h1>
+                  <p className="text-sm font-medium text-zinc-500">Performance optimization dashboard</p>
+                  <h1 className="mt-2 text-3xl font-semibold tracking-[-0.035em] text-white sm:text-4xl">{currentPage.label}</h1>
                 </div>
               </div>
               <div className="flex items-center gap-3 self-start lg:self-auto">
                 <span className="text-sm text-zinc-500">{headerDateLabel}</span>
-                <button onClick={() => void refreshAll()} className="inline-flex h-10 items-center gap-2 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-sm text-zinc-200">
+                <motion.button
+                  onClick={() => void refreshAll()}
+                  whileTap={{ scale: 0.985 }}
+                  transition={{ duration: 0.18, ease: "easeOut" }}
+                  className="apple-health-tap inline-flex h-10 items-center gap-2 rounded-2xl border border-white/10 bg-white/[0.055] px-3 text-sm font-semibold text-zinc-200 shadow-[0_16px_45px_-38px_rgba(0,0,0,0.9)]"
+                >
                   <RefreshCw className="h-4 w-4" />
                   Refresh
-                </button>
+                </motion.button>
               </div>
             </div>
-            <div ref={mobileNavRef} className="relative mt-4 hidden overflow-x-auto pb-1 sm:block lg:hidden">
+            <div
+              ref={mobileNavRef}
+              className="relative mt-4 hidden overflow-x-auto rounded-[28px] border border-white/10 bg-white/[0.045] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_50px_-44px_rgba(0,0,0,0.9)] [scrollbar-width:none] sm:block lg:hidden [&::-webkit-scrollbar]:hidden"
+            >
               <span
                 aria-hidden="true"
                 className={cx(
-                  "accent-active pointer-events-none absolute rounded-lg transition-[transform,width,height,opacity] duration-200 ease-out",
+                  "accent-active pointer-events-none absolute rounded-[22px] transition-[transform,width,height,opacity] duration-200 ease-out",
                   mobileHighlight.ready ? "opacity-100" : "opacity-0",
                 )}
                 style={{
@@ -17144,19 +17650,32 @@ function HomeContent() {
                 }}
               />
               <div className="flex gap-2">
-                {mobileNavigation.map((item) => (
-                  <button
-                    key={item.id}
-                    ref={(node) => {
-                      mobileItemRefs.current[item.id] = node;
-                    }}
-                    onClick={() => setActivePage(item.id)}
-                    data-testid={`nav-${item.id}-mobile`}
-                    className={cx("relative z-10 whitespace-nowrap rounded-lg px-3 py-2 text-sm transition-colors", activePage === item.id ? "text-[#050505]" : "bg-white/[0.06] text-zinc-300")}
-                  >
-                    {item.label}
-                  </button>
-                ))}
+                {mobileNavigation.map((item) => {
+                  const Icon = item.icon;
+                  const isActive = activePage === item.id;
+                  return (
+                    <motion.button
+                      key={item.id}
+                      ref={(node) => {
+                        mobileItemRefs.current[item.id] = node;
+                      }}
+                      onClick={() => setActivePage(item.id)}
+                      data-testid={`nav-${item.id}-mobile`}
+                      aria-current={isActive ? "page" : undefined}
+                      whileTap={{ scale: 0.985 }}
+                      transition={{ duration: 0.18, ease: "easeOut" }}
+                      className={cx(
+                        "apple-health-tap relative z-10 inline-flex whitespace-nowrap rounded-[22px] px-3 py-2 text-sm font-medium transition-colors",
+                        isActive ? "text-[#050505]" : "bg-white/[0.045] text-zinc-300 hover:bg-white/[0.07] hover:text-white",
+                      )}
+                    >
+                      <span className="flex items-center gap-2">
+                        <Icon className="h-4 w-4 shrink-0" strokeWidth={2.1} />
+                        {item.label}
+                      </span>
+                    </motion.button>
+                  );
+                })}
               </div>
             </div>
           </header>
@@ -17264,19 +17783,29 @@ function HomeContent() {
                   parsedFoods: parsedFoods.length,
                 }}
               >
-                {pageContent[activePage]}
+                <motion.div
+                  key={activePage}
+                  initial={{ opacity: 0, y: 8, filter: "blur(6px)" }}
+                  animate={{ opacity: 1, y: 0, filter: "blur(0px)" }}
+                  transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+                >
+                  {pageContent[activePage]}
+                </motion.div>
               </TargetSectionErrorBoundary>
             )}
               </>
             )}
           </div>
         </section>
-        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#07080b]/85 px-2 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 shadow-2xl shadow-black/40 backdrop-blur-xl sm:hidden" aria-label="Primary navigation">
-          <div ref={bottomNavRef} className="relative overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <nav className="fixed inset-x-0 bottom-0 z-30 border-t border-white/10 bg-[#07080b]/82 px-3 pb-[calc(0.5rem+env(safe-area-inset-bottom))] pt-2 shadow-2xl shadow-black/40 backdrop-blur-2xl sm:hidden" aria-label="Primary navigation">
+          <div
+            ref={bottomNavRef}
+            className="relative overflow-x-auto rounded-[28px] border border-white/10 bg-white/[0.045] p-1.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06),0_18px_50px_-42px_rgba(0,0,0,0.95)] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          >
             <span
               aria-hidden="true"
               className={cx(
-                "accent-active pointer-events-none absolute rounded-lg transition-[transform,width,height,opacity] duration-200 ease-out will-change-transform motion-reduce:transition-none",
+                "accent-active pointer-events-none absolute rounded-[22px] transition-[transform,width,height,opacity] duration-200 ease-out will-change-transform motion-reduce:transition-none",
                 bottomHighlight.ready ? "opacity-100" : "opacity-0",
               )}
               style={{
@@ -17288,8 +17817,9 @@ function HomeContent() {
             <div className="flex min-w-max gap-1">
               {mobileBottomNavigation.map((item) => {
                 const Icon = item.icon;
+                const isActive = activePage === item.id;
                 return (
-                  <button
+                  <motion.button
                     key={item.id}
                     ref={(node) => {
                       bottomItemRefs.current[item.id] = node;
@@ -17297,14 +17827,17 @@ function HomeContent() {
                     onClick={() => setActivePage(item.id)}
                     data-testid={`nav-${item.id}-bottom`}
                     aria-label={item.label}
+                    aria-current={isActive ? "page" : undefined}
+                    whileTap={{ scale: 0.97 }}
+                    transition={{ duration: 0.18, ease: "easeOut" }}
                     className={cx(
-                      "relative z-10 flex h-14 min-w-[74px] flex-col items-center justify-center gap-1 rounded-lg px-2 text-[10px] font-medium leading-tight transition-colors",
-                      activePage === item.id ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white",
+                      "apple-health-tap relative z-10 flex h-14 min-w-[74px] flex-col items-center justify-center gap-1 rounded-[22px] px-2 text-[10px] font-medium leading-tight transition-colors",
+                      isActive ? "text-[#050505]" : "text-zinc-400 hover:bg-white/[0.06] hover:text-white",
                     )}
                   >
-                    <Icon className="h-4 w-4 shrink-0" />
+                    <Icon className="h-4 w-4 shrink-0" strokeWidth={2.1} />
                     <span className="max-w-[4rem] truncate">{item.label}</span>
-                  </button>
+                  </motion.button>
                 );
               })}
             </div>
