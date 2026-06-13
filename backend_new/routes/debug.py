@@ -94,6 +94,51 @@ def debug_startup(request: Request, full: bool = Query(default=False)) -> dict:
     }
 
 
+@router.get("/api/debug/calorie-engine")
+def debug_calorie_engine() -> dict:
+    """Show whether wearable burn is actually driving the calorie target."""
+    import pandas as pd
+
+    from backend_new.services.recommendation_service import saved_goals, canonical_goals
+    from src.nutrition_targets import estimate_adaptive_maintenance_calories
+
+    def _df(table: str, limit: int) -> pd.DataFrame:
+        rows = fetch_json_rows(table, limit=limit, date_field="date")
+        clean = [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+        return pd.DataFrame(clean) if clean else pd.DataFrame()
+
+    wearable_df = _df("wearable_metrics", 400)
+    nutrition_df = _df("food_logs", 2000)
+    body_df = _df("body_metric_logs", 400)
+    goals = canonical_goals(saved_goals())
+    adaptive = estimate_adaptive_maintenance_calories(
+        goals,
+        nutrition_df=nutrition_df if not nutrition_df.empty else None,
+        body_metrics_df=body_df if not body_df.empty else None,
+        wearable_df=wearable_df if not wearable_df.empty else None,
+    )
+    provider = adaptive["wearable_provider"]
+    connected = bool(provider and provider != "none")
+    included = adaptive["wearable_included_in_target"]
+    return {
+        "fitbit_google_health_connected": connected,
+        "provider": provider,
+        "latest_wearable_row_date": adaptive["last_wearable_sync_date"],
+        "average_wearable_burn": adaptive["wearable_average_burn"],
+        "wearable_days_used": adaptive["wearable_days_used"],
+        "wearable_burn_included_in_target": included,
+        "why": adaptive["reason_for_calorie_change"],
+        "adaptive_maintenance_calories": adaptive["adaptive_maintenance_calories"],
+        "profile_estimated_maintenance": adaptive["profile_estimated_maintenance"],
+        "observed_tdee_from_weight_and_intake": adaptive["observed_tdee_from_weight_and_intake"],
+        "nutrition_days_used": adaptive["nutrition_days_used"],
+        "weigh_in_days_used": adaptive["weigh_in_days_used"],
+        "calorie_engine_confidence": adaptive["calorie_engine_confidence"],
+        "data_sources_used": adaptive["data_sources_used"],
+        "generated_at": utc_now_iso(),
+    }
+
+
 @router.get("/api/debug/openai")
 def debug_openai() -> dict:
     try:

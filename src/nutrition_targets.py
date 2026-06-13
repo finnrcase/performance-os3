@@ -61,6 +61,168 @@ def estimate_maintenance_calories(user_goals: dict) -> float:
     return round(bodyweight * base_multiplier + training_adjustment + cardio_adjustment, -1)
 
 
+KCAL_PER_LB = 3500
+WEARABLE_MIN_DAYS = 10          # valid wearable burn days needed to trust it as a major input
+WEARABLE_STALE_DAYS = 5         # if the latest wearable day is older than this, ignore burn
+OBSERVED_MIN_NUTRITION_DAYS = 10
+OBSERVED_MIN_WEIGH_IN_DAYS = 7
+ADAPTIVE_MAINTENANCE_BAND = 0.25  # clamp blended maintenance within +/-25% of the profile estimate
+
+
+def _wearable_burn_summary(wearable_df: pd.DataFrame | None, days: int = 14) -> dict:
+    """Average daily energy burn from wearable metrics over the recent window.
+
+    Prefers ``total_calories_burned`` (Fitbit/Google Health total daily energy
+    expenditure); falls back to ``calories_burned``. Returns the average, the
+    count of valid days, the latest sync date, the provider, and whether the
+    data is fresh enough to use.
+    """
+    empty = {"average_burn": None, "valid_days": 0, "latest_date": None, "provider": "none", "is_stale": True}
+    if wearable_df is None or len(wearable_df) == 0:
+        return empty
+    df = pd.DataFrame(wearable_df).copy()
+    if "date" not in df.columns:
+        return empty
+    df["_date_ts"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["_date_ts"])
+    if df.empty:
+        return empty
+
+    burn_column = "total_calories_burned" if "total_calories_burned" in df.columns else "calories_burned"
+    if burn_column not in df.columns:
+        return empty
+    df["_burn"] = pd.to_numeric(df[burn_column], errors="coerce")
+    # A valid burn day has a physiologically plausible non-zero total.
+    df = df[df["_burn"].between(800, 8000)]
+    if df.empty:
+        return empty
+
+    # One value per day (max guards against duplicate partial rows).
+    daily = df.groupby(df["_date_ts"].dt.date)["_burn"].max().reset_index()
+    daily["_date_ts"] = pd.to_datetime(daily["_date_ts"])
+    latest = daily["_date_ts"].max()
+    window = daily[daily["_date_ts"] >= latest - pd.Timedelta(days=days - 1)]
+
+    provider = "none"
+    if "provider" in df.columns:
+        providers = [str(p).strip() for p in df["provider"].dropna().astype(str) if str(p).strip()]
+        provider = providers[-1] if providers else "none"
+
+    age_days = (pd.Timestamp.today().normalize() - latest.normalize()).days
+    return {
+        "average_burn": round(float(window["_burn"].mean()), 0) if not window.empty else None,
+        "valid_days": int(len(window)),
+        "latest_date": latest.date().isoformat(),
+        "provider": provider,
+        "is_stale": bool(age_days > WEARABLE_STALE_DAYS),
+    }
+
+
+def _observed_tdee(nutrition_df: pd.DataFrame | None, body_metrics_df: pd.DataFrame | None, days: int = 14) -> dict:
+    """Estimate TDEE from energy balance: mean intake minus stored/released tissue.
+
+    observed_tdee = mean_daily_intake - (weight_change_lb * 3500 / window_days).
+    Requires enough logged nutrition days and weigh-ins to be meaningful.
+    """
+    empty = {"observed_tdee": None, "nutrition_days": 0, "weigh_in_days": 0}
+    daily_nutrition = _clean_daily_nutrition(nutrition_df, days=days)
+    daily_nutrition = daily_nutrition[pd.to_numeric(daily_nutrition.get("calories"), errors="coerce").fillna(0) > 0]
+    weights = _clean_bodyweight_trend(body_metrics_df)
+    if not weights.empty:
+        latest_w = weights["date"].max()
+        weights = weights[weights["date"] >= latest_w - pd.Timedelta(days=days - 1)]
+    nutrition_days = int(len(daily_nutrition))
+    weigh_in_days = int(len(weights))
+    if nutrition_days < OBSERVED_MIN_NUTRITION_DAYS or weigh_in_days < OBSERVED_MIN_WEIGH_IN_DAYS:
+        return {**empty, "nutrition_days": nutrition_days, "weigh_in_days": weigh_in_days}
+
+    mean_intake = float(pd.to_numeric(daily_nutrition["calories"], errors="coerce").mean())
+    ordered = weights.sort_values("date")
+    elapsed_days = max((ordered["date"].max() - ordered["date"].min()).days, 1)
+    weight_change_lb = float(ordered.iloc[-1]["bodyweight"]) - float(ordered.iloc[0]["bodyweight"])
+    daily_energy_change = weight_change_lb * KCAL_PER_LB / elapsed_days
+    observed = mean_intake - daily_energy_change
+    # Guard against implausible values from sparse/noisy data.
+    if not (1000 <= observed <= 6000):
+        return {**empty, "nutrition_days": nutrition_days, "weigh_in_days": weigh_in_days}
+    return {"observed_tdee": round(observed, 0), "nutrition_days": nutrition_days, "weigh_in_days": weigh_in_days}
+
+
+def estimate_adaptive_maintenance_calories(
+    user_goals: dict,
+    nutrition_df: pd.DataFrame | None = None,
+    body_metrics_df: pd.DataFrame | None = None,
+    wearable_df: pd.DataFrame | None = None,
+) -> dict:
+    """Confidence-weighted maintenance estimate blending profile, wearable, and observed TDEE.
+
+    - Profile estimate (bodyweight x activity) is the always-available baseline.
+    - Wearable burn is a major input only with >= 10 valid, fresh days.
+    - Observed TDEE (intake vs weight change) is used with enough nutrition +
+      weigh-in days.
+    - Stale/missing wearable data degrades confidence and falls back.
+    The blended value is clamped within +/-25% of the profile estimate.
+    """
+    profile = float(estimate_maintenance_calories(user_goals))
+    wearable = _wearable_burn_summary(wearable_df)
+    observed = _observed_tdee(nutrition_df, body_metrics_df)
+
+    wearable_usable = bool(
+        wearable["average_burn"] is not None
+        and wearable["valid_days"] >= WEARABLE_MIN_DAYS
+        and not wearable["is_stale"]
+    )
+    observed_usable = observed["observed_tdee"] is not None
+
+    sources = ["profile"]
+    if wearable_usable:
+        sources.append("wearable")
+    if observed_usable:
+        sources.append("observed")
+
+    if wearable_usable and observed_usable:
+        blended = 0.45 * wearable["average_burn"] + 0.45 * observed["observed_tdee"] + 0.10 * profile
+        confidence = "high"
+        reason = "Blended wearable energy burn and observed TDEE from intake/weight change."
+    elif wearable_usable:
+        blended = 0.6 * wearable["average_burn"] + 0.4 * profile
+        confidence = "medium"
+        reason = f"Used wearable burn ({wearable['provider']}) with the profile estimate; not enough nutrition/weigh-in data for observed TDEE."
+    elif observed_usable:
+        blended = 0.65 * observed["observed_tdee"] + 0.35 * profile
+        confidence = "medium"
+        reason = "Used observed TDEE from intake and weight change; wearable burn missing or stale."
+    else:
+        blended = profile
+        confidence = "low"
+        if wearable["average_burn"] is not None and wearable["is_stale"]:
+            reason = "Wearable data is stale and there is not enough nutrition/weigh-in history, so falling back to the profile estimate."
+        else:
+            reason = "Not enough wearable or nutrition/weigh-in data yet, so using the profile (bodyweight x activity) estimate."
+
+    # Keep the blend physiologically tethered to the profile estimate.
+    low = profile * (1 - ADAPTIVE_MAINTENANCE_BAND)
+    high = profile * (1 + ADAPTIVE_MAINTENANCE_BAND)
+    clamped = round(max(low, min(high, blended)), -1)
+
+    return {
+        "adaptive_maintenance_calories": int(clamped),
+        "profile_estimated_maintenance": int(round(profile, -1)),
+        "wearable_average_burn": int(wearable["average_burn"]) if wearable["average_burn"] is not None else None,
+        "observed_tdee_from_weight_and_intake": int(observed["observed_tdee"]) if observed["observed_tdee"] is not None else None,
+        "wearable_days_used": wearable["valid_days"] if wearable_usable else 0,
+        "nutrition_days_used": observed["nutrition_days"],
+        "weigh_in_days_used": observed["weigh_in_days"],
+        "calorie_engine_confidence": confidence,
+        "data_sources_used": sources,
+        "reason_for_calorie_change": reason,
+        "last_wearable_sync_date": wearable["latest_date"],
+        "wearable_provider": wearable["provider"],
+        "wearable_is_stale": wearable["is_stale"],
+        "wearable_included_in_target": wearable_usable,
+    }
+
+
 def _clean_daily_nutrition(nutrition_df: pd.DataFrame | None, days: int = 28) -> pd.DataFrame:
     if nutrition_df is None or nutrition_df.empty:
         return pd.DataFrame(columns=["date", "calories", "protein", "carbs", "fat"])
@@ -249,6 +411,9 @@ def align_macro_calories(target_calories: float, protein_grams: float, fat_grams
     }
 
 
+_WEARABLE_UNSET = object()
+
+
 def calculate_macro_targets(
     user_goals: dict,
     nutrition_df: pd.DataFrame | None = None,
@@ -256,6 +421,7 @@ def calculate_macro_targets(
     recovery_df: pd.DataFrame | None = None,
     body_metrics_df: pd.DataFrame | None = None,
     workload_data: dict | None = None,
+    wearable_df: pd.DataFrame | None = _WEARABLE_UNSET,  # type: ignore[assignment]
 ) -> dict:
     """Calculate conservative calorie and macro targets from saved goals.
 
@@ -268,7 +434,23 @@ def calculate_macro_targets(
     normalized_goal = _normalize_goal_type(goal_type)
     aggressiveness = user_goals.get("aggressiveness", "Conservative")
     bodyweight = float(user_goals.get("current_bodyweight") or 0)
-    maintenance = estimate_maintenance_calories(user_goals)
+    # Load wearable metrics here unless the caller passed an explicit value
+    # (including None to opt out), so every macro-target calculation can use
+    # Fitbit/Google Health energy burn without each call site wiring it through.
+    if wearable_df is _WEARABLE_UNSET:
+        try:
+            from src.wearables import load_wearable_metrics
+
+            wearable_df = load_wearable_metrics()
+        except Exception:
+            wearable_df = None
+    adaptive = estimate_adaptive_maintenance_calories(
+        user_goals,
+        nutrition_df=nutrition_df,
+        body_metrics_df=body_metrics_df,
+        wearable_df=wearable_df,
+    )
+    maintenance = float(adaptive["adaptive_maintenance_calories"]) or estimate_maintenance_calories(user_goals)
 
     surplus_ranges = {
         "Conservative": (150, 225),
@@ -434,6 +616,20 @@ def calculate_macro_targets(
         "target_calories": int(round(target_calories)),
         "maintenance_calories": int(round(maintenance)),
         "calorie_adjustment": int(round(final_calorie_adjustment)),
+        # Adaptive calorie engine: how maintenance was derived and from what data.
+        "adaptive_maintenance_calories": adaptive["adaptive_maintenance_calories"],
+        "profile_estimated_maintenance": adaptive["profile_estimated_maintenance"],
+        "wearable_average_burn": adaptive["wearable_average_burn"],
+        "observed_tdee_from_weight_and_intake": adaptive["observed_tdee_from_weight_and_intake"],
+        "wearable_days_used": adaptive["wearable_days_used"],
+        "nutrition_days_used": adaptive["nutrition_days_used"],
+        "weigh_in_days_used": adaptive["weigh_in_days_used"],
+        "calorie_engine_confidence": adaptive["calorie_engine_confidence"],
+        "data_sources_used": adaptive["data_sources_used"],
+        "reason_for_calorie_change": adaptive["reason_for_calorie_change"],
+        "last_wearable_sync_date": adaptive["last_wearable_sync_date"],
+        "wearable_provider": adaptive["wearable_provider"],
+        "wearable_included_in_target": adaptive["wearable_included_in_target"],
         "protein_grams": int(protein_grams),
         "carb_grams": int(carb_grams),
         "fat_grams": int(fat_grams),

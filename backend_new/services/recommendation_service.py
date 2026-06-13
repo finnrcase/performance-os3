@@ -1,10 +1,30 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from backend_new.db import fetch_latest_document
+import pandas as pd
+
+from backend_new.db import fetch_json_rows, fetch_latest_document
 from backend_new.utils import utc_now_iso
 from src.nutrition_targets import calculate_macro_targets
+
+logger = logging.getLogger(__name__)
+
+
+def _rows_to_df(table: str, limit: int = 400) -> pd.DataFrame:
+    """Load recent JSONB rows from Postgres into a DataFrame for the calorie engine.
+
+    Returns an empty DataFrame on any error so target calculation never breaks
+    on a transient DB issue (the engine then degrades to the profile estimate).
+    """
+    try:
+        rows = fetch_json_rows(table, limit=limit, date_field="date")
+        clean = [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+        return pd.DataFrame(clean) if clean else pd.DataFrame()
+    except Exception:
+        logger.exception("Failed to load %s for the calorie engine.", table)
+        return pd.DataFrame()
 
 
 TARGET_FIELDS = {
@@ -84,7 +104,18 @@ def goal_family(goals: dict[str, Any] | None) -> str:
 
 
 def calculate_targets(goals: dict[str, Any] | None) -> dict[str, Any]:
-    targets = calculate_macro_targets(canonical_goals(goals))
+    # Feed the adaptive calorie engine the production data it needs: wearable
+    # energy burn (Fitbit/Google Health), logged nutrition, and weigh-ins all
+    # live in Postgres JSONB tables, not the local CSVs that src.wearables reads.
+    wearable_df = _rows_to_df("wearable_metrics")
+    nutrition_df = _rows_to_df("food_logs", limit=2000)
+    body_metrics_df = _rows_to_df("body_metric_logs")
+    targets = calculate_macro_targets(
+        canonical_goals(goals),
+        nutrition_df=nutrition_df if not nutrition_df.empty else None,
+        body_metrics_df=body_metrics_df if not body_metrics_df.empty else None,
+        wearable_df=wearable_df if not wearable_df.empty else None,
+    )
     return {**targets, "updated_at": targets.get("updated_at") or utc_now_iso()}
 
 
