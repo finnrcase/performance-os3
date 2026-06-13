@@ -16,6 +16,7 @@ from backend_new.config import app_timezone_name
 from backend_new.utils import app_today_iso, utc_now_iso
 from src.body_metrics import canonical_daily_bodyweights
 from src.analytics.recovery_engine import calculate_recovery_score
+from src.wearables import calculate_wearable_recovery_score
 from src.google_health_dashboard import build_google_health_dashboard_signals
 from src.training_schedule import DEFAULT_RECURRING_SCHEDULE_PROFILE, classify_strength_split, planned_training_for_date, summarize_training_day
 
@@ -1451,7 +1452,7 @@ def _lift_performance_payload(
     }
 
 
-def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict[str, Any]], target_calories: float | int | None = None) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
+def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict[str, Any]], target_calories: float | int | None = None, wearable_rows: list[dict[str, Any]] | None = None) -> tuple[dict[str, Any], dict[str, Any] | None, list[dict[str, Any]]]:
     recovery_df = pd.DataFrame(recovery_rows)
     sleep_df = pd.DataFrame(sleep_rows)
     measured_fields = ("sleep_hours", "sleep_quality", "fatigue", "soreness", "stress", "motivation", "hrv", "resting_hr")
@@ -1497,6 +1498,26 @@ def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict
         latest_recovery = {"recovery_score": _round(score), "classification": "manual", "explanation": "Manual recovery check-in."}
         trend = [{"date": str(row.get("date") or ""), "recovery_score": _round(score), "classification": "manual"} for row in recovery_rows[-14:]]
 
+    # No manual recovery score? Derive one from wearable data (sleep / RHR /
+    # HRV / prior-day load) so a numeric recovery score appears without check-ins.
+    wearable_recovery = None
+    if latest_recovery is None and wearable_rows:
+        try:
+            wearable_recovery = calculate_wearable_recovery_score(pd.DataFrame(wearable_rows))
+        except Exception:
+            wearable_recovery = None
+        if wearable_recovery and wearable_recovery.get("status") == "ok":
+            latest_recovery = {
+                "recovery_score": wearable_recovery["recovery_score"],
+                "classification": wearable_recovery["readiness_status"],
+                "explanation": wearable_recovery["same_day_lift_and_run_recommendation"],
+            }
+            trend = [{
+                "date": str(wearable_recovery.get("latest_wearable_date") or ""),
+                "recovery_score": wearable_recovery["recovery_score"],
+                "classification": wearable_recovery["readiness_status"],
+            }]
+
     sleep_trend = []
     for row in sorted(sleep_rows, key=lambda item: str(item.get("date") or ""))[-14:]:
         hours = _number(row.get("sleep_hours"), 0)
@@ -1520,14 +1541,29 @@ def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict
         for row in sorted([*recovery_rows, *sleep_rows], key=lambda item: str(item.get("date") or ""))[-14:]
         if row.get("resting_hr") not in {None, ""} or row.get("restingHeartRate") not in {None, ""}
     ]
-    connected = bool(recovery_rows or sleep_rows)
+    connected = bool(recovery_rows or sleep_rows or (wearable_recovery and wearable_recovery.get("status") == "ok"))
     latest_score = latest_recovery.get("recovery_score") if latest_recovery else None
     classification = latest_recovery.get("classification") if latest_recovery else "unknown"
-    message = "Recovery data loaded from saved check-ins." if connected else "No recovery or sleep entries yet."
-    data_mode = "measured recovery" if latest_score is not None else "insufficient data" if not connected else "inferred recovery"
+    used_wearable = bool(wearable_recovery and wearable_recovery.get("status") == "ok")
+    if used_wearable:
+        source = "wearable"
+        message = "Recovery score derived from wearable data (sleep, resting HR, HRV)."
+        data_mode = "wearable recovery"
+    elif recovery_rows:
+        source = "manual"
+        message = "Recovery data loaded from saved check-ins."
+        data_mode = "measured recovery"
+    elif sleep_rows:
+        source = "sleep"
+        message = "Recovery inferred from sleep entries."
+        data_mode = "inferred recovery"
+    else:
+        source = "none"
+        message = "Insufficient wearable data — connect a wearable or log a recovery check-in."
+        data_mode = "insufficient data"
     payload = {
         "connected": connected,
-        "source": "manual" if recovery_rows else "sleep" if sleep_rows else "none",
+        "source": source,
         "data_mode": data_mode,
         "latest_score": latest_score,
         "trend": trend,
@@ -1537,6 +1573,7 @@ def _recovery_payload(recovery_rows: list[dict[str, Any]], sleep_rows: list[dict
         "status": "ready" if connected else "missing",
         "classification": classification,
         "message": message,
+        "wearable_readiness": wearable_recovery if used_wearable else None,
         "extra_run_readiness": {
             "status": "insufficient_data" if not connected else "green" if _number(latest_score, 0) >= 70 else "yellow" if _number(latest_score, 0) >= 50 else "red",
             "message": "Recovery looks usable for normal training." if connected and _number(latest_score, 0) >= 70 else "Use recovery page check-ins to guide extra running." if connected else "Log recovery data for run readiness.",
@@ -1855,7 +1892,7 @@ def dashboard_core(date: str | None = Query(default=None)) -> dict[str, Any]:
     training_status = str(training_summary.get("status") or "ok")
     training_available = training_status in {"ok", "not_configured", "not_loaded"}
     target_calories = _number(targets.get("target_calories"), 0)
-    recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows, target_calories)
+    recovery, latest_recovery, recovery_trend = _recovery_payload(recovery_rows, sleep_rows, target_calories, dashboard_wearable_rows)
     try:
         google_health = build_google_health_dashboard_signals(
             wearable_rows=dashboard_wearable_rows,

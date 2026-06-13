@@ -139,6 +139,40 @@ def debug_calorie_engine() -> dict:
     }
 
 
+@router.get("/api/debug/recovery-engine")
+def debug_recovery_engine() -> dict:
+    """Show whether wearable data is producing a recovery score, and why/why not."""
+    import pandas as pd
+
+    from src.wearables import calculate_wearable_recovery_score
+
+    rows = fetch_json_rows("wearable_metrics", limit=400, date_field="date")
+    clean = [row for row in rows if isinstance(row, dict) and "_db_error" not in row]
+    wearable_df = pd.DataFrame(clean) if clean else pd.DataFrame()
+    latest_row = None
+    if clean:
+        latest_row = sorted(clean, key=lambda r: str(r.get("date") or ""))[-1]
+
+    result = calculate_wearable_recovery_score(wearable_df if not wearable_df.empty else None)
+    included = result.get("status") == "ok"
+    return {
+        "wearable_rows_in_db": len(clean),
+        "latest_wearable_row_date": (latest_row or {}).get("date") if latest_row else None,
+        "latest_wearable_row": latest_row,
+        "wearable_included_in_recovery": included,
+        "recovery_score": result.get("recovery_score"),
+        "readiness_status": result.get("readiness_status"),
+        "fields_used": result.get("data_sources_used", []),
+        "inputs": result.get("inputs", {}),
+        "confidence": result.get("confidence"),
+        "why": result.get("message"),
+        "lift_recommendation": result.get("lift_recommendation"),
+        "run_recommendation": result.get("run_recommendation"),
+        "same_day_lift_and_run_recommendation": result.get("same_day_lift_and_run_recommendation"),
+        "generated_at": utc_now_iso(),
+    }
+
+
 @router.get("/api/debug/openai")
 def debug_openai() -> dict:
     try:

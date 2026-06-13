@@ -747,6 +747,215 @@ def calculate_wearable_recovery_signals(wearable_df: pd.DataFrame | None) -> dic
     }
 
 
+def _latest_numeric(daily: pd.DataFrame, column: str):
+    if daily.empty or column not in daily.columns:
+        return None
+    values = pd.to_numeric(daily[column], errors="coerce").dropna()
+    return float(values.iloc[-1]) if not values.empty else None
+
+
+def _baseline_numeric(daily: pd.DataFrame, column: str, *, exclude_last: int = 1, days: int = 14):
+    """Mean of the column over the baseline window, excluding the most recent day(s)."""
+    if daily.empty or column not in daily.columns:
+        return None
+    values = pd.to_numeric(daily[column], errors="coerce").dropna()
+    if len(values) <= exclude_last:
+        return None
+    baseline = values.iloc[:-exclude_last].tail(days)
+    return float(baseline.mean()) if not baseline.empty else None
+
+
+def calculate_wearable_recovery_score(
+    wearable_df: pd.DataFrame | None,
+    training_df: pd.DataFrame | None = None,
+    nutrition_df: pd.DataFrame | None = None,
+) -> dict:
+    """Derive a 0-100 recovery score from wearable data, without manual check-ins.
+
+    Combines sleep duration, sleep efficiency, restorative (deep+REM) sleep,
+    resting-HR deviation from baseline, HRV vs baseline, and prior-day training
+    load. Returns readiness status plus lift/run/same-day recommendations,
+    drivers, confidence and which data sources were used. When no usable
+    wearable signals exist it returns status ``insufficient_wearable_data`` with
+    a null score (never a misleading 0).
+    """
+    daily, diagnostics = _aggregate_daily_metrics(wearable_df)
+    insufficient = {
+        "status": "insufficient_wearable_data",
+        "recovery_score": None,
+        "readiness_status": "gray",
+        "lift_recommendation": "Connect a wearable or log recovery to get a readiness call.",
+        "run_recommendation": "Connect a wearable or log recovery to get a readiness call.",
+        "same_day_lift_and_run_recommendation": "Not enough wearable data to advise on a two-a-day.",
+        "drivers": [],
+        "confidence": "low",
+        "data_sources_used": [],
+        "message": str(diagnostics.get("message") or "No wearable metrics available yet."),
+        "latest_wearable_date": None,
+    }
+    if daily.empty:
+        return insufficient
+
+    sleep_hours = _latest_numeric(daily, "sleep_hours")
+    sleep_efficiency = _latest_numeric(daily, "sleep_efficiency")
+    deep = _latest_numeric(daily, "deep_sleep_minutes") or 0.0
+    rem = _latest_numeric(daily, "rem_sleep_minutes") or 0.0
+    restorative = (deep + rem) if (deep or rem) else None
+    resting_hr = _latest_numeric(daily, "resting_hr")
+    resting_hr_dev = _latest_numeric(daily, "resting_hr_deviation")
+    resting_hr_baseline = _baseline_numeric(daily, "resting_hr")
+    hrv = _latest_numeric(daily, "hrv")
+    hrv_baseline = _baseline_numeric(daily, "hrv")
+    # Prior-day training load: the day before the latest wearable reading.
+    prior_load = None
+    for column in ("cardio_load", "workout_minutes", "active_calories_burned"):
+        prior_load = _latest_numeric(daily.iloc[:-1], column) if len(daily) >= 2 else None
+        if prior_load:
+            break
+
+    components: list[tuple[float, float]] = []  # (sub_score 0-100, weight)
+    drivers: list[dict] = []
+    sources: list[str] = []
+
+    if sleep_hours is not None:
+        sub = max(0.0, min(100.0, sleep_hours / 8.0 * 100.0))
+        components.append((sub, 0.30))
+        sources.append("sleep_duration")
+        if sleep_hours < 6:
+            drivers.append({"name": "Sleep duration", "severity": "high", "detail": f"Only {sleep_hours:.1f}h sleep."})
+        elif sleep_hours < 7:
+            drivers.append({"name": "Sleep duration", "severity": "medium", "detail": f"{sleep_hours:.1f}h sleep is below 7h."})
+
+    if sleep_efficiency is not None:
+        sub = max(0.0, min(100.0, sleep_efficiency))
+        components.append((sub, 0.10))
+        sources.append("sleep_efficiency")
+        if sleep_efficiency < 85:
+            drivers.append({"name": "Sleep efficiency", "severity": "medium", "detail": f"Sleep efficiency {sleep_efficiency:.0f}%."})
+
+    if restorative is not None:
+        # ~180 min of deep+REM is a healthy target for an adult night.
+        sub = max(0.0, min(100.0, restorative / 180.0 * 100.0))
+        components.append((sub, 0.10))
+        sources.append("deep_rem_sleep")
+        if restorative < 90:
+            drivers.append({"name": "Restorative sleep", "severity": "medium", "detail": f"Only {restorative:.0f} min deep+REM."})
+
+    # Resting HR vs baseline: deviation above baseline lowers readiness.
+    deviation = resting_hr_dev
+    if deviation is None and resting_hr is not None and resting_hr_baseline is not None:
+        deviation = resting_hr - resting_hr_baseline
+    if deviation is not None:
+        sub = max(0.0, min(100.0, 90.0 - deviation * 6.0))  # +1 bpm over baseline ~= -6 pts
+        components.append((sub, 0.25))
+        sources.append("resting_hr")
+        if deviation >= 5:
+            drivers.append({"name": "Resting HR", "severity": "high", "detail": f"Resting HR {deviation:.0f} bpm above baseline."})
+        elif deviation >= 3:
+            drivers.append({"name": "Resting HR", "severity": "medium", "detail": f"Resting HR {deviation:.0f} bpm above baseline."})
+    elif resting_hr is not None:
+        # No baseline yet: score off an absolute resting HR band.
+        sub = max(0.0, min(100.0, (75.0 - resting_hr) * 4.0 + 70.0))
+        components.append((sub, 0.20))
+        sources.append("resting_hr")
+
+    # HRV vs baseline: below baseline lowers readiness.
+    if hrv is not None and hrv_baseline:
+        pct = (hrv - hrv_baseline) / hrv_baseline * 100.0
+        sub = max(0.0, min(100.0, 85.0 + pct * 1.5))  # at baseline -> 85; +10% -> 100; -10% -> 70
+        components.append((sub, 0.25))
+        sources.append("hrv")
+        if pct <= -10:
+            drivers.append({"name": "HRV", "severity": "high", "detail": f"HRV {pct:.0f}% below baseline."})
+        elif pct <= -5:
+            drivers.append({"name": "HRV", "severity": "medium", "detail": f"HRV {pct:.0f}% below baseline."})
+    elif hrv is not None:
+        components.append((min(100.0, max(0.0, hrv)), 0.10))
+        sources.append("hrv")
+
+    if not components:
+        return insufficient
+
+    total_weight = sum(weight for _, weight in components)
+    raw_score = sum(sub * weight for sub, weight in components) / total_weight
+
+    # Prior-day training load nudges readiness down after a hard day.
+    load_penalty = 0.0
+    if prior_load:
+        if prior_load >= 90:
+            load_penalty = 8.0
+        elif prior_load >= 60:
+            load_penalty = 4.0
+        if load_penalty:
+            sources.append("prior_day_training_load")
+            drivers.append({"name": "Prior-day load", "severity": "low", "detail": "Yesterday's training load was high."})
+
+    recovery_score = int(round(max(0.0, min(100.0, raw_score - load_penalty))))
+
+    if recovery_score >= 80:
+        readiness = "green"
+        lift = "Full lifting session is supported."
+        run = "Quality run (tempo/intervals) is supported."
+        same_day = "Yes — lift then run today; fuel carbs between sessions."
+    elif recovery_score >= 65:
+        readiness = "yellow"
+        lift = "Lift as planned; cap top-end intensity if it feels hard."
+        run = "Easy / Zone 2 run is supported."
+        same_day = "Yes, but keep the run easy (Zone 2) and prioritize the lift."
+    elif recovery_score >= 50:
+        readiness = "orange"
+        lift = "Lighter or technique-focused lifting session."
+        run = "Short, easy run only — no hard efforts."
+        same_day = "Pick one today — a hard lift or an easy run, not both."
+    else:
+        readiness = "red"
+        lift = "Rest or mobility — skip heavy lifting."
+        run = "Skip running today; prioritize recovery."
+        same_day = "No — recover today rather than training twice."
+
+    present = {"sleep_duration", "resting_hr", "hrv"} & set(sources)
+    baseline_days = len(daily)
+    if len(present) >= 3 and baseline_days >= 7:
+        confidence = "high"
+    elif len(present) >= 2:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    provider = "none"
+    if wearable_df is not None and "provider" in pd.DataFrame(wearable_df).columns:
+        providers = [str(p).strip() for p in pd.DataFrame(wearable_df)["provider"].dropna().astype(str) if str(p).strip()]
+        provider = providers[-1] if providers else "none"
+
+    if not drivers:
+        drivers.append({"name": "Recovery", "severity": "low", "detail": "Wearable recovery markers look stable."})
+
+    return {
+        "status": "ok",
+        "recovery_score": recovery_score,
+        "readiness_status": readiness,
+        "lift_recommendation": lift,
+        "run_recommendation": run,
+        "same_day_lift_and_run_recommendation": same_day,
+        "drivers": drivers,
+        "confidence": confidence,
+        "data_sources_used": sorted(set(sources)),
+        "provider": provider,
+        "latest_wearable_date": str(daily.iloc[-1].get("date", "")) or None,
+        "inputs": {
+            "sleep_hours": _rounded(sleep_hours),
+            "sleep_efficiency": _rounded(sleep_efficiency),
+            "deep_rem_minutes": _rounded(restorative),
+            "resting_hr": _rounded(resting_hr),
+            "resting_hr_deviation": _rounded(deviation),
+            "hrv": _rounded(hrv),
+            "hrv_baseline": _rounded(hrv_baseline),
+            "prior_day_training_load": _rounded(prior_load),
+        },
+        "message": "Recovery score derived from wearable data.",
+    }
+
+
 def _empty_trend_metric() -> dict:
     return {
         "recent_average": None,
